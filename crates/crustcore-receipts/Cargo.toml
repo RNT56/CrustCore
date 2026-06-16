@@ -1,0 +1,12 @@
+[package]
+name = "crustcore-receipts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Tool receipts and MAC/hash chaining for CrustCore (anti-hallucination)."
+
+[dependencies]
+crustcore-types = { workspace = true }

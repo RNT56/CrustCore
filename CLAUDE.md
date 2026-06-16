@@ -9,7 +9,9 @@
 **Project:** CrustCore — a sub-800kB Rust coding-agent *verifier kernel* with
 optional capability packs.
 **Repository:** https://github.com/RNT56/CrustCore
-**Status:** Documentation / pre-Phase-0 bootstrap.
+**Status:** Phase 0 — workspace bootstrapped (compiling scaffold + green
+`cargo xtask verify`); pre-implementation. The trusted-core crates and the nano
+binary build; everything heavy is a documented skeleton with `TODO(Pn)` markers.
 **Authoritative roadmap:** [`ROADMAP.md`](./ROADMAP.md) (the maintainer handoff draft — the
 substance of everything below derives from it).
 
@@ -253,9 +255,12 @@ crustcore/
   .github/ ISSUE_TEMPLATE/  workflows/ (CI incl. nano size gate)
 ```
 
-> The `crates/`, `tests/`, `benches/`, `xtask/` trees are **created in Phase 0**
-> (workspace bootstrap). Until then this repo is documentation-first: the docs
-> define the contract that the code must satisfy.
+> The `crates/`, `tests/`, `benches/`, `xtask/` trees were **created in Phase 0**
+> (workspace bootstrap) and compile today as type-true skeletons. Each crate
+> carries `TODO(Pn)` markers naming the phase that implements it; the docs remain
+> the contract the code must satisfy. Run `cargo xtask verify` for the full gate
+> (fmt, clippy, tests, forbidden-deps, nano size gate) and `cargo xtask
+> size-check` for the budget. The nano binary currently builds at ~296 KiB.
 
 > **`AGENTS.md` is a thin router to this file.** Agents that look for
 > `AGENTS.md` first (e.g. Codex) get pointed straight back here. It is a contract

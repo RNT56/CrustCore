@@ -60,6 +60,14 @@ the §17.1 table calls out the four headline numbers above.) The nano number is
 the only one that is a *release blocker* via invariant 19. The platform of record
 for the hard target is **Linux x86_64** ([`ROADMAP.md` §22](../ROADMAP.md) DoD #1).
 
+**Current measured baseline (Phase 0 scaffold).** The std-only nano binary
+(`cargo xtask size-check`) builds at **~296 KiB stripped** — about **37% of the
+800 KiB budget**. That headroom is deliberate: it is the space the trusted-core
+implementation (event log, receipts, path confinement, sandbox wrapper, worktree,
+verify loop) spends as the `TODO(Pn)` stubs become real. Watch it shrink-or-hold
+on every PR via the gate; a sudden jump means a heavy dependency or a layering
+leak slipped in.
+
 ### 2.1 What counts against the nano budget
 
 The budget is measured on the **stripped release binary** built with the `nano`

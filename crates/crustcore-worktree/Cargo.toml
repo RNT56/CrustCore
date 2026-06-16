@@ -1,0 +1,13 @@
+[package]
+name = "crustcore-worktree"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Throwaway git worktree management for CrustCore tasks."
+
+[dependencies]
+crustcore-types = { workspace = true }
+crustcore-path = { workspace = true }

@@ -1,0 +1,16 @@
+[package]
+name = "crustcore-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Network/provider sidecar for CrustCore (model transport, Telegram, GitHub)."
+
+[dependencies]
+crustcore-types = { workspace = true }
+# TODO(P7): add tokio, a minimal HTTP client, rustls/platform TLS, and provider
+# adapters (OpenAI/Anthropic/OpenRouter/local) here — behind this crate only,
+# never leaking into nano (CLAUDE.md §5.1). Network access is blocked in this
+# scaffold environment, so these are documented, not yet added.

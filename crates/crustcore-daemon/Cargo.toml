@@ -1,0 +1,17 @@
+[package]
+name = "crustcore-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Long-running CrustCore runtime: Telegram/GitHub loops, leases, supervision."
+
+[dependencies]
+crustcore-types = { workspace = true }
+crustcore-kernel = { workspace = true }
+crustcore-net = { workspace = true }
+# TODO(P9/P10): daemon process lifecycle, Telegram runtime channel, GitHub
+# task/PR loop, admin socket, leases/heartbeats/recovery. Builds on the async
+# runtime from crustcore-net.

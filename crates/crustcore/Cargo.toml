@@ -1,0 +1,51 @@
+[package]
+name = "crustcore"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "CrustCore — a sub-800kB Rust coding-agent verifier kernel (nano binary)."
+default-run = "crustcore"
+
+[[bin]]
+name = "crustcore"
+path = "src/main.rs"
+
+[features]
+# `nano` is the trusted harness. The CI size gate builds:
+#   cargo build --profile nano -p crustcore --no-default-features --features nano
+default = ["nano"]
+nano = []
+
+# Capability packs — NOT part of nano. These pull heavy sidecar crates and must
+# never be enabled in the size-gate build (CLAUDE.md §5.1, invariants 19/20).
+net = ["dep:crustcore-net"]
+daemon = ["dep:crustcore-daemon", "net"]
+mcp = ["dep:crustcore-mcp"]
+index = ["dep:crustcore-index"]
+full = ["net", "daemon", "mcp", "index"]
+
+[dependencies]
+# Nano-tier crates (always linked; std-only today). Unreferenced code is removed
+# by LTO so the nano binary stays small.
+crustcore-kernel = { workspace = true }
+crustcore-types = { workspace = true }
+crustcore-cli = { workspace = true }
+crustcore-policy = { workspace = true }
+crustcore-eventlog = { workspace = true }
+crustcore-receipts = { workspace = true }
+crustcore-path = { workspace = true }
+crustcore-secrets = { workspace = true }
+crustcore-runner = { workspace = true }
+crustcore-sandbox = { workspace = true }
+crustcore-worktree = { workspace = true }
+crustcore-backend = { workspace = true }
+
+# Optional capability packs (off in nano).
+crustcore-net = { workspace = true, optional = true }
+crustcore-daemon = { workspace = true, optional = true }
+crustcore-mcp = { workspace = true, optional = true }
+crustcore-index = { workspace = true, optional = true }

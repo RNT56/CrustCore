@@ -59,12 +59,43 @@ general assistant.
 
 ## Status
 
-**Pre-Phase-0 — documentation first.** This repository currently contains the
-complete project contract: vision, invariants, architecture, security model, and
-a phased build plan. The Rust workspace is created in Phase 0. The documentation
-defines the contract that the code must satisfy.
+**Phase 0 — workspace bootstrapped.** The repository contains the complete
+project contract (vision, invariants, architecture, security model, phased build
+plan) **and** a compiling Cargo workspace: the nano binary, the trusted-core
+crates, the sidecar skeletons, the `xtask` task runner, and CI. Every crate is a
+type-true skeleton with `TODO(Pn)` markers pointing at the phase that implements
+it, so the next session can start coding immediately.
 
-See the [roadmap](./ROADMAP.md) for the full plan and the v0.1 definition of done.
+The trusted core is real today:
+
+- `cargo xtask verify` is green — fmt, clippy `-D warnings`, tests, the
+  forbidden-dependency check, and the nano size gate.
+- `crustcore --version` builds in the `nano` profile at **~296 KiB stripped**
+  (37% of the 800 KiB budget).
+- `crustcore selftest` drives one real `Kernel::step` end to end.
+
+See the [roadmap](./ROADMAP.md) for the full plan and the v0.1 definition of
+done, and [Building](#building) below to run it.
+
+## Building
+
+```bash
+# Build and check the whole workspace.
+cargo check --workspace
+
+# The full "is it done?" gate: fmt + clippy + tests + forbidden-deps + size gate.
+cargo xtask verify
+
+# Build the flagship nano binary and print its size vs. budget.
+cargo xtask size-check
+
+# Run it.
+cargo run -p crustcore --no-default-features --features nano -- --version
+```
+
+Requirements: a stable Rust toolchain with `rustfmt` and `clippy` (pinned in
+[`rust-toolchain.toml`](./rust-toolchain.toml)). The workspace is std-only today,
+so it builds offline; heavy dependencies arrive per-phase in the sidecar crates.
 
 ## Where to start
 
@@ -91,7 +122,10 @@ A patch is not done because a model says so; it is done only after verifier evid
 
 ## License
 
-License to be selected before the first release (see [CONTRIBUTING.md](./CONTRIBUTING.md)).
+Licensed under the [Apache License, Version 2.0](./LICENSE). See [`NOTICE`](./NOTICE).
+Unless you explicitly state otherwise, any contribution you intentionally submit
+for inclusion in the work shall be licensed as above, without any additional
+terms or conditions (see [CONTRIBUTING.md](./CONTRIBUTING.md)).
 
 ---
 

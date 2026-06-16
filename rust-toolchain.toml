@@ -1,0 +1,8 @@
+# Pin the toolchain so every contributor and CI runner builds CrustCore the same
+# way. `cargo xtask verify` and the nano size gate assume rustfmt + clippy are
+# present. See CONTRIBUTING.md and docs/nano-size-budget.md.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-unknown-linux-gnu"]
+profile = "minimal"

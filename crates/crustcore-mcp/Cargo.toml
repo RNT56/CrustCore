@@ -1,0 +1,15 @@
+[package]
+name = "crustcore-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "MCP gateway/client/server and code-mode support for CrustCore."
+
+[dependencies]
+crustcore-types = { workspace = true }
+# TODO(P13): add `rmcp` or a custom MCP implementation here (per feature). It
+# must never leak into nano (CLAUDE.md §5.1). A tiny hand-rolled stdio JSON-RPC
+# MCP-lite client for nano (no SDK) is a separate, later option.
