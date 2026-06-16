@@ -82,6 +82,8 @@ time) and require maintainer approval ([`ROADMAP.md` §20.2](../ROADMAP.md),
 [`CLAUDE.md` §7.3](../CLAUDE.md)):
 
 ```text
+CLAUDE.md
+AGENTS.md
 INVARIANTS.md
 THREAT_MODEL.md
 SECURITY.md
@@ -97,8 +99,9 @@ Cargo.toml
 Cargo.lock
 ```
 
-(`CLAUDE.md` itself is also a contract file per
-[`CLAUDE.md` §7.3](../CLAUDE.md).) Rules:
+`CLAUDE.md` (the single source of truth) and `AGENTS.md` (its router) are
+contract files too — [`ROADMAP.md` §20.2](../ROADMAP.md) and
+[`CLAUDE.md` §7.3](../CLAUDE.md) now list the same set. Rules:
 
 - **Never edit these in parallel.** They define what is allowed and what is safe;
   concurrent edits race the trust boundary.

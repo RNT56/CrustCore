@@ -255,7 +255,10 @@ Contains:
 - result redaction/filtering
 ```
 
-Nano may include a tiny stdio JSON-RPC MCP-lite client in the future, but full MCP lives here.
+Nano may include a tiny stdio JSON-RPC MCP-lite client in the future, but full
+MCP lives here. Any such nano client must be hand-rolled: `rmcp`/the full MCP SDK
+remain forbidden in nano (§6.1), so the nano MCP-lite client is a minimal stdio
+JSON-RPC implementation with no SDK dependency.
 
 ### 2.5 `crustcore-index`
 
@@ -310,6 +313,7 @@ Telegram must support:
 /deny <approval_id>
 /pause <task_id>
 /resume <task_id>
+/cancel <task_id>
 /kill <task_id>
 /diff <task_id>
 /logs <task_id>
@@ -324,7 +328,8 @@ Queue/steer semantics:
 ```text
 normal message during a task  -> queue for next safe boundary
 message prefixed with !       -> steer before pending model/tool actions execute
-/cancel or /kill              -> explicit cancellation path
+/cancel <task_id>             -> graceful cancellation at next safe boundary
+/kill <task_id>               -> immediate hard teardown of task/job processes
 approval buttons              -> approve/deny exact nonce-bound operation
 ```
 
@@ -500,6 +505,7 @@ crustcore/
     self-improvement.md
     maintainer-agent.md
   crates/
+    crustcore/               # the nano binary package; `--features nano` => crustcore-nano
     crustcore-kernel/        # tiny sync state machine
     crustcore-types/         # no heavy deps; shared IDs/enums
     crustcore-policy/        # compact risk/capability evaluator
@@ -532,6 +538,13 @@ crustcore/
     release
     verify
 ```
+
+**Naming note:** `crustcore` is the top-level binary package. The flagship
+**`crustcore-nano`** artifact is that package built with `--no-default-features
+--features nano` under the `nano` profile (this is exactly what the CI size gate
+in §17.3 builds with `-p crustcore`). There is no separate `crustcore-nano`
+crate; "nano" is a feature/profile of `crustcore`. The rich-CLI surface is a
+feature of `crustcore` that pulls in `crustcore-cli` outside the nano build.
 
 ### 6.1 Dependency policy by crate
 
@@ -1145,11 +1158,17 @@ Input contract:
   "allowed_roots": ["/sandbox/worktree", "/sandbox/tmp"],
   "forbidden_paths": ["~/.ssh", "~/.config", "/etc", "/var"],
   "network": "deny",
+  "secrets": "none",
   "max_seconds": 1800,
   "max_output_mb": 50,
   "must_return": ["summary", "diff", "tests_run", "commands_run", "risks", "files_changed"]
 }
 ```
+
+`"secrets": "none"` is not optional: external workers never receive secret
+material, secret-bearing env, or credential proxies (invariants 1–3). Git and
+network access inside a worker's sandbox are mediated by the trusted credential
+proxy (§15.3), never by handing the worker a token.
 
 Supervisor validation:
 
@@ -1553,9 +1572,19 @@ crustcore-net:
 crustcore-daemon:
   target <10MB stripped
 
+crustcore-mcp:
+  target <10MB stripped
+
+crustcore-index:
+  target <8MB stripped
+
 crustcore-full:
   target <25MB stripped
 ```
+
+Only `crustcore-nano` carries a hard, CI-gated budget (§17.3); the other tiers
+are targets that the release process tracks but does not block on. The tiers
+here align with the per-tier ranges in §2.
 
 ### 17.2 Hot-path budgets
 
@@ -2188,6 +2217,8 @@ Every PR runs `cargo xtask verify`.
 Serialized changes only:
 
 ```text
+CLAUDE.md
+AGENTS.md
 INVARIANTS.md
 THREAT_MODEL.md
 SECURITY.md

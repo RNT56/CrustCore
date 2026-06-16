@@ -237,7 +237,7 @@ Each threat below names the **asset at risk**, the **mitigation**, and the
 - **Asset:** money, wall-clock, host resources, availability.
 - **Mitigation:** every task/job carries a budget record (wall time, CPU, memory,
   disk, output size, tokens, model cost, subagent count); exhaustion **pauses** the
-  task; concurrency is bounded ([`ROADMAP.md` §1.2.6, §11.5](./ROADMAP.md),
+  task; concurrency is bounded ([`ROADMAP.md` §1.2 NullClaw lesson 6, §17](./ROADMAP.md),
   [`CLAUDE.md` §7.5](./CLAUDE.md)).
 - **Invariants:** **11** (budget limits), **12** (lease/heartbeat/cancel/recovery).
 
