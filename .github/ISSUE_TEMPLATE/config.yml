@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security policy (sensitive vulnerabilities)
+    url: https://github.com/RNT56/CrustCore/blob/main/SECURITY.md
+    about: Report sensitive vulnerabilities privately via coordinated disclosure — do not open a public issue.
+  - name: Project source of truth (CLAUDE.md)
+    url: https://github.com/RNT56/CrustCore/blob/main/CLAUDE.md
+    about: Read the agent/contributor operating contract before filing a task.
+  - name: Roadmap
+    url: https://github.com/RNT56/CrustCore/blob/main/ROADMAP.md
+    about: Phases, tasks, acceptance criteria, and the v0.1 definition of done.

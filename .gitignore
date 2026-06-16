@@ -1,0 +1,33 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+*.pdb
+Cargo.lock.bak
+
+# CrustCore local state (never commit secrets, event logs, or worktrees)
+/.crustcore/
+*.crustcore-eventlog
+*.crustcore-snapshot
+/worktrees/
+/sandbox/
+
+# Secrets — must never be committed (see docs/secrets.md, INVARIANTS.md #1-3)
+*.pem
+*.key
+*.token
+.env
+.env.*
+secrets.toml
+credentials.json
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+*~
+
+# Build / profiling artifacts
+*.profraw
+cargo-bloat.txt
+flamegraph.svg
