@@ -38,6 +38,44 @@ pub enum JobStatus {
     Expired,
 }
 
+/// Lifecycle of an approval request (invariants 4, 14). Created `Pending` when
+/// policy asks for human approval; resolved by an authorized user only. See
+/// `crustcore-kernel`'s approval flow and [`docs/policy.md`] §4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ApprovalStatus {
+    /// Awaiting an authorized user's decision.
+    Pending,
+    /// Approved by an authorized user.
+    Approved,
+    /// Denied by an authorized user.
+    Denied,
+    /// The approval window elapsed before a decision was applied.
+    Expired,
+}
+
+impl ApprovalStatus {
+    /// Whether the approval has reached a final decision (no further resolution
+    /// applies; re-delivered resolutions are idempotent no-ops).
+    #[must_use]
+    pub const fn is_resolved(self) -> bool {
+        matches!(
+            self,
+            ApprovalStatus::Approved | ApprovalStatus::Denied | ApprovalStatus::Expired
+        )
+    }
+}
+
+/// An authorized user's decision on a pending approval. The kernel acts on this
+/// only when the carrying event's actor is the user (invariant 4); a model can
+/// never originate an effective resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ApprovalResolution {
+    /// Permit the bound operation.
+    Approve,
+    /// Reject the bound operation.
+    Deny,
+}
+
 /// How undoable an action is. Drives which operations require an approval token
 /// (invariant 14). See `crustcore-policy` and [`docs/policy.md`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -60,6 +98,18 @@ impl TaskStatus {
         matches!(
             self,
             TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Killed | TaskStatus::Archived
+        )
+    }
+}
+
+impl JobStatus {
+    /// Terminal job states. A terminal job absorbs further events (at most an
+    /// audit append), mirroring [`TaskStatus::is_terminal`] (invariant 12).
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            JobStatus::Completed | JobStatus::Failed | JobStatus::Killed | JobStatus::Expired
         )
     }
 }
