@@ -1,0 +1,92 @@
+# CrustCore Cargo workspace.
+#
+# CONTRACT FILE (see CLAUDE.md §7.3): changes here are serialized and reviewed.
+#
+# Layering rule (CLAUDE.md §5.1, docs/architecture.md): the kernel and the nano
+# build link std and a small, measured set of crates only. Heavy stacks (tokio,
+# TLS, DB, MCP SDK, provider/Telegram/GitHub SDKs, rich CLI) live in the sidecar
+# crates and must never leak into `crustcore-kernel` or the nano build. The CI
+# size gate and forbidden-dependency check (.github/workflows/ci.yml, xtask)
+# enforce this.
+#
+# NOTE: this scaffold is intentionally dependency-free (std only). Each sidecar
+# crate is a compilable skeleton; the dependency it will eventually pull is
+# recorded in a TODO(Pn) marker so the next session knows exactly what to add
+# and in which phase. Adding a dependency to nano requires the admission policy
+# in CONTRIBUTING.md / ROADMAP.md §20.3.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/crustcore",
+    "crates/crustcore-kernel",
+    "crates/crustcore-types",
+    "crates/crustcore-policy",
+    "crates/crustcore-eventlog",
+    "crates/crustcore-receipts",
+    "crates/crustcore-path",
+    "crates/crustcore-secrets",
+    "crates/crustcore-runner",
+    "crates/crustcore-sandbox",
+    "crates/crustcore-worktree",
+    "crates/crustcore-backend",
+    "crates/crustcore-cli",
+    "crates/crustcore-net",
+    "crates/crustcore-daemon",
+    "crates/crustcore-mcp",
+    "crates/crustcore-index",
+    "crates/crustcore-eval",
+    "crates/crustcore-full",
+    "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+authors = ["The CrustCore Authors"]
+repository = "https://github.com/RNT56/CrustCore"
+homepage = "https://github.com/RNT56/CrustCore"
+description = "A sub-800kB Rust coding-agent verifier kernel with optional capability packs."
+keywords = ["agent", "verifier", "kernel", "sandbox", "security"]
+categories = ["development-tools", "command-line-utilities"]
+
+# Internal crates are referenced through the workspace so versions stay in lockstep.
+[workspace.dependencies]
+crustcore-kernel = { path = "crates/crustcore-kernel", version = "0.1.0" }
+crustcore-types = { path = "crates/crustcore-types", version = "0.1.0" }
+crustcore-policy = { path = "crates/crustcore-policy", version = "0.1.0" }
+crustcore-eventlog = { path = "crates/crustcore-eventlog", version = "0.1.0" }
+crustcore-receipts = { path = "crates/crustcore-receipts", version = "0.1.0" }
+crustcore-path = { path = "crates/crustcore-path", version = "0.1.0" }
+crustcore-secrets = { path = "crates/crustcore-secrets", version = "0.1.0" }
+crustcore-runner = { path = "crates/crustcore-runner", version = "0.1.0" }
+crustcore-sandbox = { path = "crates/crustcore-sandbox", version = "0.1.0" }
+crustcore-worktree = { path = "crates/crustcore-worktree", version = "0.1.0" }
+crustcore-backend = { path = "crates/crustcore-backend", version = "0.1.0" }
+crustcore-cli = { path = "crates/crustcore-cli", version = "0.1.0" }
+crustcore-net = { path = "crates/crustcore-net", version = "0.1.0" }
+crustcore-daemon = { path = "crates/crustcore-daemon", version = "0.1.0" }
+crustcore-mcp = { path = "crates/crustcore-mcp", version = "0.1.0" }
+crustcore-index = { path = "crates/crustcore-index", version = "0.1.0" }
+crustcore-eval = { path = "crates/crustcore-eval", version = "0.1.0" }
+
+# Release profile (general). The flagship size claim uses `nano` below.
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+# Nano profile — the trusted harness size target (<800kB stripped, stretch <600kB).
+# Mirrors ROADMAP.md §17.4. The CI size gate builds:
+#   cargo build --profile nano -p crustcore --no-default-features --features nano
+# Also benchmark opt-level = "s"; "z" is not always smaller (docs/nano-size-budget.md).
+[profile.nano]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false
+incremental = false

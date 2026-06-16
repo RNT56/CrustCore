@@ -1,0 +1,16 @@
+[package]
+name = "crustcore-kernel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "The CrustCore nanokernel: a sync, deterministic, allocation-light state machine."
+
+[dependencies]
+crustcore-types = { workspace = true }
+crustcore-policy = { workspace = true }
+# FORBIDDEN here (CLAUDE.md §5.1): tokio, reqwest, serde_json, clap, sqlx, rmcp,
+# axum, or anything async/net/db. `smallvec`/`arrayvec`/`thiserror` may be added
+# later only if measured (`ROADMAP.md` §6.1). The scaffold uses std `Vec`.

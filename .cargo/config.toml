@@ -1,0 +1,9 @@
+# Cargo aliases for CrustCore. `cargo xtask <cmd>` runs the workspace task runner
+# (build/test/clippy/fmt/nano size gate/forbidden-dep check). See xtask/ and
+# CLAUDE.md §9 (verification & "done").
+[alias]
+xtask = "run --quiet --package xtask --"
+
+# Convenience aliases mirroring the verify pipeline (see docs/nano-size-budget.md).
+nano-build = "build --profile nano --package crustcore --no-default-features --features nano"
+nano-check = "check --package crustcore --no-default-features --features nano"

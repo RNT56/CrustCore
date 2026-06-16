@@ -1,0 +1,13 @@
+[package]
+name = "crustcore-backend"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "The one CrustCore backend contract: BackendResult, Unverified/VerifiedPatch."
+
+[dependencies]
+crustcore-types = { workspace = true }
+crustcore-receipts = { workspace = true }

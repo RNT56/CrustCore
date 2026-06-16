@@ -1,0 +1,14 @@
+[package]
+name = "crustcore-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Tiny argument parser for the CrustCore nano CLI (no clap in nano)."
+
+[dependencies]
+crustcore-types = { workspace = true }
+# NO clap in nano (CLAUDE.md §5.1). This is a hand-rolled, allocation-light
+# parser. A `rich-cli` feature outside nano may add a fuller parser later.

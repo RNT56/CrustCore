@@ -1,0 +1,29 @@
+[package]
+name = "crustcore-full"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Convenience all-in-one composition of CrustCore (never the flagship size claim)."
+
+[dependencies]
+# Composes every tier. This crate is the explicit place where "everything" is
+# allowed to be linked together — and the one crate whose size is NOT the
+# flagship claim. No dependency here may ever leak back into nano (CLAUDE.md §5.1).
+crustcore-kernel = { workspace = true }
+crustcore-types = { workspace = true }
+crustcore-policy = { workspace = true }
+crustcore-eventlog = { workspace = true }
+crustcore-receipts = { workspace = true }
+crustcore-path = { workspace = true }
+crustcore-secrets = { workspace = true }
+crustcore-runner = { workspace = true }
+crustcore-sandbox = { workspace = true }
+crustcore-worktree = { workspace = true }
+crustcore-backend = { workspace = true }
+crustcore-net = { workspace = true }
+crustcore-daemon = { workspace = true }
+crustcore-mcp = { workspace = true }
+crustcore-index = { workspace = true }

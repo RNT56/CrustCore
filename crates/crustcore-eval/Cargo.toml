@@ -1,0 +1,17 @@
+[package]
+name = "crustcore-eval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Eval, golden-task, and red-team harness for CrustCore."
+
+[dependencies]
+crustcore-types = { workspace = true }
+crustcore-kernel = { workspace = true }
+crustcore-policy = { workspace = true }
+crustcore-path = { workspace = true }
+crustcore-secrets = { workspace = true }
+crustcore-backend = { workspace = true }

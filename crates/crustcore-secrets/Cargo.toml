@@ -1,0 +1,15 @@
+[package]
+name = "crustcore-secrets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Typed secret handles and non-exfiltratable secret material for CrustCore."
+
+[dependencies]
+crustcore-types = { workspace = true }
+# NOTE: outside nano, native keychain/vault backends and `zeroize` may be added
+# here behind features (Phase 8). Nano stores only `secret://` handles and links
+# none of that. See docs/secrets.md.

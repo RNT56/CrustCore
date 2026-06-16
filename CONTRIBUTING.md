@@ -34,9 +34,21 @@ decides when a change is done ([`CLAUDE.md` §9](./CLAUDE.md), invariant 13).
 1. **Read the contract.** Read [`CLAUDE.md`](./CLAUDE.md) fully, plus the
    [`docs/`](./CLAUDE.md#10-documentation-map) deep-dive(s) for the subsystem you
    are touching. The docs define the contract the code must satisfy.
-2. **Pick one task** from the [phase roadmap](./ROADMAP.md) (P0–P16) or an
-   assigned issue. Keep it to a single, reviewable unit of work.
-3. **Declare owned file globs.** State in the PR body exactly which files/dirs
+2. **Build it.** You need a stable Rust toolchain with `rustfmt` + `clippy`
+   (pinned in [`rust-toolchain.toml`](./rust-toolchain.toml)). The workspace is
+   std-only today and builds offline:
+
+   ```bash
+   cargo check --workspace     # compile everything
+   cargo xtask verify          # the full gate (must be green before any PR)
+   cargo xtask size-check      # nano binary size vs. the 800 KiB budget
+   ```
+
+3. **Pick one task** from the [phase roadmap](./ROADMAP.md) (P0–P16) or an
+   assigned issue. Grep for the matching `TODO(Pn)` markers in the scaffold —
+   they mark exactly where the implementation goes. Keep it to a single,
+   reviewable unit of work.
+4. **Declare owned file globs.** State in the PR body exactly which files/dirs
    this task owns. Two tasks (or two subagents) must never own overlapping files
    ([`CLAUDE.md` §7.2](./CLAUDE.md)).
 
@@ -170,8 +182,11 @@ cargo bloat --profile nano -p crustcore --crates -n 30   # report
 # red-team fixtures (prompt injection, path escape, fake tool results, secret leak)
 ```
 
-> During pre-Phase-0 (documentation-first) the crates do not exist yet; `verify`
-> is the contract the Phase-0 bootstrap must satisfy ([`ROADMAP.md` §18 P0.4](./ROADMAP.md)).
+> The Phase-0 scaffold already wires `cargo xtask verify` to run fmt, clippy
+> `-D warnings`, the test suite, the forbidden-dependency check, and the nano
+> size gate; it is green today. As the trusted core is implemented, the
+> remaining steps above (red-team fixtures, full nano build coverage) are
+> switched on in their phases ([`ROADMAP.md` §18 P0.4](./ROADMAP.md)).
 
 ### Nano size gate — review requirement
 
@@ -248,12 +263,17 @@ and [`docs/github.md`](./docs/github.md).
 
 ## 11. License
 
-**The license is TBD before the first release.** Until a license is chosen and
-added to the repository, treat the code as *all rights reserved by the project*
-and do not assume any open-source grant. Contributions are made on the
-understanding that they will be relicensed under the project's chosen license at
-release time. This section will be replaced with the concrete license terms (and
-any CLA/DCO requirement) before `0.1.0` is tagged.
+CrustCore is licensed under the **[Apache License, Version 2.0](./LICENSE)** (see
+also [`NOTICE`](./NOTICE)). New source files should carry the SPDX header:
+
+```rust
+// SPDX-License-Identifier: Apache-2.0
+```
+
+**Inbound = outbound (DCO-style):** unless you explicitly state otherwise, any
+contribution you intentionally submit for inclusion in the work shall be licensed
+under Apache-2.0, without any additional terms or conditions (per section 5 of
+the license). By contributing you certify you have the right to do so.
 
 ---
 

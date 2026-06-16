@@ -1,0 +1,13 @@
+[package]
+name = "crustcore-policy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Risk/capability/approval engine for CrustCore: typed authority objects, not booleans."
+
+[dependencies]
+crustcore-types = { workspace = true }
+crustcore-path = { workspace = true }

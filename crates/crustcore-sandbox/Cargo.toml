@@ -1,0 +1,14 @@
+[package]
+name = "crustcore-sandbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Sandbox command specs, profiles, and backend wrappers for CrustCore."
+
+[dependencies]
+crustcore-types = { workspace = true }
+crustcore-path = { workspace = true }
+crustcore-runner = { workspace = true }

@@ -1,0 +1,11 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "CrustCore workspace task runner (verify, size-check, forbidden-deps, release)."
+
+[dependencies]
+# std only — the task runner must work in a minimal/offline environment.

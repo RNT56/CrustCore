@@ -1,0 +1,15 @@
+[package]
+name = "crustcore-index"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Optional repo memory / code intelligence for CrustCore."
+
+[dependencies]
+crustcore-types = { workspace = true }
+# TODO(P14): optional SQLite/redb store, repo summaries, symbol graph,
+# AST/tree-sitter/LSP, embeddings, failure/convention memory — all optional and
+# never linked into nano. Memory is retrieved context, never authority.

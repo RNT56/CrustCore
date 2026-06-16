@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: verify (fmt, clippy, test, forbidden-deps, nano size gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # The single source of truth for "done": fmt --check, clippy -D warnings,
+      # the full test suite, the forbidden-dependency check for nano, and the
+      # nano size gate (invariant 19). See xtask/ and CLAUDE.md §9.
+      - name: cargo xtask verify
+        run: cargo xtask verify
+
+      # Reportable size breakdown. Best-effort: needs network to install, and the
+      # gate itself already ran in `verify`.
+      - name: cargo-bloat report (nano)
+        continue-on-error: true
+        run: |
+          cargo install cargo-bloat --locked || true
+          cargo bloat --profile nano -p crustcore --no-default-features --features nano --crates -n 30 || true
+          cargo tree -p crustcore --no-default-features --features nano || true
+
+  # Explicit, separately-visible nano size gate so the budget shows as its own
+  # required check. It re-runs the same measurement xtask performs.
+  nano-size-gate:
+    name: nano size gate (<800kB)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-nano-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-nano-
+      - name: Build and measure crustcore-nano
+        run: cargo xtask size-check

@@ -9,7 +9,9 @@
 **Project:** CrustCore — a sub-800kB Rust coding-agent *verifier kernel* with
 optional capability packs.
 **Repository:** https://github.com/RNT56/CrustCore
-**Status:** Documentation / pre-Phase-0 bootstrap.
+**Status:** Phase 0 — workspace bootstrapped (compiling scaffold + green
+`cargo xtask verify`); pre-implementation. The trusted-core crates and the nano
+binary build; everything heavy is a documented skeleton with `TODO(Pn)` markers.
 **Authoritative roadmap:** [`ROADMAP.md`](./ROADMAP.md) (the maintainer handoff draft — the
 substance of everything below derives from it).
 
@@ -224,6 +226,7 @@ in [`ROADMAP.md` §4](./ROADMAP.md). Summary every agent must hold in memory:
 ```text
 crustcore/
   CLAUDE.md            <- you are here: single source of truth for agents
+  AGENTS.md            <- thin router to CLAUDE.md (for Codex & AGENTS.md-first agents)
   CHANGELOG.md         <- agent/PR progress log (see §8)
   README.md            <- human-facing overview
   ROADMAP.md           <- authoritative roadmap (maintainer handoff draft)
@@ -239,6 +242,7 @@ crustcore/
     model-routing.md       advisor-executor.md   self-improvement.md
     maintainer-agent.md
   crates/                 <- Rust workspace (created in Phase 0; see below)
+    crustcore/          <- nano binary package; `--features nano` => crustcore-nano
     crustcore-kernel/   crustcore-types/    crustcore-policy/
     crustcore-eventlog/ crustcore-receipts/ crustcore-path/
     crustcore-secrets/  crustcore-runner/   crustcore-sandbox/
@@ -251,16 +255,29 @@ crustcore/
   .github/ ISSUE_TEMPLATE/  workflows/ (CI incl. nano size gate)
 ```
 
-> The `crates/`, `tests/`, `benches/`, `xtask/` trees are **created in Phase 0**
-> (workspace bootstrap). Until then this repo is documentation-first: the docs
-> define the contract that the code must satisfy.
+> The `crates/`, `tests/`, `benches/`, `xtask/` trees were **created in Phase 0**
+> (workspace bootstrap) and compile today as type-true skeletons. Each crate
+> carries `TODO(Pn)` markers naming the phase that implements it; the docs remain
+> the contract the code must satisfy. Run `cargo xtask verify` for the full gate
+> (fmt, clippy, tests, forbidden-deps, nano size gate) and `cargo xtask
+> size-check` for the budget. The nano binary currently builds at ~296 KiB.
+
+> **`AGENTS.md` is a thin router to this file.** Agents that look for
+> `AGENTS.md` first (e.g. Codex) get pointed straight back here. It is a contract
+> file (§7.3): keep it a pointer, never a competing source of truth.
+
+> **Naming:** `crustcore` is the top-level binary package; **`crustcore-nano`**
+> is that package built with `--no-default-features --features nano` under the
+> `nano` profile (exactly what the CI size gate builds with `-p crustcore`).
+> "nano" is a feature/profile, not a separate crate. See [`ROADMAP.md` §6](./ROADMAP.md)
+> and [`docs/architecture.md`](./docs/architecture.md).
 
 ### 5.1 Crate dependency policy (hard rules)
 
 | Crate | Allowed | Forbidden |
 | --- | --- | --- |
 | `crustcore-kernel` | `std`, measured `smallvec`/`arrayvec`/`thiserror` | tokio, reqwest, serde_json, clap, sqlx, rmcp, axum |
-| `crustcore-nano` | kernel crates, tiny CLI parser, runner, eventlog, path/sandbox/worktree | embedded TLS, DB, MCP SDK, rich CLI, provider SDKs |
+| `crustcore` (nano build) | kernel crates, tiny CLI parser, runner, eventlog, path/sandbox/worktree | embedded TLS, DB, MCP SDK, rich CLI, provider SDKs |
 | `crustcore-net` | tokio, minimal HTTP/TLS, serde/serde_json, provider clients | — |
 | `crustcore-mcp` | `rmcp` or custom MCP per feature | leaking any of it into nano |
 | `crustcore-full` | convenience deps | **any** dependency leaking into nano |
@@ -413,6 +430,7 @@ serialized (one PR at a time) and require maintainer review:
 
 ```text
 CLAUDE.md
+AGENTS.md
 INVARIANTS.md
 THREAT_MODEL.md
 SECURITY.md
@@ -541,6 +559,7 @@ Start here, then go deep. Every doc below is a contract the code must satisfy.
 | Doc | What it covers |
 | --- | --- |
 | [`CLAUDE.md`](./CLAUDE.md) | **This file** — single source of truth for agents |
+| [`AGENTS.md`](./AGENTS.md) | Thin router to `CLAUDE.md` for Codex / AGENTS.md-first agents |
 | [`ROADMAP.md`](./ROADMAP.md) | Full vision, tiers, phases, acceptance criteria, DoD |
 | [`README.md`](./README.md) | Human-facing overview & quickstart |
 | [`INVARIANTS.md`](./INVARIANTS.md) | The 20 product laws + enforcement/tests |

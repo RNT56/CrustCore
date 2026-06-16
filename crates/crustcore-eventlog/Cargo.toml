@@ -1,0 +1,13 @@
+[package]
+name = "crustcore-eventlog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Append-only, hash-chained event log with JSONL export for CrustCore."
+
+[dependencies]
+crustcore-types = { workspace = true }
+crustcore-kernel = { workspace = true }

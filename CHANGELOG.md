@@ -40,12 +40,59 @@ agent/PR/role/size/invariant audit trail.
   `advisor-executor.md`, `self-improvement.md`, `maintainer-agent.md`.
 - This `CHANGELOG.md` with the agent-log convention.
 - GitHub issue templates and a documentation map.
+- `AGENTS.md` — a thin router to `CLAUDE.md` so agents that look for `AGENTS.md`
+  first (e.g. Codex) get the same single source of truth. Added to the contract
+  file list.
+- **Phase 0 workspace bootstrap (P0.1–P0.5).** A compiling Cargo workspace with
+  all 19 crates + `xtask`: the `crustcore` nano binary (`--version`, `--help`,
+  hidden `selftest`); trusted-core crates with real type-true skeletons
+  (`crustcore-types` IDs/status/text/refs, `crustcore-kernel` event/action/step,
+  `crustcore-policy` capability + approval tokens + decision, `crustcore-secrets`
+  non-exfiltratable `SecretMaterial`, `crustcore-path` confined paths,
+  `crustcore-eventlog` frame/chain, `crustcore-receipts` `ToolReceipt`,
+  `crustcore-backend` `Unverified`/`VerifiedPatch`, `crustcore-runner`,
+  `crustcore-sandbox`, `crustcore-worktree`, `crustcore-cli`); std-only sidecar
+  skeletons (`crustcore-net`/`-daemon`/`-mcp`/`-index`/`-eval`/`-full`) with
+  `TODO(Pn)` markers.
+- `xtask` task runner (`verify`, `size-check`, `forbidden-deps`, `fmt`, `clippy`,
+  `test`, `nano-build`) wired as `cargo xtask`; release profiles incl.
+  `[profile.nano]`; `rust-toolchain.toml`; `.cargo/config.toml` aliases.
+- CI (`.github/workflows/ci.yml`) running `cargo xtask verify` + a separate nano
+  size-gate job + a best-effort `cargo-bloat`/`cargo-tree` report; `CODEOWNERS`
+  enforcing maintainer review on every contract file.
+- Documented `tests/{redteam,golden,fixtures}` and `benches/` trees;
+  `#[ignore]`d red-team/golden test stubs in `crustcore-eval` so the suite never
+  reports false green.
+- **Apache License 2.0**: `LICENSE`, `NOTICE`, SPDX headers on all source files,
+  and `license = "Apache-2.0"` across the workspace.
+
+### Changed
+
+- Set the project license to **Apache-2.0** (was TBD): updated `README.md`,
+  `CONTRIBUTING.md` (inbound=outbound contribution terms), and crate metadata.
+- Updated status in `README.md` and `CLAUDE.md` from "documentation-first /
+  pre-Phase-0" to "Phase 0 — workspace bootstrapped"; recorded the measured nano
+  baseline (~296 KiB, 37% of budget) in `docs/nano-size-budget.md`.
+- Reconciled documentation inconsistencies end to end: added `/cancel` as a
+
+- Reconciled documentation inconsistencies end to end: added `/cancel` as a
+  first-class graceful-cancellation command (distinct from `/kill`); clarified
+  that `crustcore-nano` is the `crustcore` package built with `--features nano`
+  (no separate crate) and added `crustcore` to the workspace/crate maps; added
+  `crustcore-mcp`/`crustcore-index` to the §17.1 size-budget table; made the
+  nano MCP-lite "no rmcp" constraint explicit; made "no secrets to external
+  workers" an explicit `"secrets": "none"` field in the worker input contract;
+  unified the contract-file list across `CLAUDE.md` §7.3 and `ROADMAP.md` §20.2
+  (now including `CLAUDE.md` and `AGENTS.md`); fixed approximate roadmap
+  list-item anchors in `THREAT_MODEL.md` and `docs/sandbox.md`.
 
 ### Agent Log
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
 | 2026-06-16 | Pre-P0 | Author CLAUDE.md single source of truth + full documentation set from approved roadmap | `claude/crustcore-project-docs-q0kr2p` | Maintainer agent (DocumentationWriter) | n/a (docs only) | Documents all 20; none weakened |
+| 2026-06-16 | Pre-P0 | Add AGENTS.md router; reconcile flagged doc inconsistencies end to end | `claude/crustcore-docs-reconcile-q0kr2p` (PR) | Maintainer agent (DocumentationWriter) | n/a (docs only) | Clarifies 1–3, 13, 15, 19, 20; none weakened |
+| 2026-06-16 | P0.1–P0.5 | Bootstrap compiling workspace (19 crates + xtask), CI + nano size gate + CODEOWNERS, Apache-2.0 license; `cargo xtask verify` green | `claude/crustcore-project-docs-q0kr2p` | Maintainer agent (Architect/Implementer) | +296 KiB baseline (37% of 800 KiB budget) | Enforces/encodes 8, 9, 13, 14, 16, 19, 20; embeds 1–3 in types; none weakened |
 
 ---
 

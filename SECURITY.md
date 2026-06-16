@@ -158,11 +158,12 @@ vs. policy engine vs. receipts enforce) is in
 
 ## 4. Supported versions
 
-CrustCore is in **documentation / pre-Phase-0 bootstrap** status; there is no
-released binary yet. The table below states the support policy that takes effect
-once releases begin. The flagship security claim — the sub-800kB nano size
-budget — applies only to `crustcore-nano`; sidecars have their own budgets
-(see [`ROADMAP.md` §17.1](./ROADMAP.md)).
+CrustCore is in **Phase 0 — workspace bootstrapped** status: a compiling
+scaffold exists, but there is no released binary yet and the trusted core is not
+implemented. The table below states the support policy that takes effect once
+releases begin. The flagship security claim — the sub-800kB nano size budget —
+applies only to `crustcore-nano`; sidecars have their own budgets (see
+[`ROADMAP.md` §17.1](./ROADMAP.md)).
 
 | Version | Status | Security fixes |
 | --- | --- | --- |

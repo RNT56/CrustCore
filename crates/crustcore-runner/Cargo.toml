@@ -1,0 +1,12 @@
+[package]
+name = "crustcore-runner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Process runner with bounded output and timeouts for CrustCore."
+
+[dependencies]
+crustcore-types = { workspace = true }
