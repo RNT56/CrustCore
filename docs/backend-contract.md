@@ -160,6 +160,7 @@ The supervisor hands an external worker exactly this ([`ROADMAP.md` §11.4](../R
   "allowed_roots": ["/sandbox/worktree", "/sandbox/tmp"],
   "forbidden_paths": ["~/.ssh", "~/.config", "/etc", "/var"],
   "network": "deny",
+  "secrets": "none",
   "max_seconds": 1800,
   "max_output_mb": 50,
   "must_return": ["summary", "diff", "tests_run", "commands_run", "risks", "files_changed"]
@@ -177,9 +178,10 @@ Notes on the contract:
   capture ([`CLAUDE.md` §6.5](../CLAUDE.md)).
 - `must_return` is the worker's reporting obligation — but everything it returns is
   treated as *untrusted claims* and re-derived/verified by the supervisor (§4.2).
-- **No secrets are passed to workers** ([`ROADMAP.md` §11.4](../ROADMAP.md) implied
-  by deny posture; invariants 1–3; [`secrets.md`](./secrets.md)). Git that needs
-  credentials goes through the credential proxy, not worker env
+- **No secrets are passed to workers.** `"secrets": "none"` is an explicit field
+  in the input contract ([`ROADMAP.md` §11.4](../ROADMAP.md); invariants 1–3;
+  [`secrets.md`](./secrets.md)) — not merely implied by the deny posture. Git
+  that needs credentials goes through the credential proxy, not worker env
   ([`github.md`](./github.md)).
 
 ### 4.2 Supervisor validation steps

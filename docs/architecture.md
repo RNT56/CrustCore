@@ -230,6 +230,7 @@ then the repo is documentation-first.
 
 | Crate | Purpose |
 | --- | --- |
+| `crustcore` | The top-level binary package. The flagship **`crustcore-nano`** artifact is this package built with `--no-default-features --features nano` under the `nano` profile (what the CI size gate builds with `-p crustcore`). "nano" is a feature/profile of `crustcore`, **not** a separate crate. |
 | `crustcore-kernel` | Tiny sync state machine: tasks/jobs/events/actions, policy outcomes, budgets, approvals, receipt/event framing. The trusted core. |
 | `crustcore-types` | Shared IDs/enums with no heavy deps (`TaskId`, `JobId`, `EventSeq`, …). Keeps the kernel and adapters speaking the same types without coupling. |
 | `crustcore-policy` | Compact risk/capability/approval evaluator. Produces `PolicySnapshot` and capability tokens. See [`policy.md`](./policy.md). |

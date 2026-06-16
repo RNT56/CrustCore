@@ -69,7 +69,8 @@ daemon into kernel events — they are never free-text passed to a model.
 | `/deny` | `<approval_id>` | Resolve a pending approval **deny** | blocks the gated action |
 | `/pause` | `<task_id>` | Pause task at next safe boundary | reversible |
 | `/resume` | `<task_id>` | Resume a paused task | reversible |
-| `/kill` | `<task_id>` | Cancel task + jobs; tear down worktrees | terminal |
+| `/cancel` | `<task_id>` | Graceful cancellation at the next safe boundary | terminal (graceful) |
+| `/kill` | `<task_id>` | Immediate hard teardown of task + jobs; tear down worktrees | terminal (hard) |
 | `/diff` | `<task_id>` | Render the current/candidate diff (bounded) | read-only |
 | `/logs` | `<task_id>` | Tail bounded, **redacted** task logs | read-only |
 | `/budget` | — | Show budget consumption vs limits | read-only |
@@ -107,7 +108,8 @@ messages are interpreted relative to those boundaries
 ```text
 normal message during a task  -> queue for next safe boundary
 message prefixed with !       -> steer before pending model/tool actions execute
-/cancel or /kill              -> explicit cancellation path
+/cancel <task_id>             -> graceful cancellation at next safe boundary
+/kill <task_id>               -> immediate hard teardown of task/job processes
 approval buttons              -> approve/deny the exact nonce-bound operation
 ```
 

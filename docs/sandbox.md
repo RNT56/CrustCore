@@ -8,8 +8,8 @@
 
 > This is a [contract file](../CLAUDE.md#73-contract-files--serialized-changes-only):
 > changes are serialized and require maintainer approval. Source of truth:
-> [`ROADMAP.md` §10`](../ROADMAP.md) (sandbox model), [`§1.2.5`](../ROADMAP.md)
-> (NullClaw path-env lesson), [`§18 Phase 4`](../ROADMAP.md) (tasks/acceptance).
+> [`ROADMAP.md` §10](../ROADMAP.md) (sandbox model), [`§1.2 NullClaw lesson 5`](../ROADMAP.md)
+> (path-env lesson), [`§18 Phase 4`](../ROADMAP.md) (tasks/acceptance).
 > Governs invariant **9** (and supports 2, 7, 8, 14).
 
 > Siblings: [`docs/security-model.md`](./security-model.md) (taint/redaction) ·
@@ -173,8 +173,9 @@ inherit (invariant 2, [`docs/secrets.md`](./secrets.md)).
 
 ### 5.2 Path-list env var validation (the NullClaw lesson)
 
-[`ROADMAP.md` §1.2.5`](../ROADMAP.md) records the NullClaw lesson: **path-list env
-vars must be validated component-by-component before crossing into a sandbox.**
+[`ROADMAP.md` §1.2 (NullClaw lesson 5)](../ROADMAP.md) records the lesson:
+**path-list env vars must be validated component-by-component before crossing
+into a sandbox.**
 This applies to:
 
 ```text

@@ -40,12 +40,29 @@ agent/PR/role/size/invariant audit trail.
   `advisor-executor.md`, `self-improvement.md`, `maintainer-agent.md`.
 - This `CHANGELOG.md` with the agent-log convention.
 - GitHub issue templates and a documentation map.
+- `AGENTS.md` — a thin router to `CLAUDE.md` so agents that look for `AGENTS.md`
+  first (e.g. Codex) get the same single source of truth. Added to the contract
+  file list.
+
+### Changed
+
+- Reconciled documentation inconsistencies end to end: added `/cancel` as a
+  first-class graceful-cancellation command (distinct from `/kill`); clarified
+  that `crustcore-nano` is the `crustcore` package built with `--features nano`
+  (no separate crate) and added `crustcore` to the workspace/crate maps; added
+  `crustcore-mcp`/`crustcore-index` to the §17.1 size-budget table; made the
+  nano MCP-lite "no rmcp" constraint explicit; made "no secrets to external
+  workers" an explicit `"secrets": "none"` field in the worker input contract;
+  unified the contract-file list across `CLAUDE.md` §7.3 and `ROADMAP.md` §20.2
+  (now including `CLAUDE.md` and `AGENTS.md`); fixed approximate roadmap
+  list-item anchors in `THREAT_MODEL.md` and `docs/sandbox.md`.
 
 ### Agent Log
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
 | 2026-06-16 | Pre-P0 | Author CLAUDE.md single source of truth + full documentation set from approved roadmap | `claude/crustcore-project-docs-q0kr2p` | Maintainer agent (DocumentationWriter) | n/a (docs only) | Documents all 20; none weakened |
+| 2026-06-16 | Pre-P0 | Add AGENTS.md router; reconcile flagged doc inconsistencies end to end | `claude/crustcore-docs-reconcile-q0kr2p` (PR) | Maintainer agent (DocumentationWriter) | n/a (docs only) | Clarifies 1–3, 13, 15, 19, 20; none weakened |
 
 ---
 
