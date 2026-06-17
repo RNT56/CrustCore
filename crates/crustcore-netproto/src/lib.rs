@@ -34,6 +34,18 @@ pub const MAX_LINE_BYTES: usize = 1024 * 1024;
 /// Cap on text fields carried over the protocol (prompts, chunks, final text).
 pub const MAX_TEXT_BYTES: usize = 256 * 1024;
 
+/// Cap on registry entries a [`probe`](NetHelper::probe) will accept before
+/// requiring `RegistryEnd`. A buggy/compromised helper streaming `Model` lines
+/// forever must not OOM/hang the trusted caller (invariant 7; "bounded
+/// everything"). Far above any realistic model count.
+pub const MAX_REGISTRY_MODELS: usize = 4096;
+
+/// Cap on the total streamed completion bytes a [`complete`](NetHelper::complete)
+/// will accept before giving up. A helper streaming chunks forever must not hang
+/// the caller. Bounds the *number* of reads, the same way [`MAX_LINE_BYTES`]
+/// bounds a single read.
+pub const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
+
 /// An abstract model role — a *requirement*, resolved against the dynamic registry
 /// at request time, never a hard-coded model name (invariant 17;
 /// `docs/model-routing.md` §2).
@@ -329,6 +341,14 @@ fn read_line_bounded<R: BufRead>(
             break; // EOF
         }
         if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+            // Enforce the cap on the newline branch too: a `BufRead` that returns
+            // the whole remainder in one `fill_buf` (e.g. a `Cursor`) would
+            // otherwise let a giant newline-terminated line slip past the cap.
+            if total + pos > max {
+                return Err(ProtoError::Decode(
+                    "protocol line exceeds the byte cap".into(),
+                ));
+            }
             buf.extend_from_slice(&available[..pos]);
             total += pos;
             r.consume(pos + 1);
@@ -489,7 +509,16 @@ impl<W: Write, R: BufRead> NetHelper<W, R> {
         let mut models = Vec::new();
         loop {
             match read_response(&mut self.r)? {
-                Some(Response::Model(m)) => models.push(m),
+                Some(Response::Model(m)) => {
+                    // Bound the registry: a helper that never sends RegistryEnd
+                    // must not grow this unboundedly (invariant 7).
+                    if models.len() >= MAX_REGISTRY_MODELS {
+                        return Err(ProtoError::Decode(
+                            "registry exceeded the model cap before RegistryEnd".into(),
+                        ));
+                    }
+                    models.push(m);
+                }
                 Some(Response::RegistryEnd) => return Ok(models),
                 Some(Response::Error(e)) => return Err(ProtoError::Decode(e)),
                 Some(other) => {
@@ -514,9 +543,20 @@ impl<W: Write, R: BufRead> NetHelper<W, R> {
         mut on_chunk: impl FnMut(&str),
     ) -> Result<Final, ProtoError> {
         write_request(&mut self.w, &Request::Complete(req.clone()))?;
+        let mut streamed: usize = 0;
         loop {
             match read_response(&mut self.r)? {
-                Some(Response::Chunk(t)) => on_chunk(t.as_str()),
+                Some(Response::Chunk(t)) => {
+                    // Bound the total stream: a helper streaming chunks forever
+                    // must not hang the caller (invariant 7).
+                    streamed = streamed.saturating_add(t.len());
+                    if streamed > MAX_STREAM_BYTES {
+                        return Err(ProtoError::Decode(
+                            "completion stream exceeded the byte cap before Final".into(),
+                        ));
+                    }
+                    on_chunk(t.as_str());
+                }
                 Some(Response::Final(f)) => return Ok(f),
                 Some(Response::Error(e)) => return Err(ProtoError::Decode(e)),
                 Some(other) => {
@@ -671,6 +711,72 @@ mod tests {
             read_response(&mut cur),
             Err(ProtoError::Decode(_))
         ));
+    }
+
+    #[test]
+    fn over_long_newline_terminated_line_is_rejected() {
+        // The newline branch must enforce the cap too: a `Cursor` returns the whole
+        // slice from one fill_buf, so a giant newline-terminated line would slip
+        // past a cap that only guards the no-newline branch.
+        let mut big = vec![b'a'; MAX_LINE_BYTES + 10];
+        big.push(b'\n');
+        let mut cur = std::io::Cursor::new(big);
+        assert!(matches!(
+            read_response(&mut cur),
+            Err(ProtoError::Decode(_))
+        ));
+    }
+
+    #[test]
+    fn probe_rejects_a_helper_that_never_ends_the_registry() {
+        // A misbehaving helper streams Model lines past the cap without RegistryEnd:
+        // the caller must reject, not grow unboundedly (invariant 7).
+        let one = encode_response(&Response::Model(ModelInfo {
+            provider: "p".into(),
+            model: "m".into(),
+            healthy: true,
+            context: 1,
+            tools: false,
+            structured: false,
+            streaming: false,
+            cost_per_1k_micros: 0,
+        }));
+        let mut out = String::with_capacity((one.len() + 1) * (MAX_REGISTRY_MODELS + 8));
+        for _ in 0..MAX_REGISTRY_MODELS + 5 {
+            out.push_str(&one);
+            out.push('\n');
+        }
+        let reader = std::io::BufReader::new(std::io::Cursor::new(out.into_bytes()));
+        let mut client = NetHelper::new(Vec::new(), reader);
+        assert!(matches!(client.probe(), Err(ProtoError::Decode(_))));
+    }
+
+    #[test]
+    fn complete_rejects_an_unbounded_chunk_stream() {
+        // A helper streaming chunks past the total cap without Final is rejected.
+        let chunk = encode_response(&Response::Chunk(bt(&"a".repeat(MAX_TEXT_BYTES))));
+        let n = MAX_STREAM_BYTES / MAX_TEXT_BYTES + 2;
+        let mut out = String::with_capacity((chunk.len() + 1) * n);
+        for _ in 0..n {
+            out.push_str(&chunk);
+            out.push('\n');
+        }
+        let reader = std::io::BufReader::new(std::io::Cursor::new(out.into_bytes()));
+        let mut client = NetHelper::new(Vec::new(), reader);
+        let req = CompleteRequest {
+            role: Role::Implementation,
+            system: bt(""),
+            prompt: bt("x"),
+            max_tokens: 1,
+            stream: true,
+            max_cost_micros: 0,
+            require: Require::default(),
+        };
+        let mut seen = 0usize;
+        let r = client.complete(&req, |c| seen += c.len());
+        assert!(matches!(r, Err(ProtoError::Decode(_))));
+        // It stopped near the cap, not after consuming everything unboundedly.
+        assert!(seen <= MAX_STREAM_BYTES + MAX_TEXT_BYTES);
     }
 
     #[test]
