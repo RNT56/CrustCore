@@ -8,9 +8,12 @@
 //! `self_claimed_done` is advisory metadata, never authority (invariant 6).
 //!
 //! The type split is the enforcement: there is **no** `From<UnverifiedPatch> for
-//! VerifiedPatch`. The only constructor of `VerifiedPatch` is the verifier
-//! (`docs/backend-contract.md`).
+//! VerifiedPatch`. The only constructor of `VerifiedPatch` is the verify loop
+//! ([`verify::run_verify`]) — `VerifiedPatch::from_verifier` is crate-private, so
+//! no code outside this crate can forge one (`docs/backend-contract.md`).
 #![forbid(unsafe_code)]
+
+pub mod verify;
 
 use crustcore_receipts::ToolReceipt;
 use crustcore_types::{BoundedText, Timestamp};
@@ -81,29 +84,57 @@ pub struct CommandEvidence {
     pub passed: bool,
 }
 
+/// The name/command line of the verifier that produced a [`VerifiedPatch`]
+/// (`docs/backend-contract.md` §2.3). A bounded-text newtype so provenance is a
+/// distinct type, not a bare string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifierName(BoundedText);
+
+impl VerifierName {
+    /// Builds a verifier name from a command line, bounded to the default cap.
+    #[must_use]
+    pub fn new(name: impl AsRef<str>) -> Self {
+        VerifierName(BoundedText::truncated(
+            name.as_ref(),
+            BoundedText::DEFAULT_MAX,
+        ))
+    }
+
+    /// The underlying bounded text.
+    #[must_use]
+    pub fn as_text(&self) -> &BoundedText {
+        &self.0
+    }
+
+    /// The verifier name as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
 /// A patch the verifier has confirmed in a clean sandbox. **Only** the verifier
 /// constructs this (no `From<UnverifiedPatch>`); it is the only thing that may
 /// integrate, complete, or open a PR (invariant 13).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedPatch {
     patch: PatchRef,
-    verifier: BoundedText,
+    verifier: VerifierName,
     commands: Vec<CommandEvidence>,
     passed_at: Timestamp,
     receipt: ToolReceipt,
 }
 
 impl VerifiedPatch {
-    /// Constructed by the verifier only.
-    ///
-    /// TODO(P5.4): make this callable solely from the verify loop (a sealed
-    /// constructor / module-private token) so no other code can forge a
-    /// `VerifiedPatch`. The doc-hidden marker signals intent for the scaffold.
-    #[doc(hidden)]
+    /// Constructed by the verifier only. **Crate-private** — the sole caller is
+    /// [`verify::run_verify`], which mints this only after a verify command exits
+    /// zero in a clean sandbox. No code outside `crustcore-backend` can construct
+    /// a `VerifiedPatch`, so invariant 13 ("only a VerifiedPatch may complete") is
+    /// enforced by the type system.
     #[must_use]
-    pub fn from_verifier(
+    pub(crate) fn from_verifier(
         patch: PatchRef,
-        verifier: BoundedText,
+        verifier: VerifierName,
         commands: Vec<CommandEvidence>,
         passed_at: Timestamp,
         receipt: ToolReceipt,
@@ -125,7 +156,7 @@ impl VerifiedPatch {
 
     /// The verifier that produced the evidence.
     #[must_use]
-    pub fn verifier(&self) -> &BoundedText {
+    pub fn verifier(&self) -> &VerifierName {
         &self.verifier
     }
 
@@ -146,4 +177,23 @@ impl VerifiedPatch {
     pub fn receipt(&self) -> &ToolReceipt {
         &self.receipt
     }
+}
+
+/// A completed task: proof that a task finished because the verifier passed.
+/// Constructed only by [`complete_task`], which accepts a [`VerifiedPatch`] *by
+/// value* — so a task can only complete from verifier evidence (invariant 13).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Completion {
+    /// The verified patch that completed the task.
+    pub patch: VerifiedPatch,
+}
+
+/// Completes a task from a [`VerifiedPatch`] (invariant 13: "only a
+/// `VerifiedPatch` may integrate, complete, or open a PR"). The signature is the
+/// enforcement — there is no overload that accepts an [`UnverifiedPatch`] or a
+/// `BackendResult`, and `VerifiedPatch` can only be minted by the verifier. The
+/// patch is taken by value so a single verified patch completes a task once.
+#[must_use]
+pub fn complete_task(patch: VerifiedPatch) -> Completion {
+    Completion { patch }
 }

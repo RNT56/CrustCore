@@ -1,18 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The `crustcore` nano binary entry point.
 //!
-//! Implements `--version`/`--help`, `inspect <log>` and `export <log>` (Phase 2:
-//! verify/replay the hash-chained event log and render it as JSONL), and a hidden
-//! `selftest` that drives the kernel + event-log pipeline so the trusted-core
-//! crates are linked and checked. `run` lands in Phase 5. See ROADMAP.md §18.
+//! Implements `--version`/`--help`, `run` (Phase 5: create a disposable worktree,
+//! rerun the verify command in a sandbox, complete only on a `VerifiedPatch`),
+//! `inspect <log>` and `export <log>` (Phase 2: verify/replay the hash-chained
+//! event log and render it as JSONL), and a hidden `selftest` that drives the
+//! kernel + event-log pipeline so the trusted-core crates are linked and checked.
+//! See ROADMAP.md §18.
 #![forbid(unsafe_code)]
 
 use std::process::ExitCode;
 
+use crustcore_backend::verify::{run_verify, VerifyIds, VerifyOutcome, VerifySpec};
+use crustcore_backend::{complete_task, PatchRef};
 use crustcore_cli::Command;
 use crustcore_eventlog::{ChainStatus, EventLog, FrameMeta};
 use crustcore_kernel::{Actor, Event, EventKind, Kernel, Visibility};
-use crustcore_policy::{PolicySnapshot, RiskProfile};
+use crustcore_policy::{PolicySnapshot, RiskProfile, SandboxExecCap};
+use crustcore_receipts::{MacKey, ReceiptChain};
+use crustcore_sandbox::SandboxProfile;
+use crustcore_types::hash::sha256;
+use crustcore_types::{EventSeq, JobId, ScopeId, TaskId, Timestamp, ToolCallId};
+use crustcore_worktree::WorktreeManager;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -31,7 +40,7 @@ fn main() -> ExitCode {
             print!("{}", crustcore_cli::help_text());
             ExitCode::SUCCESS
         }
-        Command::Run => not_yet("run", "Phase 5 (worktree verify loop)"),
+        Command::Run => run_task(&args[1..]),
         Command::Inspect => inspect(args.get(1).map(String::as_str)),
         Command::Export => export(args.get(1).map(String::as_str)),
         Command::Unknown(cmd) => {
@@ -42,10 +51,168 @@ fn main() -> ExitCode {
     }
 }
 
-fn not_yet(cmd: &str, phase: &str) -> ExitCode {
-    eprintln!("crustcore: '{cmd}' is not yet implemented — scheduled for {phase}.");
-    eprintln!("This is a pre-implementation scaffold; see ROADMAP.md and CLAUDE.md.");
-    ExitCode::from(3)
+/// `crustcore run -dir <repo> -goal <text> -verify <command>` — create a
+/// disposable worktree, rerun the verify command in a clean sandbox, and complete
+/// the task only if it passes (invariant 13). On failure or a missing sandbox
+/// backend, exits non-zero with a clear state — nothing is "done" without
+/// verifier evidence.
+fn run_task(run_args: &[String]) -> ExitCode {
+    let parsed = match crustcore_cli::parse_run(run_args) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("crustcore run: {e}");
+            eprintln!("usage: crustcore run -dir <repo> -goal <text> -verify <command>");
+            return ExitCode::from(2);
+        }
+    };
+
+    let dir = parsed.dir.as_deref().unwrap_or(".");
+    let repo_root = match std::fs::canonicalize(dir) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("crustcore run: cannot resolve -dir '{dir}': {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    // Resolve the verify command: explicit `-verify` or best-effort detection.
+    let spec = match resolve_verify_spec(parsed.verify.as_deref(), &repo_root) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("crustcore run: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    if let Some(goal) = parsed.goal.as_deref() {
+        println!("goal: {goal}");
+    }
+    println!("verify: {}", spec.display());
+
+    // One task per `run` (the autonomous, multi-task supervisor is later phases).
+    let task = TaskId(1);
+    let manager = WorktreeManager::new(&repo_root);
+    let worktree = match manager.create_for(task) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("crustcore run: could not create worktree: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    println!("worktree: {}", worktree.as_path().display());
+
+    // Reference the verified state by the worktree's HEAD commit (no diffing, so
+    // the canonical repo is never mutated). Precise patch-content addressing
+    // arrives with the backends that produce diffs (Phase 6).
+    let head = manager.head_commit(&worktree).unwrap_or_default();
+    let patch = PatchRef {
+        diff_hash: sha256(head.as_bytes()),
+    };
+
+    let cap = SandboxExecCap {
+        profile: ScopeId(1),
+        scope: ScopeId(1),
+    };
+    let profile = SandboxProfile::default_sandboxed();
+    let mut receipts = ReceiptChain::new(MacKey::new(run_key()));
+    let ids = VerifyIds {
+        task_id: task,
+        job_id: JobId(1),
+        tool_call_id: ToolCallId(1),
+        event_seq: EventSeq(1),
+        now: now_ts(),
+    };
+
+    let outcome = run_verify(&cap, &profile, &worktree, &spec, patch, &mut receipts, &ids);
+    let code = match outcome {
+        VerifyOutcome::Verified(verified) => {
+            let _completion = complete_task(*verified);
+            println!("VERIFIED: '{}' passed — task completed.", spec.display());
+            ExitCode::SUCCESS
+        }
+        VerifyOutcome::Failed { status, output } => {
+            eprintln!("VERIFY FAILED ({status:?}) — task NOT completed.");
+            if !output.as_str().is_empty() {
+                eprintln!("--- verify output (bounded) ---");
+                eprint!("{}", output.as_str());
+                if !output.as_str().ends_with('\n') {
+                    eprintln!();
+                }
+            }
+            ExitCode::from(1)
+        }
+        VerifyOutcome::Refused(reason) => {
+            eprintln!("VERIFY REFUSED: {reason}");
+            eprintln!(
+                "execution requires a sandbox backend (Linux bubblewrap); \
+                 see docs/sandbox.md. Nothing is completed without sandboxed verifier evidence."
+            );
+            ExitCode::from(1)
+        }
+    };
+
+    // Tear down the disposable worktree on every path (best-effort).
+    let _ = manager.remove(&worktree);
+    code
+}
+
+/// Resolves the verify command from an explicit `-verify` string or, when absent,
+/// by detecting it from the repo shape. The explicit string is split on
+/// whitespace into program + args with **no shell interpretation**, so an
+/// untrusted value cannot smuggle a second command (invariant 7).
+///
+/// # Errors
+/// Returns a message if `-verify` is empty/blank or no command can be detected.
+fn resolve_verify_spec(
+    verify: Option<&str>,
+    repo_root: &std::path::Path,
+) -> Result<VerifySpec, String> {
+    match verify {
+        Some(raw) => {
+            let mut toks = raw.split_whitespace().map(str::to_string);
+            match toks.next() {
+                Some(program) => Ok(VerifySpec::new(program, toks.collect())),
+                None => Err("-verify was empty".to_string()),
+            }
+        }
+        None => VerifySpec::detect(repo_root).ok_or_else(|| {
+            "no -verify command given and none could be detected \
+             (no Cargo.toml/package.json/Makefile)"
+                .to_string()
+        }),
+    }
+}
+
+/// A per-run MAC key for the receipt chain. CrustCore holds this key; the model
+/// never does, so receipts are unforgeable (invariant 10). Persistent key
+/// management arrives with the runtime; for a single local run we draw a fresh
+/// random key (falling back to a fixed dev key if the OS RNG is unavailable).
+fn run_key() -> [u8; 32] {
+    use std::io::Read as _;
+    let mut key = [0u8; 32];
+    // Read exactly 32 bytes — `/dev/urandom` never reaches EOF, so a bounded
+    // `read_exact` is required (a plain read-to-end would never return).
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        if f.read_exact(&mut key).is_ok() {
+            return key;
+        }
+    }
+    // Deterministic fallback (no OS RNG): clearly-marked dev key.
+    for (i, b) in key.iter_mut().enumerate() {
+        *b = 0xC0u8 ^ (i as u8);
+    }
+    key
+}
+
+/// Wall-clock timestamp for stamping the verify run. Time is supplied by the
+/// adapter layer (here, the CLI), never read inside the kernel.
+fn now_ts() -> Timestamp {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    Timestamp::from_millis(ms)
 }
 
 fn load_log(path: Option<&str>, cmd: &str) -> Result<EventLog, ExitCode> {
@@ -134,5 +301,50 @@ fn selftest() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_verify_spec_splits_without_shell_interpretation() {
+        // A shell-injection attempt is split on whitespace into inert argv tokens:
+        // `true` runs with `;`, `rm`, ... as literal args — no second command runs.
+        let dir = std::env::temp_dir();
+        let spec = resolve_verify_spec(Some("true ; rm -rf /"), &dir).unwrap();
+        assert_eq!(spec.program, "true");
+        assert_eq!(spec.args, vec![";", "rm", "-rf", "/"]);
+        // Quotes are literal, not shell-stripped.
+        let spec2 = resolve_verify_spec(Some("sh -c \"evil\""), &dir).unwrap();
+        assert_eq!(spec2.program, "sh");
+        assert_eq!(spec2.args, vec!["-c", "\"evil\""]);
+    }
+
+    #[test]
+    fn resolve_verify_spec_rejects_blank_and_detects_otherwise() {
+        let dir = std::env::temp_dir().join(format!("cc-rvs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Blank -verify is an error.
+        assert!(resolve_verify_spec(Some("   "), &dir).is_err());
+        // No -verify and no recognizable project => error (no guessing).
+        assert!(resolve_verify_spec(None, &dir).is_err());
+        // No -verify but a Cargo.toml => detected `cargo test`.
+        std::fs::write(dir.join("Cargo.toml"), b"[package]\n").unwrap();
+        let detected = resolve_verify_spec(None, &dir).unwrap();
+        assert_eq!(detected.program, "cargo");
+        assert_eq!(detected.args, vec!["test"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_key_returns_nonzero_key() {
+        // Either the OS RNG (normal) or the deterministic fallback yields a
+        // non-zero 32-byte key; an all-zero key would be a bug.
+        assert_ne!(run_key(), [0u8; 32]);
     }
 }

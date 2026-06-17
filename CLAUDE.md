@@ -9,21 +9,26 @@
 **Project:** CrustCore — a sub-800kB Rust coding-agent *verifier kernel* with
 optional capability packs.
 **Repository:** https://github.com/RNT56/CrustCore
-**Status:** Phase 4 — kernel + audit log + confined tools + sandboxed execution
-(green `cargo xtask verify`). The trusted `Kernel::step` state machine is real
-(task/job transitions, typed budgets, approval request/resolution; sync,
-deterministic, no async/net/db, no wall clock). The append-only hash-chained
-**event log** (`crustcore inspect`/`export`, tamper-evident) and **tool receipts**
-(a CrustCore-keyed MAC chain, invariant 10) are implemented (vendored
-dependency-free SHA-256/HMAC). **Path confinement** (`crustcore-path`,
-symlink-safe) + capability-gated file tools and hardened git wrappers
-(`crustcore-worktree::tools`) confine all file/git access. The **runner**
+**Status:** Phase 5 — kernel + audit log + confined tools + sandboxed execution +
+worktree verify loop (green `cargo xtask verify`). The trusted `Kernel::step`
+state machine is real (task/job transitions, typed budgets, approval
+request/resolution; sync, deterministic, no async/net/db, no wall clock). The
+append-only hash-chained **event log** (`crustcore inspect`/`export`,
+tamper-evident) and **tool receipts** (a CrustCore-keyed MAC chain, invariant 10)
+are implemented (vendored dependency-free SHA-256/HMAC). **Path confinement**
+(`crustcore-path`, symlink-safe) + capability-gated file tools and hardened git
+wrappers (`crustcore-worktree::tools`) confine all file/git access. The **runner**
 (`crustcore-runner`: bounded capture, timeout, process-tree kill) and **sandbox**
-(`crustcore-sandbox`: env sanitizer, path-list validator, Linux bubblewrap
-backend v1 with deny-all egress, refuse-if-no-backend) gate arbitrary execution
-(invariant 9). Backed by exhaustive property tests, no-panic fuzzes, a microbench,
-tamper tests, and real-fs symlink + sandbox red-team fixtures. The remaining heavy
-crates are still documented skeletons with `TODO(Pn)` markers.
+(`crustcore-sandbox`: env sanitizer, path-list validator, Linux bubblewrap backend
+v1 with deny-all egress, refuse-if-no-backend) gate arbitrary execution (invariant
+9). The **worktree verify loop** (`crustcore-worktree::WorktreeManager` +
+`crustcore-backend::verify`) creates a disposable worktree, reruns the verify
+command in the sandbox, and mints a **`VerifiedPatch`** (with a receipt) only on a
+zero exit — `VerifiedPatch` is type-sealed so a task can complete *only* from
+verifier evidence (invariant 13); `crustcore run -dir/-goal/-verify` drives it.
+Backed by exhaustive property tests, no-panic fuzzes, a microbench, tamper tests,
+real-fs symlink + sandbox red-team fixtures, and the golden "fix failing test".
+The remaining heavy crates are still documented skeletons with `TODO(Pn)` markers.
 **Authoritative roadmap:** [`ROADMAP.md`](./ROADMAP.md) (the maintainer handoff draft — the
 substance of everything below derives from it).
 

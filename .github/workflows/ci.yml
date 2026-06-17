@@ -25,6 +25,20 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # Install the sandbox backend so the sandbox tests and the Phase 5 verify
+      # loop exercise the *real* bubblewrap path (not just the refusal/gate path).
+      # Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor by
+      # default; relax it best-effort so bwrap can set up its namespaces. The
+      # tests degrade gracefully (gate-only) if bwrap is still non-functional.
+      - name: Install bubblewrap (sandbox backend)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --unshare-all --ro-bind /usr /usr --ro-bind /bin /bin \
+            --ro-bind /lib /lib --proc /proc --dev /dev /bin/true \
+            && echo "bwrap functional" || echo "bwrap present but not functional (tests will gate-only)"
+
       - name: Cache cargo registry and target
         uses: actions/cache@v4
         with:

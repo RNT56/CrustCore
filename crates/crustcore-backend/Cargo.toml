@@ -11,3 +11,8 @@ description = "The one CrustCore backend contract: BackendResult, Unverified/Ver
 [dependencies]
 crustcore-types = { workspace = true }
 crustcore-receipts = { workspace = true }
+crustcore-path = { workspace = true }
+crustcore-policy = { workspace = true }
+crustcore-runner = { workspace = true }
+crustcore-sandbox = { workspace = true }
+crustcore-worktree = { workspace = true }

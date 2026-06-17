@@ -53,6 +53,47 @@ where
     }
 }
 
+/// Parsed arguments for `crustcore run` (`-dir`/`-goal`/`-verify`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunArgs {
+    /// The repository directory (`-dir`). Defaults to `.` when omitted.
+    pub dir: Option<String>,
+    /// The task goal (`-goal`). Recorded; the autonomous backend lands in Phase 6.
+    pub goal: Option<String>,
+    /// The verify command (`-verify`), as a raw whitespace-separated string. When
+    /// omitted, the caller detects one from the repo shape.
+    pub verify: Option<String>,
+}
+
+/// Parses `run` arguments (everything after the `run` subcommand). Accepts both
+/// `-flag value` and `--flag value`. Each known flag consumes the next token; an
+/// unknown flag or a flag missing its value is an error (no silent guessing —
+/// the CLI is admin/setup, invariant 16).
+///
+/// # Errors
+/// Returns a human-readable message for an unknown flag or a missing value.
+pub fn parse_run(args: &[String]) -> Result<RunArgs, String> {
+    let mut out = RunArgs::default();
+    let mut i = 0;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        let take = |i: &mut usize| -> Result<String, String> {
+            *i += 1;
+            args.get(*i)
+                .cloned()
+                .ok_or_else(|| format!("flag '{flag}' needs a value"))
+        };
+        match flag {
+            "-dir" | "--dir" => out.dir = Some(take(&mut i)?),
+            "-goal" | "--goal" => out.goal = Some(take(&mut i)?),
+            "-verify" | "--verify" => out.verify = Some(take(&mut i)?),
+            other => return Err(format!("unknown 'run' flag '{other}'")),
+        }
+        i += 1;
+    }
+    Ok(out)
+}
+
 /// The help text shown by `crustcore --help`.
 #[must_use]
 pub fn help_text() -> String {
@@ -63,14 +104,19 @@ pub fn help_text() -> String {
          \x20   crustcore <command>\n\
          \n\
          COMMANDS:\n\
-         \x20   run            Run a verified coding task in a disposable worktree (Phase 5)\n\
+         \x20   run            Run a verified coding task in a disposable worktree\n\
          \x20   inspect <log>  Verify the event-log hash chain and print a task summary\n\
          \x20   export  <log>  Export the event log as JSONL\n\
          \x20   version        Print version\n\
          \x20   help           Print this help\n\
          \n\
+         RUN:\n\
+         \x20   crustcore run -dir <repo> -goal <text> -verify <command>\n\
+         \x20   Creates a disposable git worktree, reruns <command> in a sandbox,\n\
+         \x20   and completes only if it passes (-verify auto-detected if omitted).\n\
+         \n\
          The CLI is setup/admin/emergency only. Runtime control is via Telegram\n\
-         (see docs/telegram.md). This is a pre-implementation scaffold.\n"
+         (see docs/telegram.md).\n"
     )
 }
 
@@ -91,5 +137,37 @@ mod tests {
         assert_eq!(parse(["run"]), Command::Run);
         assert_eq!(parse(["inspect"]), Command::Inspect);
         assert_eq!(parse(["nope"]), Command::Unknown("nope".to_string()));
+    }
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| (*x).to_string()).collect()
+    }
+
+    #[test]
+    fn parse_run_collects_flags() {
+        let a = parse_run(&s(&[
+            "-dir",
+            ".",
+            "-goal",
+            "fix it",
+            "-verify",
+            "cargo test",
+        ]))
+        .unwrap();
+        assert_eq!(a.dir.as_deref(), Some("."));
+        assert_eq!(a.goal.as_deref(), Some("fix it"));
+        assert_eq!(a.verify.as_deref(), Some("cargo test"));
+        // Long forms and empty args also work.
+        assert_eq!(parse_run(&[]).unwrap(), RunArgs::default());
+        assert_eq!(
+            parse_run(&s(&["--dir", "/repo"])).unwrap().dir.as_deref(),
+            Some("/repo")
+        );
+    }
+
+    #[test]
+    fn parse_run_rejects_unknown_flag_and_missing_value() {
+        assert!(parse_run(&s(&["-bogus", "x"])).is_err());
+        assert!(parse_run(&s(&["-dir"])).is_err());
     }
 }

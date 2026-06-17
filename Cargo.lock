@@ -28,8 +28,13 @@ dependencies = [
 name = "crustcore-backend"
 version = "0.1.0"
 dependencies = [
+ "crustcore-path",
+ "crustcore-policy",
  "crustcore-receipts",
+ "crustcore-runner",
+ "crustcore-sandbox",
  "crustcore-types",
+ "crustcore-worktree",
 ]
 
 [[package]]

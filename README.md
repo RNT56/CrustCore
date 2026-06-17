@@ -59,39 +59,47 @@ general assistant.
 
 ## Status
 
-**Phase 4 — kernel + audit log + confined tools + sandboxed execution.** On top
-of the Phase 0 bootstrap, the trusted nanokernel (`Kernel::step`) is a
-synchronous, deterministic, allocation-light `event -> state mutation -> bounded
-action list` reducer (no async/network/db, no wall clock) owning the task/job
-state machine, typed budgets, and the approval flow — so the model can't approve
-its own side effects, every effect passes through policy, every task has budget
-limits, and irreversible actions require an approval token. The **append-only,
-hash-chained event log** makes runs replayable and tamper-evident, and **tool
-receipts** (a MAC chain the model can't forge) bind every model-visible tool
-result to a real call (invariant 10). File and git access is **confined to the
-task worktree** (typed symlink-safe paths; capability-gated tools; hardened git
-wrappers that can't run hooks/model config/filters). Arbitrary command execution
-goes through the **runner + sandbox**: bounded output, timeouts, process-tree
-kill, a sanitized from-scratch environment (no inherited secrets, validated
-path-lists), and a Linux bubblewrap backend with deny-all egress — and execution
-is *refused* when no sandbox backend is available (no run-unsandboxed path).
-Hashing is a vendored, dependency-free SHA-256/HMAC, so the workspace stays
-std-only and builds offline. The remaining sidecar crates are documented
-skeletons with `TODO(Pn)` markers.
+**Phase 5 — kernel + audit log + confined tools + sandboxed execution + worktree
+verify loop.** On top of the Phase 0 bootstrap, the trusted nanokernel
+(`Kernel::step`) is a synchronous, deterministic, allocation-light `event ->
+state mutation -> bounded action list` reducer (no async/network/db, no wall
+clock) owning the task/job state machine, typed budgets, and the approval flow —
+so the model can't approve its own side effects, every effect passes through
+policy, every task has budget limits, and irreversible actions require an approval
+token. The **append-only, hash-chained event log** makes runs replayable and
+tamper-evident, and **tool receipts** (a MAC chain the model can't forge) bind
+every model-visible tool result to a real call (invariant 10). File and git
+access is **confined to the task worktree** (typed symlink-safe paths;
+capability-gated tools; hardened git wrappers that can't run hooks/model
+config/filters). Arbitrary command execution goes through the **runner +
+sandbox**: bounded output, timeouts, process-tree kill, a sanitized from-scratch
+environment (no inherited secrets, validated path-lists), and a Linux bubblewrap
+backend with deny-all egress — and execution is *refused* when no sandbox backend
+is available (no run-unsandboxed path). The **worktree verify loop** creates a
+disposable `git worktree`, reruns the verify command in that sandbox, and mints a
+**`VerifiedPatch`** (carrying a receipt over the real run) *only* on a zero exit;
+`VerifiedPatch` is type-sealed and `complete_task` takes one by value, so a task
+completes only from verifier evidence (invariant 13) — `crustcore run -dir <repo>
+-goal <text> -verify <command>` drives it end to end. Hashing is a vendored,
+dependency-free SHA-256/HMAC, so the workspace stays std-only and builds offline.
+The remaining sidecar crates are documented skeletons with `TODO(Pn)` markers.
 
 The trusted core is real today:
 
 - `cargo xtask verify` is green — fmt, clippy `-D warnings`, tests, the
   forbidden-dependency check, and the nano size gate.
-- `crustcore --version` builds in the `nano` profile at **~296 KiB stripped**
-  (37% of the 800 KiB budget) — the kernel + audit log added nothing measurable.
-- `crustcore selftest` drives the kernel **and** event-log pipelines;
-  `crustcore inspect <log>` verifies the hash chain and prints a task summary, and
-  `crustcore export <log>` renders it as JSONL.
+- `crustcore --version` builds in the `nano` profile at **~395 KiB stripped**
+  (49% of the 800 KiB budget) — now that `crustcore run` links the runner,
+  sandbox, and verify loop.
+- `crustcore run -dir . -verify "<cmd>"` creates a disposable worktree and
+  completes only if `<cmd>` passes in the sandbox; `crustcore selftest` drives the
+  kernel **and** event-log pipelines; `crustcore inspect <log>` verifies the hash
+  chain and prints a task summary, and `crustcore export <log>` renders it as JSONL.
 - The trusted core carries exhaustive impossible-transition property tests, a
   sub-microsecond `kernel_step` microbench, SHA-256/HMAC vector tests, event-log
   tamper tests, a hostile-bytes decoder fuzz, real-fs path-confinement/symlink
-  fixtures, and receipt-forgery + symlink-escape red-team fixtures.
+  fixtures, the golden "fix failing test" verify-loop task, and receipt-forgery +
+  symlink-escape red-team fixtures.
 
 See the [roadmap](./ROADMAP.md) for the full plan and the v0.1 definition of
 done, and [Building](#building) below to run it.
