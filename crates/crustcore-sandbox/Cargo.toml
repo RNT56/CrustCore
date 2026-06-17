@@ -12,3 +12,4 @@ description = "Sandbox command specs, profiles, and backend wrappers for CrustCo
 crustcore-types = { workspace = true }
 crustcore-path = { workspace = true }
 crustcore-runner = { workspace = true }
+crustcore-policy = { workspace = true }

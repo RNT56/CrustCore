@@ -195,9 +195,44 @@ fn symlink_escape_is_blocked() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Red-team (P4.7, R11): a malicious environment tries loader injection
+/// (`LD_PRELOAD`) and a path-list escape (an empty/relative `PATH` component =
+/// current directory). The env sanitizer strips loader/credential vars and the
+/// path-list validator rejects bad components (a single one fails the whole
+/// variable) — so neither reaches a sandboxed process (invariant 9;
+/// `docs/sandbox.md` §5).
 #[test]
-#[ignore = "TODO(P4.7): LD_PRELOAD / path-env escape fixture"]
-fn path_env_escape_is_blocked() {}
+fn path_env_escape_is_blocked() {
+    use crustcore_sandbox::{sanitize_env, validate_path_list, SandboxProfile};
+    use std::collections::BTreeMap;
+
+    let profile = SandboxProfile::default_sandboxed();
+
+    // An empty leading PATH component (current dir) fails the whole variable.
+    let mut hostile = BTreeMap::new();
+    hostile.insert("LD_PRELOAD".to_string(), "/tmp/evil.so".to_string());
+    hostile.insert("PATH".to_string(), ":/usr/bin".to_string());
+    assert!(sanitize_env(&hostile, &profile, None).is_err());
+
+    // With a clean PATH, the loader var is dropped and PATH survives.
+    let mut env = BTreeMap::new();
+    env.insert("LD_PRELOAD".to_string(), "/tmp/evil.so".to_string());
+    env.insert(
+        "DYLD_INSERT_LIBRARIES".to_string(),
+        "/tmp/evil.dylib".to_string(),
+    );
+    env.insert("PATH".to_string(), "/usr/bin:/bin".to_string());
+    let out = sanitize_env(&env, &profile, None).unwrap();
+    assert!(!out.contains_key("LD_PRELOAD"));
+    assert!(!out.contains_key("DYLD_INSERT_LIBRARIES"));
+    assert_eq!(out.get("PATH").map(String::as_str), Some("/usr/bin:/bin"));
+
+    // Direct validator coverage of the component checks.
+    assert!(validate_path_list("/usr/bin:/bin").is_ok());
+    assert!(validate_path_list("/usr/bin:.").is_err());
+    assert!(validate_path_list("relative").is_err());
+    assert!(validate_path_list("/a::/b").is_err());
+}
 
 /// Red-team (P2.6): a model/worker fabricates a tool result. Receipts make a
 /// model-visible tool result unforgeable (invariant 10): a receipt minted under a

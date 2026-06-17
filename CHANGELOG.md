@@ -30,6 +30,24 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Phase 4 — runner + sandbox (P4.1–P4.7).** Execution is bounded, killable, and
+  sandboxed:
+  - `crustcore-runner`: `run(CommandSpec) -> CommandResult` — spawns in its **own
+    process group** (`process_group(0)`), captures **bounded** stdout/stderr
+    (then drains so the child can't block), enforces a **timeout** with a
+    **process-tree kill** (SIGTERM→SIGKILL the whole group via `kill -<sig>
+    -<pgid>`), and builds the env from scratch (no ambient inheritance). Std-only,
+    no `unsafe`/libc.
+  - `crustcore-sandbox`: an **environment sanitizer** (strips loader/credential
+    vars by list, prefix, and credential-name heuristic) and a **path-list
+    validator** (component-by-component: rejects empty/relative/`.`/`..`/NUL — a
+    single bad component fails the whole var); the **Linux bubblewrap backend v1**
+    (read-only system, read-write worktree, `--unshare-all` = deny-all egress;
+    `--share-net` only for an explicit allowlist) with backend **selection** and
+    **refusal** when no backend can provide the tier (no run-unsandboxed degrade;
+    Tier-3/microVM refused in v0.1); `run_command(SandboxExecCap, profile, spec)`.
+  - Red-team fixture `path_env_escape_is_blocked` un-ignored (P4.7, R11):
+    `LD_PRELOAD` and empty/relative `PATH` components are stripped/rejected.
 - **Phase 3 — path confinement + structured tools (P3.1–P3.6).** Safe file/git
   access confined to the task worktree:
   - `crustcore-path`: real symlink-safe confinement — `WorktreeRoot::open`
@@ -148,6 +166,40 @@ agent/PR/role/size/invariant audit trail.
   (now including `CLAUDE.md` and `AGENTS.md`); fixed approximate roadmap
   list-item anchors in `THREAT_MODEL.md` and `docs/sandbox.md`.
 
+### Fixed
+
+- **Phase 4 — timeout process-tree kill on Linux CI (`crustcore-runner`).** The
+  group kill shelled out to `kill -<sig> -<pgid>`; Linux `procps-ng kill`, when
+  given that exact argv, silently returns success **without delivering** to the
+  negative-pid process group (it needs a `--` end-of-options separator). The
+  timeout therefore fired but the process tree survived and `wait()` blocked for
+  the full child lifetime — `cargo xtask verify` hung the two runner timeout tests
+  for 30s each and failed CI on `ubuntu-latest` while passing on macOS (BSD `kill`
+  accepts the bare form). Fix: issue **both** argument forms (`-<sig> -<pgid>` and
+  `-<sig> -- -<pgid>`; signals are idempotent), and additionally SIGKILL the
+  leader directly via its `Child` handle — a std-only guarantee that does not
+  depend on an external `kill` binary or its argv parsing. Reproduced and verified
+  fixed in a faithful `ubuntu:24.04` container (the committed pre-fix code hung
+  60s there; the fixed code passes in 0.3s).
+
+### Security
+
+- **Phase 4 review hardening (`crustcore-runner`, `crustcore-sandbox`).** Address
+  confirmed findings from the Phase 4 adversarial review:
+  - Removed the clean-exit process-group SIGKILL sweep (a narrow pid-reuse TOCTOU:
+    it signalled `pgid` *after* `wait()` reaped the leader, so a reused pid could
+    receive an errant cross-group SIGKILL); the bounded reader drain — and, in the
+    real path, the bubblewrap pid namespace — already guarantee `run()` returns.
+  - Env sanitizer now strips the JVM (`JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`,
+    `JDK_JAVA_OPTIONS`), Go (`GOFLAGS`, `GOENV`), zsh (`ZDOTDIR`), pager
+    (`LESSOPEN`, `LESSCLOSE`), and interpreter library-path
+    (`RUBYLIB`, `PERLLIB`, `PYTHONHOME`) code-execution variables that previously
+    passed through.
+  - Env sanitizer rejects `HOME` / `XDG_CONFIG_HOME` that are relative or resolve
+    inside the model-writable worktree — closing a git-config
+    (`core.pager`/`alias`/`core.fsmonitor`) code-execution vector that survived
+    even when no `*_OPTIONS` variable did.
+
 ### Agent Log
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
@@ -157,7 +209,9 @@ agent/PR/role/size/invariant audit trail.
 | 2026-06-16 | P0.1–P0.5 | Bootstrap compiling workspace (19 crates + xtask), CI + nano size gate + CODEOWNERS, Apache-2.0 license; `cargo xtask verify` green | `claude/crustcore-project-docs-q0kr2p` | Maintainer agent (Architect/Implementer) | +296 KiB baseline (37% of 800 KiB budget) | Enforces/encodes 8, 9, 13, 14, 16, 19, 20; embeds 1–3 in types; none weakened |
 | 2026-06-17 | P1.1–P1.7 | Implement the kernel state machine: transition tables, budgets, approvals, lease/expiry; exhaustive property tests + no-panic fuzz + microbench; design & two adversarial-review passes. **Contract file touched:** `crates/crustcore-kernel/src/event.rs` (additive payload fields, reviewed). | `claude/p1-kernel` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (295.5 KiB, 36.9% of budget; within section alignment) | Enforces 4, 8, 11, 14 in code; partial 12 (lease/expiry/stale-owner); verifies determinism/idempotency/bounded-fan-out/no-panic; none weakened |
 | 2026-06-17 | P2.1–P2.6 | Implement the hash-chained event log + tool receipts: vendored SHA-256/HMAC (NIST/RFC vectors), `EventFrame` binary format + append/verify, `ToolReceipt` MAC chain, `crustcore inspect`/`export`, tamper tests + hostile-bytes decoder fuzz; un-ignore the fabricated-tool-result red-team fixture. Stacked on `claude/p1-kernel`. | `claude/p2-eventlog` (PR #4, merged) | Maintainer agent (Architect/Implementer) | +0.1 KiB (295.6 KiB, 37.0% of budget) | Enforces 10 (receipts) + the event-log half of the audit story; verifies tamper-evidence + no-panic decode; none weakened |
-| 2026-06-17 | P3.1–P3.6 | Implement symlink-safe path confinement (`crustcore-path`) + capability-gated file tools and hardened git wrappers (`crustcore-worktree::tools`); real-fs symlink fixtures; un-ignore the symlink-escape red-team fixture. | `claude/p3-path` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (295.6 KiB, 37.0%; tools dead-code-eliminated until wired) | Enforces 7 (untrusted paths) + 8 (cap-gated file/git ops); verifies symlink/absolute/`..` escapes fail and git can't run hooks/model config; none weakened |
+| 2026-06-17 | P3.1–P3.6 | Implement symlink-safe path confinement (`crustcore-path`) + capability-gated file tools and hardened git wrappers (`crustcore-worktree::tools`); real-fs symlink fixtures; un-ignore the symlink-escape red-team fixture. **Two rounds of critical git-RCE fixes** (textconv/external-diff, then clean/smudge filters via `* -filter` in info/attributes) + a no-follow neutralizer fix, across three review passes. | `claude/p3-path` (PR #5, merged) | Maintainer agent (Architect/Implementer) | +0 KiB (295.6 KiB, 37.0%; tools dead-code-eliminated until wired) | Enforces 7 (untrusted paths) + 8 (cap-gated file/git ops); verifies symlink/absolute/`..` escapes fail and git can't run hooks/model config/filters; none weakened |
+| 2026-06-17 | P4.1–P4.7 | Implement the process runner (bounded capture, timeout, process-group kill, env-from-scratch) and the sandbox (env sanitizer, path-list validator, Linux bubblewrap backend v1 + selection/refusal, `run_command`); un-ignore the path-env-escape red-team fixture. | `claude/p4-sandbox` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (295.6 KiB, 37.0%; runner/sandbox dead-code-eliminated until wired) | Enforces 9 (sandboxed execution), 11 (bounded output/timeout), 12 (kill/cancel); deny-all egress + no inherited secrets; Tier-3 microVM out of v0.1 scope; none weakened |
+| 2026-06-17 | P4 hardening | Fix the Linux-CI timeout-kill hang (procps-ng needs `kill -- -<pgid>`; also SIGKILL the leader via its `Child` handle) — root-caused and verified in a faithful `ubuntu:24.04` container. Address Phase-4 review findings: drop the pid-reuse-TOCTOU clean-exit group sweep; strip JVM/Go/zsh/pager/interpreter-lib exec env vars; reject `HOME`/`XDG_CONFIG_HOME` inside the worktree. | `claude/p4-sandbox` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (295.6 KiB, 37.0%) | Strengthens 9 (sandbox env), 12 (reliable process-tree kill); none weakened |
 
 ---
 

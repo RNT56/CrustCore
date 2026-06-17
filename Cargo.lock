@@ -58,6 +58,7 @@ dependencies = [
  "crustcore-path",
  "crustcore-policy",
  "crustcore-receipts",
+ "crustcore-sandbox",
  "crustcore-secrets",
  "crustcore-types",
  "crustcore-worktree",
@@ -155,6 +156,7 @@ name = "crustcore-sandbox"
 version = "0.1.0"
 dependencies = [
  "crustcore-path",
+ "crustcore-policy",
  "crustcore-runner",
  "crustcore-types",
 ]

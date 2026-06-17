@@ -9,18 +9,21 @@
 **Project:** CrustCore — a sub-800kB Rust coding-agent *verifier kernel* with
 optional capability packs.
 **Repository:** https://github.com/RNT56/CrustCore
-**Status:** Phase 3 — kernel + audit log + confined file/git tools implemented
+**Status:** Phase 4 — kernel + audit log + confined tools + sandboxed execution
 (green `cargo xtask verify`). The trusted `Kernel::step` state machine is real
 (task/job transitions, typed budgets, approval request/resolution; sync,
 deterministic, no async/net/db, no wall clock). The append-only hash-chained
 **event log** (`crustcore inspect`/`export`, tamper-evident) and **tool receipts**
-(a CrustCore-keyed MAC chain, invariant 10) are implemented, hashing via a
-vendored dependency-free SHA-256/HMAC. **Path confinement** (`crustcore-path`,
-symlink-safe) plus capability-gated structured file tools and hardened git
-wrappers (`crustcore-worktree::tools`) confine all file/git access to the task
-worktree. Backed by exhaustive property tests, no-panic fuzzes, a microbench,
-tamper tests, and real-fs symlink/red-team fixtures. The remaining heavy crates
-are still documented skeletons with `TODO(Pn)` markers.
+(a CrustCore-keyed MAC chain, invariant 10) are implemented (vendored
+dependency-free SHA-256/HMAC). **Path confinement** (`crustcore-path`,
+symlink-safe) + capability-gated file tools and hardened git wrappers
+(`crustcore-worktree::tools`) confine all file/git access. The **runner**
+(`crustcore-runner`: bounded capture, timeout, process-tree kill) and **sandbox**
+(`crustcore-sandbox`: env sanitizer, path-list validator, Linux bubblewrap
+backend v1 with deny-all egress, refuse-if-no-backend) gate arbitrary execution
+(invariant 9). Backed by exhaustive property tests, no-panic fuzzes, a microbench,
+tamper tests, and real-fs symlink + sandbox red-team fixtures. The remaining heavy
+crates are still documented skeletons with `TODO(Pn)` markers.
 **Authoritative roadmap:** [`ROADMAP.md`](./ROADMAP.md) (the maintainer handoff draft — the
 substance of everything below derives from it).
 
