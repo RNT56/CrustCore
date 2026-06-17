@@ -59,21 +59,25 @@ general assistant.
 
 ## Status
 
-**Phase 3 — kernel + audit log + confined file/git tools.** On top of the Phase 0
-bootstrap, the trusted nanokernel (`Kernel::step`) is a synchronous, deterministic,
-allocation-light `event -> state mutation -> bounded action list` reducer (no
-async/network/db, no wall clock) owning the task/job state machine, typed budgets,
-and the approval flow — so the model can't approve its own side effects, every
-effect passes through policy, every task has budget limits, and irreversible
-actions require an approval token. The **append-only, hash-chained event log**
-makes runs replayable and tamper-evident, and **tool receipts** (a MAC chain the
-model can't forge) bind every model-visible tool result to a real call (invariant
-10). File and git access is **confined to the task worktree**: typed
-symlink-safe confined paths mean no arbitrary path string reaches a write tool,
-and the structured file tools + hardened git wrappers are capability-gated and
-can't execute hooks or honor model-written config. Hashing is a vendored,
-dependency-free SHA-256/HMAC, so the workspace stays std-only and builds offline.
-The remaining sidecar crates are documented skeletons with `TODO(Pn)` markers.
+**Phase 4 — kernel + audit log + confined tools + sandboxed execution.** On top
+of the Phase 0 bootstrap, the trusted nanokernel (`Kernel::step`) is a
+synchronous, deterministic, allocation-light `event -> state mutation -> bounded
+action list` reducer (no async/network/db, no wall clock) owning the task/job
+state machine, typed budgets, and the approval flow — so the model can't approve
+its own side effects, every effect passes through policy, every task has budget
+limits, and irreversible actions require an approval token. The **append-only,
+hash-chained event log** makes runs replayable and tamper-evident, and **tool
+receipts** (a MAC chain the model can't forge) bind every model-visible tool
+result to a real call (invariant 10). File and git access is **confined to the
+task worktree** (typed symlink-safe paths; capability-gated tools; hardened git
+wrappers that can't run hooks/model config/filters). Arbitrary command execution
+goes through the **runner + sandbox**: bounded output, timeouts, process-tree
+kill, a sanitized from-scratch environment (no inherited secrets, validated
+path-lists), and a Linux bubblewrap backend with deny-all egress — and execution
+is *refused* when no sandbox backend is available (no run-unsandboxed path).
+Hashing is a vendored, dependency-free SHA-256/HMAC, so the workspace stays
+std-only and builds offline. The remaining sidecar crates are documented
+skeletons with `TODO(Pn)` markers.
 
 The trusted core is real today:
 
