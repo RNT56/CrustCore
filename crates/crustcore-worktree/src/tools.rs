@@ -318,6 +318,21 @@ fn neutralize_attribute_drivers(worktree: &Path) -> Result<(), ToolError> {
         return Ok(());
     }
     let path = worktree.join(rel);
+    // No-follow: a hostile repo could ship `.git/info` or `.git/info/attributes`
+    // as a symlink pointing out of the worktree, turning this write into an
+    // arbitrary out-of-tree clobber. Refuse rather than write through a symlink
+    // (invariant 7; THREAT_MODEL R10 "no-follow writes"). Refusing — not skipping
+    // — keeps the neutralizer un-bypassable: a symlinked info/attributes makes the
+    // git command fail instead of silently running with filters live.
+    for p in [path.parent(), Some(path.as_path())].into_iter().flatten() {
+        if let Ok(meta) = std::fs::symlink_metadata(p) {
+            if meta.file_type().is_symlink() {
+                return Err(ToolError::Git(
+                    "refusing: .git/info attributes path is a symlink".to_string(),
+                ));
+            }
+        }
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(io)?;
     }
@@ -753,6 +768,38 @@ mod tests {
             "git_apply executed a repo filter.smudge driver (RCE)"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A hostile repo that symlinks .git/info/attributes out of the worktree must
+    // not get our neutralizer write redirected through it (no-follow; invariant 7).
+    #[test]
+    fn neutralizer_refuses_symlinked_info_attributes() {
+        let Some(dir) = git_repo("info-symlink") else {
+            eprintln!("skipping: git unavailable");
+            return;
+        };
+        let outside = temp_dir("info-outside");
+        let victim = outside.join("victim.txt");
+        std::fs::write(&victim, b"original-contents\n").unwrap();
+        // Replace .git/info/attributes with a symlink to the outside victim.
+        std::fs::create_dir_all(dir.join(".git/info")).unwrap();
+        let attrs = dir.join(".git/info/attributes");
+        let _ = std::fs::remove_file(&attrs);
+        std::os::unix::fs::symlink(&victim, &attrs).unwrap();
+
+        let rcap = FsReadCap {
+            root: WorktreeRoot::open(&dir).unwrap(),
+            scope: ScopeId(1),
+        };
+        // The wrapper refuses rather than following the symlink.
+        assert!(matches!(git_status(&rcap), Err(ToolError::Git(_))));
+        // The out-of-tree victim is untouched.
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "original-contents\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]
