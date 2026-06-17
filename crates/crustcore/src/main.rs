@@ -12,8 +12,12 @@
 use std::process::ExitCode;
 
 use crustcore_backend::verify::{run_verify, VerifyIds, VerifyOutcome, VerifySpec};
+use crustcore_backend::worker::{
+    run_external_worker, ClaudeCodeBackend, CodexBackend, CodingBackend, ExternalCommandBackend,
+    WorkerInput, WorkerProduct,
+};
 use crustcore_backend::{complete_task, PatchRef};
-use crustcore_cli::Command;
+use crustcore_cli::{Command, RunArgs};
 use crustcore_eventlog::{ChainStatus, EventLog, FrameMeta};
 use crustcore_kernel::{Actor, Event, EventKind, Kernel, Visibility};
 use crustcore_policy::{PolicySnapshot, RiskProfile, SandboxExecCap};
@@ -84,9 +88,19 @@ fn run_task(run_args: &[String]) -> ExitCode {
         }
     };
 
+    // Validate the backend selection up front (before any side effect).
+    let backend = match select_backend(&parsed) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("crustcore run: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
     if let Some(goal) = parsed.goal.as_deref() {
         println!("goal: {goal}");
     }
+    println!("backend: {}", backend.label());
     println!("verify: {}", spec.display());
 
     // One task per `run` (the autonomous, multi-task supervisor is later phases).
@@ -101,19 +115,26 @@ fn run_task(run_args: &[String]) -> ExitCode {
     };
     println!("worktree: {}", worktree.as_path().display());
 
-    // Reference the verified state by the worktree's HEAD commit (no diffing, so
-    // the canonical repo is never mutated). Precise patch-content addressing
-    // arrives with the backends that produce diffs (Phase 6).
-    let head = manager.head_commit(&worktree).unwrap_or_default();
-    let patch = PatchRef {
-        diff_hash: sha256(head.as_bytes()),
-    };
-
     let cap = SandboxExecCap {
         profile: ScopeId(1),
         scope: ScopeId(1),
     };
     let profile = SandboxProfile::default_sandboxed();
+
+    // Produce a candidate change. The native path verifies the worktree as-is and
+    // references the verified state by HEAD. An external worker (codex/claude/cmd)
+    // runs sandboxed with no secrets, then CrustCore re-derives the real diff from
+    // the worktree and rejects any out-of-root write — the patch a worker produces
+    // is an *unverified* proposal (invariants 6/7). Either way the verifier below is
+    // the only thing that can complete the task (invariant 13).
+    let patch = match produce_patch(&backend, &parsed, &manager, &worktree, &cap, &profile) {
+        Ok(p) => p,
+        Err(code) => {
+            let _ = manager.remove(&worktree);
+            return code;
+        }
+    };
+
     let mut receipts = ReceiptChain::new(MacKey::new(run_key()));
     let ids = VerifyIds {
         task_id: task,
@@ -154,6 +175,133 @@ fn run_task(run_args: &[String]) -> ExitCode {
     // Tear down the disposable worktree on every path (best-effort).
     let _ = manager.remove(&worktree);
     code
+}
+
+/// The coding backend selected for a run. `Native` verifies the worktree as-is;
+/// the others run an external worker that produces a candidate change first.
+enum Backend {
+    /// No external worker: verify the worktree as it stands (Phase 5 behavior).
+    Native,
+    /// Codex CLI worker.
+    Codex,
+    /// Claude Code worker.
+    ClaudeCode,
+    /// A generic external worker: `program` + literal `args`.
+    Cmd(String, Vec<String>),
+}
+
+impl Backend {
+    fn label(&self) -> String {
+        match self {
+            Backend::Native => "native (verify worktree as-is)".to_string(),
+            Backend::Codex => "codex".to_string(),
+            Backend::ClaudeCode => "claude".to_string(),
+            Backend::Cmd(p, _) => format!("cmd ({p})"),
+        }
+    }
+
+    /// Builds the trait object for an external worker, or `None` for `Native`.
+    fn as_coding_backend(&self) -> Option<Box<dyn CodingBackend>> {
+        match self {
+            Backend::Native => None,
+            Backend::Codex => Some(Box::new(CodexBackend::default())),
+            Backend::ClaudeCode => Some(Box::new(ClaudeCodeBackend::default())),
+            Backend::Cmd(p, a) => Some(Box::new(ExternalCommandBackend::new(p.clone(), a.clone()))),
+        }
+    }
+}
+
+/// Selects the backend from `-backend`/`-worker-cmd`. The `-worker-cmd` string is
+/// split on whitespace into program + args with **no shell interpretation**
+/// (invariant 7), mirroring `-verify`.
+///
+/// # Errors
+/// Returns a message for an unknown backend or a missing/empty `-worker-cmd`.
+fn select_backend(parsed: &RunArgs) -> Result<Backend, String> {
+    match parsed.backend.as_deref() {
+        None | Some("native") => Ok(Backend::Native),
+        Some("codex") => Ok(Backend::Codex),
+        Some("claude") => Ok(Backend::ClaudeCode),
+        Some("cmd") => {
+            let raw = parsed
+                .worker_cmd
+                .as_deref()
+                .ok_or("-backend cmd requires -worker-cmd <command>")?;
+            let mut toks = raw.split_whitespace().map(str::to_string);
+            let program = toks.next().ok_or("-worker-cmd was empty")?;
+            Ok(Backend::Cmd(program, toks.collect()))
+        }
+        Some(other) => Err(format!(
+            "unknown -backend '{other}' (expected native|codex|claude|cmd)"
+        )),
+    }
+}
+
+/// Produces the candidate patch reference for the run. For `Native`, this is the
+/// worktree HEAD (no external change). For an external worker, it runs the worker
+/// sandboxed, re-derives the real diff from the worktree, and returns the
+/// *unverified* patch reference — failing (with a non-zero [`ExitCode`]) if the
+/// worker could not run sandboxed, wrote outside the worktree, or produced an
+/// escaping change. Nothing here completes the task; the verifier does.
+fn produce_patch(
+    backend: &Backend,
+    parsed: &RunArgs,
+    manager: &WorktreeManager,
+    worktree: &crustcore_path::WorktreeRoot,
+    cap: &SandboxExecCap,
+    profile: &SandboxProfile,
+) -> Result<PatchRef, ExitCode> {
+    let Some(coding) = backend.as_coding_backend() else {
+        // Native: reference the verified state by HEAD (no diffing, canonical repo
+        // untouched). Precise patch-content addressing is the worker path's job.
+        let head = manager.head_commit(worktree).unwrap_or_default();
+        return Ok(PatchRef {
+            diff_hash: sha256(head.as_bytes()),
+        });
+    };
+
+    let goal = parsed.goal.as_deref().unwrap_or("");
+    let input = WorkerInput::for_task(TaskId(1), goal, worktree);
+    match run_external_worker(coding.as_ref(), &input, worktree, cap, profile) {
+        Ok(product) => {
+            report_product(&product);
+            // The worker's proposal is unverified; take only its re-derived patch
+            // reference. self_claimed_done / commands_run are advisory metadata.
+            Ok(product.patch.0)
+        }
+        Err(e) => {
+            eprintln!("WORKER REJECTED: {e}");
+            eprintln!(
+                "the worker's result was not accepted; nothing is completed without a \
+                 verified, confined patch (invariants 6, 7, 13)."
+            );
+            Err(ExitCode::from(1))
+        }
+    }
+}
+
+/// Prints a bounded summary of what a worker produced (all untrusted/derived).
+fn report_product(product: &WorkerProduct) {
+    println!(
+        "worker produced a candidate change: {} file(s) changed",
+        product.changed_files.len()
+    );
+    for cf in &product.changed_files {
+        match &cf.sensitivity {
+            crustcore_backend::worker::Sensitivity::Sensitive(reason) => {
+                println!("  - {} [SENSITIVE: {reason}]", cf.path);
+            }
+            crustcore_backend::worker::Sensitivity::Normal => {
+                println!("  - {}", cf.path);
+            }
+        }
+    }
+    if !product.result.risks.is_empty() {
+        println!("worker-flagged risks: {}", product.result.risks.len());
+    }
+    if product.result.self_claimed_done {
+        println!("note: worker self-claimed done (advisory only — the verifier decides).");
+    }
 }
 
 /// Resolves the verify command from an explicit `-verify` string or, when absent,

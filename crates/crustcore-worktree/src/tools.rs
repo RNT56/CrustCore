@@ -362,6 +362,27 @@ pub fn git_status(cap: &FsReadCap) -> Result<String, ToolError> {
     run_git(c, None)
 }
 
+/// `git status --porcelain --untracked-files=all` (read capability): like
+/// [`git_status`] but lists every untracked file **individually** rather than
+/// collapsing a new directory to a single entry. The supervisor's worker
+/// validation needs per-file paths so each changed file is independently confined
+/// (rejecting symlink/`..` escapes) and classified (`docs/backend-contract.md`
+/// §4.2). Renames are decomposed (`--no-renames`) so each side is a plain path.
+///
+/// # Errors
+/// As [`git_status`].
+pub fn git_status_all(cap: &FsReadCap) -> Result<String, ToolError> {
+    neutralize_attribute_drivers(cap.root.as_path())?;
+    let mut c = hardened_git(cap.root.as_path());
+    c.args([
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--no-renames",
+    ]);
+    run_git(c, None)
+}
+
 /// `git diff` of the worktree (read capability).
 ///
 /// # Errors

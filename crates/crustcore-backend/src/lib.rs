@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod verify;
+pub mod worker;
 
 use crustcore_receipts::ToolReceipt;
 use crustcore_types::{BoundedText, Timestamp};
