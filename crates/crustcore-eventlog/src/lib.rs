@@ -576,14 +576,26 @@ impl EventLog {
             hex_into(&mut out, &fr.prev_hash);
             out.push_str("\",\"frame_hash\":\"");
             hex_into(&mut out, &fr.frame_hash);
-            let _ = write!(out, "\",\"payload_len\":{}", payload.len());
-            out.push_str(",\"payload\":\"");
+            // Respect BOTH gates (docs/event-log.md §8, invariants 2/3): raw bytes
+            // are rendered only for a `Clean` + `ModelVisible` payload. A
+            // `Redacted` (secret-bearing) payload hides its bytes AND its length
+            // (length can be sensitive); an `Internal` payload is withheld from
+            // this surface as `<internal>` (its length is non-secret and kept for
+            // debugging). The `payload_hash` always commits to the real content.
             if fr.redaction == RedactionState::Redacted {
-                out.push_str("<redacted>");
-            } else {
+                out.push_str(",\"payload_len\":null,\"payload\":\"<redacted>\"");
+            } else if fr.visibility == Visibility::ModelVisible {
+                // Clean + model-visible: safe to render bytes.
+                let _ = write!(out, ",\"payload_len\":{}", payload.len());
+                out.push_str(",\"payload\":\"");
                 hex_into(&mut out, payload);
+                out.push('"');
+            } else {
+                // Clean but internal: withhold bytes, keep the (non-secret) length.
+                let _ = write!(out, ",\"payload_len\":{}", payload.len());
+                out.push_str(",\"payload\":\"<internal>\"");
             }
-            out.push_str("\"}\n");
+            out.push_str("}\n");
         }
         out
     }
@@ -1012,7 +1024,10 @@ mod tests {
     #[test]
     fn export_jsonl_one_line_per_frame_and_redacts() {
         let mut log = EventLog::new();
-        log.append(&meta(1, EventKind::TaskCreated), b"hi");
+        // A model-visible, clean payload renders its bytes as hex.
+        let visible = meta(1, EventKind::ModelOutputReceived).visibility(Visibility::ModelVisible);
+        log.append(&visible, b"hi");
+        // A redacted payload hides its bytes AND its length.
         let m = meta(2, EventKind::ModelOutputReceived)
             .redaction(RedactionState::Redacted)
             .visibility(Visibility::ModelVisible);
@@ -1020,10 +1035,27 @@ mod tests {
         let jsonl = log.export_jsonl();
         let lines: Vec<&str> = jsonl.lines().collect();
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("\"kind\":\"TaskCreated\""));
         assert!(lines[0].contains("\"payload\":\"6869\"")); // hex of "hi"
         assert!(lines[1].contains("\"payload\":\"<redacted>\""));
+        assert!(lines[1].contains("\"payload_len\":null"));
         assert!(!lines[1].contains("secret-bearing"));
+    }
+
+    // Export respects BOTH gates: an Internal payload's bytes are withheld
+    // (`<internal>`) even when Clean; a Redacted payload hides its length too.
+    #[test]
+    fn export_withholds_internal_payload_bytes() {
+        let mut log = EventLog::new();
+        // meta() defaults to Internal visibility, Clean redaction.
+        log.append(
+            &meta(1, EventKind::CommandOutputCaptured),
+            b"internal-bytes",
+        );
+        let jsonl = log.export_jsonl();
+        assert!(jsonl.contains("\"payload\":\"<internal>\""));
+        assert!(!jsonl.contains("696e7465726e616c")); // hex of "internal..."
+                                                      // The non-secret length is still shown for an internal frame.
+        assert!(jsonl.contains("\"payload_len\":14"));
     }
 
     // Export is verification-gated: flipping the redaction byte of a secret frame

@@ -70,7 +70,11 @@ pub struct ToolReceipt {
     pub result_hash: [u8; 32],
     /// Hashes of any artifacts produced (bounded).
     pub artifact_hashes: Vec<ArtifactId>,
-    /// The event sequence this receipt corresponds to.
+    /// The event sequence this receipt corresponds to. It is MAC-bound (so it
+    /// cannot be altered), but this crate does not cross-check that the event log
+    /// actually has a matching `ToolCall*` frame at `event_seq` — that join is
+    /// added when the verify loop wires receipts to the log.
+    /// TODO(P5): `verify_against_log` cross-checking `event_seq` → event frame.
     pub event_seq: EventSeq,
     /// Hash of the previous receipt (chains receipts).
     pub prev_receipt_hash: [u8; 32],
