@@ -63,11 +63,11 @@ pub fn help_text() -> String {
          \x20   crustcore <command>\n\
          \n\
          COMMANDS:\n\
-         \x20   run        Run a verified coding task in a disposable worktree (Phase 5)\n\
-         \x20   inspect    Replay and verify the event log (Phase 2)\n\
-         \x20   export     Export the event log as JSONL (Phase 2)\n\
-         \x20   version    Print version\n\
-         \x20   help       Print this help\n\
+         \x20   run            Run a verified coding task in a disposable worktree (Phase 5)\n\
+         \x20   inspect <log>  Verify the event-log hash chain and print a task summary\n\
+         \x20   export  <log>  Export the event log as JSONL\n\
+         \x20   version        Print version\n\
+         \x20   help           Print this help\n\
          \n\
          The CLI is setup/admin/emergency only. Runtime control is via Telegram\n\
          (see docs/telegram.md). This is a pre-implementation scaffold.\n"

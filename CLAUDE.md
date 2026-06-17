@@ -9,11 +9,15 @@
 **Project:** CrustCore — a sub-800kB Rust coding-agent *verifier kernel* with
 optional capability packs.
 **Repository:** https://github.com/RNT56/CrustCore
-**Status:** Phase 1 — kernel implemented (green `cargo xtask verify`). The trusted
-`Kernel::step` state machine is real (task/job transitions, typed budgets,
-approval request/resolution; sync, deterministic, no async/net/db, no wall clock),
-with exhaustive property tests, a no-panic fuzz, and a microbench. The remaining
-heavy crates are still documented skeletons with `TODO(Pn)` markers.
+**Status:** Phase 2 — kernel + audit log implemented (green `cargo xtask verify`).
+The trusted `Kernel::step` state machine is real (task/job transitions, typed
+budgets, approval request/resolution; sync, deterministic, no async/net/db, no
+wall clock). On top of it, the append-only hash-chained **event log**
+(`crustcore inspect`/`export`, tamper-evident) and **tool receipts** (a
+CrustCore-keyed MAC chain, invariant 10) are implemented, hashing via a vendored
+dependency-free SHA-256/HMAC. Exhaustive property tests, a no-panic kernel fuzz, a
+microbench, event-log tamper tests, and a hostile-bytes decoder fuzz back it. The
+remaining heavy crates are still documented skeletons with `TODO(Pn)` markers.
 **Authoritative roadmap:** [`ROADMAP.md`](./ROADMAP.md) (the maintainer handoff draft — the
 substance of everything below derives from it).
 

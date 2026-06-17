@@ -15,3 +15,5 @@ crustcore-policy = { workspace = true }
 crustcore-path = { workspace = true }
 crustcore-secrets = { workspace = true }
 crustcore-backend = { workspace = true }
+crustcore-eventlog = { workspace = true }
+crustcore-receipts = { workspace = true }
