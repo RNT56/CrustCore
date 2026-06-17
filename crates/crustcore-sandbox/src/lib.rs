@@ -101,6 +101,28 @@ pub fn default_stripped_env() -> Vec<String> {
         "PYTHONINSPECT",
         "NODE_OPTIONS",
         "GEM_HOME",
+        "RUBYLIB",
+        // Interpreter library/home redirection: load an attacker module ahead of
+        // the real one (PERLLIB like PERL5LIB) or repoint the whole stdlib
+        // (PYTHONHOME) so a trusted `import` resolves to model-written code.
+        "PERLLIB",
+        "PYTHONHOME",
+        // JVM: every `java`/`mvn`/`gradle` start honors these and they accept
+        // `-javaagent:`/`-D...` to load and run arbitrary code.
+        "JAVA_TOOL_OPTIONS",
+        "_JAVA_OPTIONS",
+        "JDK_JAVA_OPTIONS",
+        // Go toolchain: `GOFLAGS=-toolexec=<prog>` runs an arbitrary program
+        // during `go build`/`go test`; GOENV redirects the toolchain's config.
+        "GOFLAGS",
+        "GOENV",
+        // zsh startup-file redirection (runs .zshenv/.zshrc on every zsh start);
+        // the bash side is covered by BASH_ENV/ENV above.
+        "ZDOTDIR",
+        // Pager/preprocessor exec vectors — git shells out to a pager (`less`),
+        // whose LESSOPEN/LESSCLOSE run an arbitrary input-preprocessor command.
+        "LESSOPEN",
+        "LESSCLOSE",
     ]
     .iter()
     .map(|s| (*s).to_string())
@@ -169,6 +191,16 @@ pub const PATH_LIST_VARS: &[&str] = &[
 const STRIPPED_PREFIXES: &[&str] = &[
     "LD_", "DYLD_", "GIT_", "AWS_", "GCP_", "GOOGLE_", "AZURE_", "NPM_", "DOCKER_",
 ];
+
+/// Single-path env vars that select a directory from which a tool reads its
+/// startup/config files. If model-controlled — relative (so resolved against the
+/// worktree cwd) or pointing inside the worktree — they become a *config*
+/// code-execution vector even when no `*_OPTIONS` var survives: e.g. `git` reads
+/// `$HOME/.gitconfig` / `$XDG_CONFIG_HOME/git/config`, whose `core.pager`,
+/// `alias.*`, and `core.fsmonitor` keys run arbitrary commands. They are not
+/// stripped outright (a sandbox usually needs a real `HOME` for caches), but must
+/// be absolute and must not resolve into the writable worktree.
+pub const HOME_DIR_VARS: &[&str] = &["HOME", "XDG_CONFIG_HOME"];
 
 /// Whether an env var must be stripped before a sandbox launch: it is in the
 /// profile's explicit list, matches a dangerous prefix, or its name looks like a
@@ -266,6 +298,25 @@ pub fn sanitize_env(
                             "env {name}: component '{comp}' is inside the (writable) worktree"
                         )));
                     }
+                }
+            }
+        }
+        if HOME_DIR_VARS.contains(&name.as_str()) {
+            let p = Path::new(value);
+            if !p.is_absolute() {
+                return Err(SandboxError::Setup(format!(
+                    "env {name}: '{value}' must be an absolute path"
+                )));
+            }
+            // NOTE: lexical containment only — a symlink whose path is outside the
+            // worktree but resolves inside is not caught here (tracked as a known
+            // path-validation hardening item; the bwrap bind mounts still confine
+            // writes to the worktree).
+            if let Some(root) = worktree {
+                if p.starts_with(root) {
+                    return Err(SandboxError::Setup(format!(
+                        "env {name}: '{value}' is inside the (writable) worktree"
+                    )));
                 }
             }
         }
@@ -490,8 +541,20 @@ mod tests {
             ("NODE_OPTIONS", "--require /tmp/evil.js"),
             ("PERL5OPT", "-Mevil"),
             ("RUBYOPT", "-revil"),
+            ("RUBYLIB", "/tmp/evil"),
+            ("PERLLIB", "/tmp/evil"),
+            ("PYTHONHOME", "/tmp/evil"),
             ("PROMPT_COMMAND", "evil"),
             ("PYTHONSTARTUP", "/tmp/evil.py"),
+            // JVM, Go, zsh, and pager exec vectors.
+            ("JAVA_TOOL_OPTIONS", "-javaagent:/tmp/evil.jar"),
+            ("_JAVA_OPTIONS", "-javaagent:/tmp/evil.jar"),
+            ("JDK_JAVA_OPTIONS", "-javaagent:/tmp/evil.jar"),
+            ("GOFLAGS", "-toolexec=/tmp/evil"),
+            ("GOENV", "/tmp/evil/go/env"),
+            ("ZDOTDIR", "/tmp/evil"),
+            ("LESSOPEN", "|/tmp/evil %s"),
+            ("LESSCLOSE", "/tmp/evil %s %s"),
         ]);
         let out = sanitize_env(&requested, &profile, None).unwrap();
         assert!(
@@ -510,6 +573,34 @@ mod tests {
         // Outside the worktree it is accepted.
         let ok = env(&[("PATH", "/usr/bin:/bin")]);
         assert!(sanitize_env(&ok, &profile, Some(Path::new("/work/tree"))).is_ok());
+    }
+
+    #[test]
+    fn sanitizer_rejects_home_pointed_into_worktree() {
+        use std::path::Path;
+        let profile = SandboxProfile::default_sandboxed();
+        let root = Path::new("/work/tree");
+        // HOME / XDG_CONFIG_HOME inside the writable worktree is a git-config
+        // (core.pager/alias/core.fsmonitor) code-execution vector.
+        for var in ["HOME", "XDG_CONFIG_HOME"] {
+            let inside = env(&[(var, "/work/tree/.fakehome")]);
+            assert!(
+                sanitize_env(&inside, &profile, Some(root)).is_err(),
+                "{var} inside the worktree must be rejected"
+            );
+            // A relative value (resolved against the worktree cwd) is also rejected.
+            let relative = env(&[(var, "somedir")]);
+            assert!(
+                sanitize_env(&relative, &profile, Some(root)).is_err(),
+                "relative {var} must be rejected"
+            );
+            // A safe absolute HOME outside the worktree survives.
+            let outside = env(&[(var, "/home/runner")]);
+            assert!(
+                sanitize_env(&outside, &profile, Some(root)).is_ok(),
+                "{var} outside the worktree must be accepted"
+            );
+        }
     }
 
     #[test]

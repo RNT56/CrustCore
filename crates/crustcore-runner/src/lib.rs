@@ -205,7 +205,15 @@ pub fn run(spec: &CommandSpec) -> Result<CommandResult, RunError> {
                     {
                         std::thread::sleep(Duration::from_millis(10));
                     }
+                    // Escalate: SIGKILL the whole group (reaps grandchildren the
+                    // leader backgrounded) AND, as a std-only guarantee that does
+                    // not depend on an external `kill` binary or its argv parsing,
+                    // SIGKILL the leader directly via its `Child` handle. The group
+                    // kill is still sent *before* `wait()` reaps the leader, so the
+                    // leader keeps pinning `pgid` and the group target cannot race a
+                    // reused pid.
                     kill_group(pgid, "KILL");
+                    let _ = child.kill();
                     break child.wait().map_err(|e| RunError::Io(e.to_string()))?;
                 }
                 std::thread::sleep(Duration::from_millis(10));
@@ -213,12 +221,13 @@ pub fn run(spec: &CommandSpec) -> Result<CommandResult, RunError> {
         }
     };
 
-    // Even on a clean exit, sweep the group with SIGKILL: a backgrounded
-    // grandchild the command left behind (holding the stdout/stderr pipe) would
-    // otherwise keep the readers from reaching EOF and wedge the join below.
-    if !timed_out {
-        kill_group(pgid, "KILL");
-    }
+    // On a clean exit we deliberately do NOT sweep the group: the leader has been
+    // reaped (its pid is freed), so signaling `pgid` here could race a reused pid
+    // onto an unrelated, newly-created group. A grandchild the command backgrounded
+    // and left holding the stdout/stderr pipe is instead bounded by the reader
+    // deadline below (and, in the real sandboxed path, killed by the bubblewrap pid
+    // namespace when the sandbox exits) — so `run()` still returns without an
+    // errant cross-group SIGKILL.
 
     // Collect with a hard deadline so nothing can make `run()` hang.
     let deadline = Instant::now() + READER_DRAIN;
@@ -252,22 +261,40 @@ fn from_std_status(st: &std::process::ExitStatus) -> ExitStatus {
 }
 
 /// Signals a whole process group via `kill -<sig> -<pgid>` (negative pid = the
-/// group). Std-only (no libc): the child was placed in its own group, so
-/// `pgid == child pid`. Uses an **absolute** `kill` path (not PATH-resolved) so
-/// the signal delivery cannot be redirected. Best-effort: a kill targeting an
-/// already-empty group simply does nothing, and the bounded reader collection
-/// below guarantees `run()` returns regardless.
+/// group), to reap grandchildren the leader spawned. Std-only (no libc): the child
+/// was placed in its own group, so `pgid == child pid`. Uses an **absolute** `kill`
+/// path (not PATH-resolved) so the signal delivery cannot be redirected.
+/// Best-effort: a kill targeting an already-empty group simply does nothing, the
+/// leader itself is also killed directly via its `Child` handle, and the bounded
+/// reader collection guarantees `run()` returns regardless of whether `kill`
+/// exists at all (e.g. a minimal container without `procps`).
+///
+/// The group target is a negative pid (`-<pgid>`), whose leading dash is parsed
+/// differently across `kill` implementations. BSD `kill` (macOS) accepts
+/// `kill -TERM -<pgid>`. The Linux `procps-ng` `kill`, when invoked with an argv
+/// of exactly `["-TERM", "-<pgid>"]`, does **not** deliver to the group and
+/// returns success silently — it needs a `--` end-of-options separator
+/// (`kill -TERM -- -<pgid>`). This is the verified cause of the CI hang on
+/// `ubuntu-latest`: the timeout fired, `kill` "succeeded", yet the process tree
+/// survived and `wait()` blocked for the full sleep. We therefore issue both
+/// argument forms (signals are idempotent): the form the local `kill` rejects is a
+/// harmless no-op, and the form it accepts fires.
 #[cfg(unix)]
 fn kill_group(pgid: u32, sig: &str) {
     use std::process::{Command, Stdio};
     for kill_bin in ["/bin/kill", "/usr/bin/kill"] {
         if std::path::Path::new(kill_bin).exists() {
-            let _ = Command::new(kill_bin)
-                .args([format!("-{sig}"), format!("-{pgid}")])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            for args in [
+                vec![format!("-{sig}"), format!("-{pgid}")],
+                vec![format!("-{sig}"), "--".to_string(), format!("-{pgid}")],
+            ] {
+                let _ = Command::new(kill_bin)
+                    .args(&args)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
             return;
         }
     }
