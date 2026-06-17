@@ -11,3 +11,4 @@ description = "Throwaway git worktree management for CrustCore tasks."
 [dependencies]
 crustcore-types = { workspace = true }
 crustcore-path = { workspace = true }
+crustcore-policy = { workspace = true }

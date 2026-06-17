@@ -3,16 +3,25 @@
 //!
 //! The whole point of this crate is that **structured file tools accept only
 //! confined paths** — a raw `&str`/`PathBuf` can never reach `write_file`. Only
-//! the resolver in this crate can mint a [`ConfinedReadPath`]/[`ConfinedWritePath`],
-//! and it does so only after rejecting null bytes, absolute escapes, and symlink
-//! escapes. See invariant 7 and `tests/redteam` (malicious path fixtures).
+//! the resolver here can mint a [`ConfinedReadPath`]/[`ConfinedWritePath`], and it
+//! does so only after:
 //!
-//! Status: Phase 0 scaffold. The *types* and resolver API are in place; the
-//! symlink-safe resolution and no-follow write semantics are implemented in
-//! Phase 3 (`TODO(P3.*)`).
+//! 1. rejecting NUL bytes and absolute paths,
+//! 2. **lexically normalizing** the path (resolving `.`/`..`), rejecting any path
+//!    that pops above the root,
+//! 3. **symlink-escape checking**: canonicalizing the deepest existing ancestor
+//!    and requiring it to stay under the canonical worktree root, and
+//! 4. for writes, **no-follow** semantics: refusing to write through a final
+//!    component that is an existing symlink.
+//!
+//! Together these enforce "no arbitrary path string reaches a write tool" and
+//! "symlink escapes fail" (Phase 3 acceptance; invariant 7). The residual TOCTOU
+//! window between check and open is narrowed by the sandbox (Phase 4) and the
+//! no-follow rule; full `openat`/`O_NOFOLLOW` would need `unsafe`/libc, which this
+//! crate forbids.
 #![forbid(unsafe_code)]
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// The root of a task's throwaway worktree. All confined paths are relative to a
 /// `WorktreeRoot` and can never escape it.
@@ -27,7 +36,7 @@ pub struct ConfinedReadPath<'root> {
 }
 
 /// A path that has been validated for writing within a [`WorktreeRoot`]
-/// (no-follow semantics where available).
+/// (no-follow semantics on the final component).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfinedWritePath<'root> {
     root: &'root WorktreeRoot,
@@ -63,14 +72,87 @@ impl core::fmt::Display for PathError {
 
 impl std::error::Error for PathError {}
 
+/// Lexically normalizes a relative path: rejects NUL bytes and absolute paths,
+/// drops `.`, and applies `..` by popping — rejecting any path that would pop
+/// above the root. Returns the normalized (no `.`/`..`) relative path. This is
+/// purely textual; the fs symlink check is separate.
+fn normalize_relative(rel: &str) -> Result<PathBuf, PathError> {
+    if rel.as_bytes().contains(&0) {
+        return Err(PathError::NullByte);
+    }
+    let p = Path::new(rel);
+    let mut out: Vec<std::ffi::OsString> = Vec::new();
+    for comp in p.components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir => return Err(PathError::AbsoluteNotAllowed),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if out.pop().is_none() {
+                    return Err(PathError::Escape);
+                }
+            }
+            Component::Normal(c) => out.push(c.to_os_string()),
+        }
+    }
+    let mut norm = PathBuf::new();
+    for c in out {
+        norm.push(c);
+    }
+    Ok(norm)
+}
+
+/// Canonicalizes the deepest existing ancestor of `target`. A non-existent leaf
+/// (a file about to be created) walks up to the nearest existing directory.
+fn deepest_existing_canonical(target: &Path) -> Result<PathBuf, PathError> {
+    let mut cur = target;
+    loop {
+        match cur.canonicalize() {
+            Ok(canon) => return Ok(canon),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => match cur.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => cur = parent,
+                _ => return Err(PathError::Io("no existing ancestor".to_string())),
+            },
+            Err(e) => return Err(PathError::Io(e.to_string())),
+        }
+    }
+}
+
+/// Requires the deepest existing ancestor of `target` to canonicalize to a path
+/// under `root_canonical` — i.e. no symlink along the way escapes the root.
+fn assert_under_root(root_canonical: &Path, target: &Path) -> Result<(), PathError> {
+    let canon = deepest_existing_canonical(target)?;
+    if canon.starts_with(root_canonical) {
+        Ok(())
+    } else {
+        Err(PathError::SymlinkEscape)
+    }
+}
+
 impl WorktreeRoot {
-    /// Wraps an existing directory as a worktree root.
-    ///
-    /// In Phase 3 this will canonicalize and verify the directory exists and is
-    /// a directory; for now it stores the path.
+    /// Wraps a path as a worktree root **without** canonicalizing it. Use this to
+    /// hold a root in a capability token; use [`WorktreeRoot::open`] when the root
+    /// must exist for real filesystem confinement.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
         WorktreeRoot(path.into())
+    }
+
+    /// Opens an existing directory as a worktree root, canonicalizing it (so the
+    /// root itself is symlink-resolved) and verifying it is a directory.
+    ///
+    /// # Errors
+    /// Returns [`PathError::Io`] if the path does not exist or is not a directory.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, PathError> {
+        let canon = path
+            .as_ref()
+            .canonicalize()
+            .map_err(|e| PathError::Io(e.to_string()))?;
+        if !canon.is_dir() {
+            return Err(PathError::Io(
+                "worktree root is not a directory".to_string(),
+            ));
+        }
+        Ok(WorktreeRoot(canon))
     }
 
     /// Returns the root as a path.
@@ -79,50 +161,60 @@ impl WorktreeRoot {
         &self.0
     }
 
+    /// The canonical root (symlinks resolved), used for confinement comparisons.
+    fn canonical(&self) -> Result<PathBuf, PathError> {
+        self.0
+            .canonicalize()
+            .map_err(|e| PathError::Io(e.to_string()))
+    }
+
     /// Resolves a relative path for reading inside this root.
     ///
     /// # Errors
     /// Returns [`PathError`] if the path is absolute, contains a NUL byte,
-    /// escapes the root, or escapes via a symlink.
+    /// escapes the root lexically, or escapes via a symlink.
     pub fn confine_read<'a>(&'a self, rel: &str) -> Result<ConfinedReadPath<'a>, PathError> {
-        let relative = self.validate(rel)?;
+        let relative = normalize_relative(rel)?;
+        let root_canonical = self.canonical()?;
+        let target = root_canonical.join(&relative);
+        assert_under_root(&root_canonical, &target)?;
         Ok(ConfinedReadPath {
             root: self,
             relative,
         })
     }
 
-    /// Resolves a relative path for writing inside this root (no-follow).
+    /// Resolves a relative path for writing inside this root (no-follow on the
+    /// final component).
     ///
     /// # Errors
-    /// Returns [`PathError`] under the same conditions as [`Self::confine_read`].
+    /// Returns [`PathError`] under the same conditions as [`Self::confine_read`],
+    /// and [`PathError::SymlinkEscape`] if the final component is an existing
+    /// symlink (writing through it is refused).
     pub fn confine_write<'a>(&'a self, rel: &str) -> Result<ConfinedWritePath<'a>, PathError> {
-        let relative = self.validate(rel)?;
+        let relative = normalize_relative(rel)?;
+        if relative.as_os_str().is_empty() {
+            // The root itself is not a writable file target.
+            return Err(PathError::Escape);
+        }
+        let root_canonical = self.canonical()?;
+        let target = root_canonical.join(&relative);
+
+        // No-follow: never write through an existing symlink leaf.
+        if let Ok(meta) = std::fs::symlink_metadata(&target) {
+            if meta.file_type().is_symlink() {
+                return Err(PathError::SymlinkEscape);
+            }
+        }
+        // The parent directory must resolve under the root (catches symlinked
+        // ancestor directories pointing outside).
+        let parent = target.parent().ok_or(PathError::Escape)?;
+        assert_under_root(&root_canonical, parent)?;
+
         Ok(ConfinedWritePath {
             root: self,
             relative,
         })
-    }
-
-    /// Shared validation. TODO(P3.2): normalize, resolve the deepest existing
-    /// ancestor, and reject symlink escapes with no-follow semantics. This
-    /// scaffold rejects the obvious cases so the type contract is real.
-    fn validate(&self, rel: &str) -> Result<PathBuf, PathError> {
-        if rel.as_bytes().contains(&0) {
-            return Err(PathError::NullByte);
-        }
-        let p = Path::new(rel);
-        if p.is_absolute() {
-            return Err(PathError::AbsoluteNotAllowed);
-        }
-        if p.components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            // TODO(P3.2): allow interior `..` that still resolves within root;
-            // for now any `..` is rejected as a conservative default.
-            return Err(PathError::Escape);
-        }
-        Ok(p.to_path_buf())
     }
 }
 
@@ -138,6 +230,12 @@ impl ConfinedReadPath<'_> {
     pub fn relative(&self) -> &Path {
         &self.relative
     }
+
+    /// The worktree root this path is confined to.
+    #[must_use]
+    pub fn root(&self) -> &WorktreeRoot {
+        self.root
+    }
 }
 
 impl ConfinedWritePath<'_> {
@@ -152,15 +250,33 @@ impl ConfinedWritePath<'_> {
     pub fn relative(&self) -> &Path {
         &self.relative
     }
+
+    /// The worktree root this path is confined to.
+    #[must_use]
+    pub fn root(&self) -> &WorktreeRoot {
+        self.root
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // A unique temp directory for an isolated worktree fixture.
+    fn temp_root(tag: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("cc-path-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        // Canonicalize so comparisons are stable (macOS /tmp -> /private/tmp).
+        p.canonicalize().unwrap()
+    }
+
+    // --- Lexical checks (no real fs needed; rejected before fs touch) ---
+
     #[test]
     fn rejects_absolute_paths() {
-        let root = WorktreeRoot::new("/tmp/wt");
+        let root = WorktreeRoot::new("/tmp/does-not-matter");
         assert_eq!(
             root.confine_write("/etc/passwd").unwrap_err(),
             PathError::AbsoluteNotAllowed
@@ -169,17 +285,95 @@ mod tests {
 
     #[test]
     fn rejects_parent_escape() {
-        let root = WorktreeRoot::new("/tmp/wt");
+        let root = WorktreeRoot::new("/tmp/does-not-matter");
         assert_eq!(
             root.confine_read("../secrets").unwrap_err(),
+            PathError::Escape
+        );
+        assert_eq!(
+            root.confine_read("a/../../etc").unwrap_err(),
             PathError::Escape
         );
     }
 
     #[test]
-    fn accepts_simple_relative() {
-        let root = WorktreeRoot::new("/tmp/wt");
+    fn rejects_nul_byte() {
+        let root = WorktreeRoot::new("/tmp/does-not-matter");
+        assert_eq!(root.confine_read("a\0b").unwrap_err(), PathError::NullByte);
+    }
+
+    #[test]
+    fn normalizes_interior_dot_and_parent() {
+        assert_eq!(
+            normalize_relative("src/./a/../main.rs").unwrap(),
+            PathBuf::from("src/main.rs")
+        );
+    }
+
+    // --- Real-fs confinement / symlink fixtures (P3.6) ---
+
+    #[test]
+    fn accepts_simple_relative_in_real_root() {
+        let dir = temp_root("simple");
+        let root = WorktreeRoot::open(&dir).unwrap();
         let p = root.confine_write("src/main.rs").unwrap();
         assert_eq!(p.relative(), Path::new("src/main.rs"));
+        let r = root.confine_read("src/main.rs").unwrap();
+        assert_eq!(r.relative(), Path::new("src/main.rs"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn symlink_to_outside_is_rejected_on_read() {
+        let dir = temp_root("symesc-read");
+        // Create a symlink inside the root pointing at /etc (outside).
+        let link = dir.join("escape");
+        std::os::unix::fs::symlink("/etc", &link).unwrap();
+        let root = WorktreeRoot::open(&dir).unwrap();
+        // Reading through the escaping symlink must fail.
+        assert_eq!(
+            root.confine_read("escape/passwd").unwrap_err(),
+            PathError::SymlinkEscape
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_through_symlink_leaf_is_refused() {
+        let dir = temp_root("symesc-write");
+        // A symlink leaf pointing outside the root.
+        let link = dir.join("evil");
+        std::os::unix::fs::symlink("/tmp/cc-should-not-write", &link).unwrap();
+        let root = WorktreeRoot::open(&dir).unwrap();
+        assert_eq!(
+            root.confine_write("evil").unwrap_err(),
+            PathError::SymlinkEscape
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn symlinked_parent_dir_to_outside_is_rejected() {
+        let dir = temp_root("symesc-parent");
+        let link = dir.join("outdir");
+        std::os::unix::fs::symlink("/tmp", &link).unwrap();
+        let root = WorktreeRoot::open(&dir).unwrap();
+        // Writing into a symlinked-out directory must fail.
+        assert_eq!(
+            root.confine_write("outdir/pwned").unwrap_err(),
+            PathError::SymlinkEscape
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn in_root_symlink_is_allowed() {
+        let dir = temp_root("sym-inroot");
+        std::fs::create_dir_all(dir.join("real")).unwrap();
+        // A symlink that stays inside the root is fine for reads.
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("alias")).unwrap();
+        let root = WorktreeRoot::open(&dir).unwrap();
+        assert!(root.confine_read("alias/file.txt").is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

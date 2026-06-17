@@ -14,9 +14,46 @@ fn redteam_scenarios_are_enumerated() {
     assert_eq!(required_redteam_scenarios().len(), 11);
 }
 
+/// Red-team (P3.6): a malicious relative path tries to escape the worktree — via
+/// `..`, an absolute path, or a symlink pointing outside the root. The confined
+/// path resolver rejects all of them, so no escaping path can reach a file tool
+/// (invariant 7; Phase 3 acceptance "symlink escapes fail").
 #[test]
-#[ignore = "TODO(P3.6): malicious path / symlink escape fixture"]
-fn symlink_escape_is_blocked() {}
+fn symlink_escape_is_blocked() {
+    use crustcore_path::{PathError, WorktreeRoot};
+
+    let mut dir = std::env::temp_dir();
+    dir.push(format!("cc-redteam-symesc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // A symlink inside the worktree pointing at a sensitive location outside it.
+    std::os::unix::fs::symlink("/etc", dir.join("escape")).unwrap();
+
+    let root = WorktreeRoot::open(&dir).unwrap();
+
+    // Lexical escapes.
+    assert_eq!(
+        root.confine_read("../../etc/passwd").unwrap_err(),
+        PathError::Escape
+    );
+    assert_eq!(
+        root.confine_write("/etc/passwd").unwrap_err(),
+        PathError::AbsoluteNotAllowed
+    );
+    // Symlink escape: reading or writing through the escaping symlink fails.
+    assert_eq!(
+        root.confine_read("escape/passwd").unwrap_err(),
+        PathError::SymlinkEscape
+    );
+    assert_eq!(
+        root.confine_write("escape/evil").unwrap_err(),
+        PathError::SymlinkEscape
+    );
+    // A legitimate in-root path still resolves.
+    assert!(root.confine_write("src/main.rs").is_ok());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
 
 #[test]
 #[ignore = "TODO(P4.7): LD_PRELOAD / path-env escape fixture"]
