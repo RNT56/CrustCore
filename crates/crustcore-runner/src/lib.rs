@@ -195,17 +195,25 @@ pub fn run(spec: &CommandSpec) -> Result<CommandResult, RunError> {
         None => (None, None),
     };
 
-    // Feed stdin now — *after* the stdout/stderr readers are running, so a child
-    // that writes output while we write its stdin cannot deadlock on a full output
-    // pipe. The input is bounded (the small contract JSON), so a single blocking
-    // write is sufficient; we then drop the handle to send EOF. A broken pipe (the
-    // child closed stdin early / exited) is not fatal — the child's own exit
-    // status governs the outcome.
+    // Feed stdin from a **dedicated thread**, never a blocking write on this thread.
+    // The payload can exceed the OS pipe buffer (~64 KiB), and a child that does not
+    // drain its stdin (one that takes its input elsewhere, loops, or hangs) would
+    // otherwise leave a synchronous `write_all` blocked *before* the timeout loop
+    // arms — making `run()` hang forever and defeating the timeout (invariants 11,
+    // 12). With a writer thread, this thread proceeds straight into the timeout/kill
+    // loop; on timeout the process-group kill closes the read end, so the writer's
+    // `write_all` returns (BrokenPipe) and the thread exits. The thread is
+    // fire-and-forget (like the bounded output readers): a broken pipe is expected
+    // (the child may read none of the input), and it is bounded by the child's
+    // lifetime, so `run()` never waits on it.
     if want_stdin {
         if let Some(mut sink) = child.stdin.take() {
-            use std::io::Write as _;
-            let _ = sink.write_all(&spec.stdin);
-            // `sink` drops here, closing the child's stdin (EOF).
+            let data = spec.stdin.clone();
+            std::thread::spawn(move || {
+                use std::io::Write as _;
+                let _ = sink.write_all(&data);
+                // `sink` drops here, closing the child's stdin (EOF).
+            });
         }
     }
 
@@ -429,6 +437,24 @@ mod tests {
         s.stdin = vec![b'x'; 4096];
         let r = run(&s).unwrap();
         assert_eq!(r.status, ExitStatus::Code(0));
+    }
+
+    #[test]
+    fn large_stdin_to_a_live_nonreading_child_times_out_not_hangs() {
+        // The regression for the adversarial-review HIGH finding: a payload far
+        // larger than the OS pipe buffer (~64 KiB) sent to a child that stays alive
+        // and never reads stdin must NOT make `run` hang — the timeout still fires.
+        // (A synchronous write_all before the timeout loop would block forever here.)
+        let mut s = spec("/bin/sh", &["-c", "sleep 30"]);
+        s.stdin = vec![b'x'; 512 * 1024];
+        s.timeout = Duration::from_millis(300);
+        let start = std::time::Instant::now();
+        let r = run(&s).unwrap();
+        assert_eq!(r.status, ExitStatus::TimedOut);
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "run() must return promptly via the timeout, not hang on the stdin write"
+        );
     }
 
     #[test]

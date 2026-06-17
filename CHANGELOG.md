@@ -80,6 +80,27 @@ agent/PR/role/size/invariant audit trail.
     (guard-manifest + path-confinement arms); and the golden
     `golden_add_small_feature` (external worker → re-derived diff → verify →
     complete), gated like `golden_fix_failing_test` on a functional sandbox.
+  - **Hardened per a 7-dimension adversarial review (5 confirmed findings fixed;
+    7 refuted/out-of-scope):**
+    - **(high) stdin write could defeat the timeout.** The runner wrote
+      `CommandSpec.stdin` with a blocking `write_all` *before* the timeout loop, so
+      a worker that never drained its stdin (payload > the ~64 KiB pipe buffer)
+      could hang `run()` forever — bypassing the very timeout the runner enforces
+      (invariants 11, 12). Now written from a **dedicated thread**, so the timeout
+      arms immediately and the process-group kill unblocks the writer; regression
+      test pipes 512 KiB to a live non-reading child and asserts `TimedOut`.
+    - **(med) `git status` parsed without `-z`.** Git C-quotes paths with spaces /
+      control / non-ASCII bytes, which slipped past per-path confinement and the
+      credential/CI classifier under a bogus name (and the "fails closed" comment
+      was wrong). `git_status_all` now uses `-z` (NUL records, verbatim paths).
+    - **(med) extracted diff omitted new-file content.** Plain `git diff` shows no
+      untracked content, so a worker that *adds* files (the common case) had its new
+      code absent from the diff and patch content-address. New `git_worktree_diff`
+      marks untracked files intent-to-add and diffs against `HEAD`, capturing
+      additions, modifications, deletions, and staged changes.
+    - **(med) unbounded git output OOM.** `run_git` used `wait_with_output`, fully
+      buffering a hostile worktree's git output before truncating. It now streams
+      both pipes into capped buffers (bounded supervisor memory, no pipe-block).
 - **Phase 5 — worktree + verify loop (P5.1–P5.6).** The local single-task harness
   with verifier-owned completion:
   - `crustcore-worktree::WorktreeManager`: create/reuse/remove a **disposable git
@@ -311,6 +332,7 @@ agent/PR/role/size/invariant audit trail.
 | 2026-06-17 | P4 hardening | Fix the Linux-CI timeout-kill hang (procps-ng needs `kill -- -<pgid>`; also SIGKILL the leader via its `Child` handle) — root-caused and verified in a faithful `ubuntu:24.04` container. Address Phase-4 review findings: drop the pid-reuse-TOCTOU clean-exit group sweep; strip JVM/Go/zsh/pager/interpreter-lib exec env vars; reject `HOME`/`XDG_CONFIG_HOME` inside the worktree. | `claude/p4-sandbox` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (295.6 KiB, 37.0%) | Strengthens 9 (sandbox env), 12 (reliable process-tree kill); none weakened |
 | 2026-06-17 | P5.1–P5.6 | Implement the worktree + verify loop: `WorktreeManager` (disposable `git worktree` create/reuse/remove, hardened), `crustcore-backend::verify` (`VerifySpec`/`run_verify` rerun-in-sandbox → mint `VerifiedPatch`+receipt only on pass), seal `VerifiedPatch::from_verifier` crate-private + `complete_task` by value, wire `crustcore run -dir/-goal/-verify`; golden "fix failing test" + worktree lifecycle tests. **Hardened per a 7-dimension adversarial review (8 confirmed findings fixed):** worktree-add filter neutralization+restore (RCE), registered-only worktree reuse + 0700 base, executor-seam unit tests for the mint/Failed/Refused paths, worktree teardown on all `run` paths, `VerifierName` type, extracted+tested verify-spec/exit logic. CI now installs bubblewrap so the real sandbox path runs. Full sandbox path validated in a privileged `ubuntu:24.04` container. | `claude/p5-verify` (PR) | Maintainer agent (Architect/Implementer) | +99.9 KiB (395.5 KiB, 49.4%; runner/sandbox/verify now reachable via `run`) | Enforces 13 (verifier-owned completion, type-sealed), 9 (verify in sandbox), 10 (receipt over the real run), 7 (worktree-add RCE neutralized); none weakened |
 | 2026-06-17 | P6.1–P6.6 | Implement the external backend protocol: the `CodingBackend` contract + `ExternalCommandBackend`/`CodexBackend`/`ClaudeCodeBackend`; `WorkerInput` (type-pinned `secrets:none`/`network:deny`) and JSON contract; `run_external_worker` supervisor validation (sandboxed secret-free run, bounded transcript, `GuardManifest` out-of-root detection, worktree-confined diff extraction via new `git_status_all`, per-path confinement, sensitive-file classification) → `UnverifiedPatch` only; `CommandSpec.stdin` delivery through runner+bwrap; wire `crustcore run -backend/-worker-cmd` (produce → re-derive → confine → verify). Worker-contract tests + runner stdin tests; **un-ignore the `worker_write_outside_worktree_is_rejected` red-team fixture**; implement the `golden_add_small_feature` golden. Full sandboxed worker→verify→complete path validated in a privileged container. | `claude/p6-backend` (PR) | Maintainer agent (Architect/Implementer) | +16.4 KiB (411.9 KiB, 51.5%; worker module + CLI wiring) | Enforces 6 (workers are patch producers, not authorities), 7 (out-of-root/escape rejection), 1–3 + 9 (no-secret, deny-net, sandboxed worker), 13 (only the verifier completes); none weakened |
+| 2026-06-17 | P6 hardening | Fix the 5 confirmed findings from a 7-dimension adversarial review (7 refuted/out-of-scope): (high) move the runner stdin write to a dedicated thread so a non-draining worker can't hang `run()` past the timeout (invariants 11/12); (med) parse `git status -z` so quoted/space/non-ASCII paths reach confinement+classification verbatim; (med) new `git_worktree_diff` (intent-to-add + `diff HEAD`) so new-file content is in the diff and patch content-address; (med) stream `run_git` output into capped buffers (no unbounded-output OOM from a hostile worktree). Added regression tests for each. Full sandboxed path re-validated in a privileged container. | `claude/p6-backend` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (411.9 KiB, 51.5%) | Strengthens 11/12 (bounded/killable execution), 7 (verbatim-path confinement), 6 (faithful re-derived diff); none weakened |
 
 ---
 

@@ -42,7 +42,7 @@ use crustcore_runner::{CommandResult, CommandSpec};
 use crustcore_sandbox::{run_command, SandboxError, SandboxProfile};
 use crustcore_types::hash::sha256;
 use crustcore_types::{BoundedText, ScopeId, TaskId};
-use crustcore_worktree::{git_diff, git_status_all, ToolError};
+use crustcore_worktree::{git_status_all, git_worktree_diff, ToolError};
 
 use crate::{BackendKind, BackendResult, CommandRecord, PatchRef, Risk, UnverifiedPatch};
 
@@ -608,9 +608,10 @@ fn summarize(transcript: &str) -> String {
     out
 }
 
-/// Enumerates the worktree's changed files (`git status --porcelain`), **confines
-/// every path** (rejecting `..`/absolute/symlink escapes — invariant 7), and
-/// classifies each. A changed path that escapes the root rejects the whole result.
+/// Enumerates the worktree's changed files (`git status --porcelain -z`),
+/// **confines every path** (rejecting `..`/absolute/symlink escapes — invariant
+/// 7), and classifies each. A changed path that escapes the root rejects the whole
+/// result.
 ///
 /// # Errors
 /// [`WorkerError::EscapingChange`] for an escaping path, or [`WorkerError::Git`].
@@ -618,8 +619,8 @@ pub fn confine_worktree_changes(worktree: &WorktreeRoot) -> Result<Vec<ChangedFi
     let cap = read_cap(worktree);
     let porcelain = git_status_all(&cap)?;
     let mut out = Vec::new();
-    for line in porcelain.lines() {
-        let Some(path) = porcelain_path(line) else {
+    for record in porcelain_records(&porcelain) {
+        let Some(path) = porcelain_path(record) else {
             continue;
         };
         // Confine the changed path: it must resolve inside the worktree and not
@@ -636,13 +637,15 @@ pub fn confine_worktree_changes(worktree: &WorktreeRoot) -> Result<Vec<ChangedFi
     Ok(out)
 }
 
-/// Extracts `(status_porcelain_bytes, diff_bytes)` from the worktree with the
-/// hardened git wrappers (filter/textconv neutralized — no RCE). The diff is
-/// bounded.
+/// Extracts `(status_bytes, diff_bytes)` from the worktree with the hardened git
+/// wrappers (filter/textconv neutralized — no RCE). The diff is HEAD-relative and
+/// **includes new-file content** (`git_worktree_diff`), so it is a faithful
+/// content address of the worker's change — modifications, deletions, and added
+/// files alike. Bounded.
 fn extract_change(worktree: &WorktreeRoot) -> Result<(Vec<u8>, Vec<u8>), WorkerError> {
     let cap = read_cap(worktree);
     let status = git_status_all(&cap)?.into_bytes();
-    let mut diff = git_diff(&cap)?.into_bytes();
+    let mut diff = git_worktree_diff(&cap)?.into_bytes();
     diff.truncate(MAX_DIFF_BYTES);
     Ok((status, diff))
 }
@@ -656,21 +659,23 @@ fn read_cap(worktree: &WorktreeRoot) -> FsReadCap {
     }
 }
 
-/// Parses the destination path from a `git status --porcelain` line, handling the
-/// rename form `XY orig -> dest`. Returns `None` for a blank line. Quoted paths
-/// (rare; `core.quotepath`) are returned verbatim and will fail confinement —
-/// failing closed rather than silently mishandling them.
-fn porcelain_path(line: &str) -> Option<String> {
-    if line.len() < 4 {
+/// Splits `git status --porcelain -z` output into records. With `-z`, records are
+/// NUL-separated (never quoted/escaped), so a path with a space, control byte, or
+/// non-ASCII byte is delivered verbatim — no unquoting, no line-splitting hazard.
+fn porcelain_records(porcelain: &str) -> impl Iterator<Item = &str> {
+    porcelain.split('\0').filter(|r| !r.is_empty())
+}
+
+/// Parses the path from a `git status --porcelain -z` record (`XY␣PATH`, with
+/// `--no-renames` so there is no rename second field). Returns `None` for a record
+/// too short to carry a path.
+fn porcelain_path(record: &str) -> Option<String> {
+    if record.len() < 4 {
         return None;
     }
-    // Format: two status chars, a space, then the path (byte offset 3).
-    let rest = &line[3..];
-    let path = match rest.split_once(" -> ") {
-        Some((_, dest)) => dest,
-        None => rest,
-    };
-    let path = path.trim();
+    // Two status chars, a space, then the verbatim path at byte offset 3 (the first
+    // three bytes are always ASCII `XY␣`, so slicing there is a char boundary).
+    let path = record[3..].trim_end_matches('\n');
     if path.is_empty() {
         None
     } else {
@@ -1085,18 +1090,31 @@ mod tests {
 
     #[test]
     fn porcelain_parsing_and_classification() {
+        // `-z` records: `XY␣PATH`, NUL-separated, never quoted/escaped.
         assert_eq!(
             porcelain_path(" M src/lib.rs").as_deref(),
             Some("src/lib.rs")
         );
         assert_eq!(porcelain_path("?? new.txt").as_deref(), Some("new.txt"));
+        // A path with a space (which line-based porcelain would not delimit and
+        // -z-less parsing would quote) is delivered verbatim under -z.
         assert_eq!(
-            porcelain_path("R  old.rs -> new.rs").as_deref(),
-            Some("new.rs")
+            porcelain_path("?? my file.rs").as_deref(),
+            Some("my file.rs")
         );
+        // A non-ASCII path is verbatim too, so it classifies correctly.
+        assert_eq!(porcelain_path("?? café.pem").as_deref(), Some("café.pem"));
         assert_eq!(porcelain_path(""), None);
 
+        // Records split on NUL; empty trailing record skipped.
+        let recs: Vec<&str> = porcelain_records(" M a.rs\0?? b.rs\0").collect();
+        assert_eq!(recs, vec![" M a.rs", "?? b.rs"]);
+
         assert_eq!(classify("src/main.rs"), Sensitivity::Normal);
+        assert_eq!(
+            classify("café.pem"),
+            Sensitivity::Sensitive("possible-credential")
+        );
         assert_eq!(
             classify(".github/workflows/ci.yml"),
             Sensitivity::Sensitive("ci-workflow")
@@ -1265,5 +1283,41 @@ mod tests {
             "sensitive change should surface as a risk"
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn seam_patch_address_reflects_new_file_content() {
+        // Two workers ADD the same-named new file with DIFFERENT content. The patch
+        // content address must differ — proving the diff/address captures new-file
+        // content (not just the path), so distinct candidate changes are distinct.
+        let backend = ExternalCommandBackend::new("/bin/true", vec![]);
+
+        let hash_for = |tag: &str, content: &'static [u8]| -> Option<[u8; 32]> {
+            let (base, dir, wt) = git_worktree(tag)?;
+            let input = WorkerInput::for_task(TaskId(1), "g", &wt);
+            let d = dir.clone();
+            let product = run_external_worker_with(&backend, &input, &wt, move |_spec| {
+                std::fs::write(d.join("feature.rs"), content).unwrap();
+                Ok(fake_result(b"added feature\n"))
+            })
+            .expect("produces a patch");
+            // The new file is captured in the change set and the HEAD-relative diff.
+            assert!(product.changed_files.iter().any(|c| c.path == "feature.rs"));
+            assert!(String::from_utf8_lossy(&product.diff).contains("feature.rs"));
+            let h = product.patch.0.diff_hash;
+            let _ = std::fs::remove_dir_all(&base);
+            Some(h)
+        };
+
+        let (Some(a), Some(b)) = (
+            hash_for("addr-a", b"pub fn feature() -> u32 { 1 }\n"),
+            hash_for("addr-b", b"pub fn feature() -> u32 { 2 }\n"),
+        ) else {
+            return; // git unavailable
+        };
+        assert_ne!(
+            a, b,
+            "different new-file content must yield a different patch address"
+        );
     }
 }

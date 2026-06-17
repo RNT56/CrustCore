@@ -11,8 +11,8 @@
 pub mod tools;
 
 pub use tools::{
-    git_apply, git_diff, git_log, git_status, git_status_all, read_file, search, write_file,
-    SearchHit, ToolError,
+    git_apply, git_diff, git_log, git_status, git_status_all, git_worktree_diff, read_file, search,
+    write_file, SearchHit, ToolError,
 };
 
 use std::path::{Path, PathBuf};

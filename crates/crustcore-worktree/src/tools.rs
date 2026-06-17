@@ -273,24 +273,82 @@ pub(crate) fn run_git(mut cmd: Command, stdin: Option<&[u8]>) -> Result<String, 
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(io)?;
-    if let Some(bytes) = stdin {
-        use std::io::Write as _;
-        if let Some(mut sink) = child.stdin.take() {
-            sink.write_all(bytes).map_err(io)?;
-        }
+
+    // Feed stdin (e.g. a patch for `git apply`) from a thread, and drain BOTH output
+    // streams into **bounded** buffers via reader threads, so nothing materializes
+    // the child's full output in memory. `git` is untrusted-input-facing here (a
+    // hostile worktree can make `status --untracked-files=all` / `diff` emit huge
+    // output by creating many/large files), so a plain `wait_with_output` — which
+    // buffers everything before truncating — is an out-of-memory vector. Capped
+    // streaming keeps memory at O(MAX_GIT_OUTPUT) per stream while still draining the
+    // pipes (so the child never blocks on a full pipe).
+    let stdin_h = stdin.and_then(|bytes| {
+        child.stdin.take().map(|mut sink| {
+            let data = bytes.to_vec();
+            std::thread::spawn(move || {
+                use std::io::Write as _;
+                let _ = sink.write_all(&data);
+            })
+        })
+    });
+    let out_h = child
+        .stdout
+        .take()
+        .map(|s| spawn_capped_reader(s, MAX_GIT_OUTPUT));
+    let err_h = child
+        .stderr
+        .take()
+        .map(|s| spawn_capped_reader(s, MAX_GIT_OUTPUT));
+
+    let status = child.wait().map_err(io)?;
+    // The child has exited: its pipe write ends are closed, so the readers reach EOF
+    // and the stdin write end is closed (a blocked writer unblocks). Joining is
+    // bounded.
+    let stdout = out_h
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+    let stderr = err_h
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+    if let Some(h) = stdin_h {
+        let _ = h.join();
     }
-    let out = child.wait_with_output().map_err(io)?;
-    if out.status.success() {
-        let mut stdout = out.stdout;
-        stdout.truncate(MAX_GIT_OUTPUT);
+
+    if status.success() {
         Ok(String::from_utf8_lossy(&stdout).into_owned())
     } else {
-        let mut stderr = out.stderr;
-        stderr.truncate(MAX_GIT_OUTPUT);
         Err(ToolError::Git(
             String::from_utf8_lossy(&stderr).trim().to_string(),
         ))
     }
+}
+
+/// Reads `r` to EOF into a buffer capped at `cap` bytes, **continuing to drain**
+/// (and discard) anything beyond the cap so the child never blocks on a full pipe.
+/// Runs on its own thread so stdout and stderr are drained concurrently (no
+/// deadlock). Bounds supervisor memory against a hostile worktree's git output.
+fn spawn_capped_reader<R: std::io::Read + Send + 'static>(
+    mut r: R,
+    cap: usize,
+) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            match r.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if buf.len() < cap {
+                        let take = (cap - buf.len()).min(n);
+                        buf.extend_from_slice(&chunk[..take]);
+                    }
+                    // Beyond the cap: keep reading to drain, discard the bytes.
+                }
+                Err(_) => break,
+            }
+        }
+        buf
+    })
 }
 
 /// Neutralizes attribute-driven git **filter** drivers for the repo by writing
@@ -362,12 +420,19 @@ pub fn git_status(cap: &FsReadCap) -> Result<String, ToolError> {
     run_git(c, None)
 }
 
-/// `git status --porcelain --untracked-files=all` (read capability): like
-/// [`git_status`] but lists every untracked file **individually** rather than
-/// collapsing a new directory to a single entry. The supervisor's worker
-/// validation needs per-file paths so each changed file is independently confined
-/// (rejecting symlink/`..` escapes) and classified (`docs/backend-contract.md`
-/// §4.2). Renames are decomposed (`--no-renames`) so each side is a plain path.
+/// `git status --porcelain -z --untracked-files=all --no-renames` (read
+/// capability): like [`git_status`] but lists every untracked file
+/// **individually** (a new directory is not collapsed to one entry) and uses the
+/// **NUL-separated** machine format. The supervisor's worker validation needs the
+/// *real* per-file path so each changed file is independently confined (rejecting
+/// symlink/`..` escapes) and classified (`docs/backend-contract.md` §4.2).
+///
+/// `-z` is essential: without it git **C-quotes** any path containing a space,
+/// control byte, or non-ASCII byte (`"caf\303\251.pem"`), which would slip past
+/// per-path confinement and the credential/CI classifier under a bogus name. With
+/// `-z` the path is emitted verbatim and NUL-terminated, so the caller splits on
+/// `\0` and never has to unquote. Renames are decomposed (`--no-renames`) so every
+/// record is a single plain path.
 ///
 /// # Errors
 /// As [`git_status`].
@@ -377,8 +442,43 @@ pub fn git_status_all(cap: &FsReadCap) -> Result<String, ToolError> {
     c.args([
         "status",
         "--porcelain",
+        "-z",
         "--untracked-files=all",
         "--no-renames",
+    ]);
+    run_git(c, None)
+}
+
+/// A HEAD-relative unified diff of the worktree that **includes new-file content**
+/// (read capability). A disposable worktree is created from a clean `HEAD`
+/// (`git worktree add --detach HEAD`), so `git diff HEAD` is exactly the candidate
+/// change. Plain `git diff` shows only tracked working-tree-vs-index changes and
+/// omits untracked files entirely — so a worker that *adds* a file (the common
+/// feature case) would have its new code absent from the extracted diff and the
+/// patch content address. Marking untracked files intent-to-add (`git add -N`)
+/// makes `git diff HEAD` render them as full additions; diffing against `HEAD`
+/// (not the index) also captures any changes the worker `git add`-ed itself.
+///
+/// Intent-to-add mutates only the *disposable* worktree's index (never the
+/// canonical repo's tree), and attribute-driven filters are neutralized first so
+/// `git add` cannot run a `clean` driver (no RCE — invariant 7).
+///
+/// # Errors
+/// As [`git_status`] (e.g. an unborn `HEAD`).
+pub fn git_worktree_diff(cap: &FsReadCap) -> Result<String, ToolError> {
+    neutralize_attribute_drivers(cap.root.as_path())?;
+    // Mark untracked files intent-to-add so they appear in `git diff HEAD`.
+    // Best-effort: if there is nothing to add, the diff still runs.
+    let mut add = hardened_git(cap.root.as_path());
+    add.args(["add", "--intent-to-add", "--", "."]);
+    let _ = run_git(add, None);
+    let mut c = hardened_git(cap.root.as_path());
+    c.args([
+        "diff",
+        "HEAD",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
     ]);
     run_git(c, None)
 }
@@ -847,6 +947,76 @@ mod tests {
         assert!(std::fs::read_to_string(dir.join("README.md"))
             .unwrap()
             .contains("added-line"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The bounded reader caps captured output regardless of how much the child
+    // emits (the OOM defense), while still consuming the whole stream.
+    #[test]
+    fn capped_reader_bounds_captured_output() {
+        let data = vec![b'A'; 100_000];
+        let got = spawn_capped_reader(std::io::Cursor::new(data), 1024)
+            .join()
+            .unwrap();
+        assert_eq!(got.len(), 1024, "reader must cap the buffer at `cap` bytes");
+    }
+
+    // `-z` delivers paths with spaces / non-ASCII bytes VERBATIM (no C-quoting),
+    // so they reach per-path confinement and classification intact.
+    #[test]
+    fn git_status_all_uses_z_and_does_not_quote_paths() {
+        let Some(dir) = git_repo("status-z") else {
+            eprintln!("skipping: git unavailable");
+            return;
+        };
+        std::fs::write(dir.join("with space.pem"), b"x\n").unwrap();
+        std::fs::write(dir.join("café.txt"), b"y\n").unwrap();
+        let rcap = FsReadCap {
+            root: WorktreeRoot::open(&dir).unwrap(),
+            scope: ScopeId(1),
+        };
+        let out = git_status_all(&rcap).unwrap();
+        // Verbatim (unquoted) paths, NUL-separated.
+        assert!(
+            out.contains("with space.pem"),
+            "spaced path verbatim: {out:?}"
+        );
+        assert!(out.contains("café.txt"), "non-ascii path verbatim: {out:?}");
+        assert!(
+            !out.contains('"'),
+            "with -z, git must not C-quote paths: {out:?}"
+        );
+        assert!(out.contains('\0'), "records are NUL-separated");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The HEAD-relative diff includes NEW-file content (plain `git diff` omits it),
+    // so an "add a feature" change is faithfully captured.
+    #[test]
+    fn git_worktree_diff_includes_new_file_content() {
+        let Some(dir) = git_repo("wtdiff") else {
+            eprintln!("skipping: git unavailable");
+            return;
+        };
+        std::fs::write(dir.join("feature.rs"), b"pub fn feature() -> u32 { 42 }\n").unwrap();
+        let rcap = FsReadCap {
+            root: WorktreeRoot::open(&dir).unwrap(),
+            scope: ScopeId(1),
+        };
+        // Plain `git diff` (working-vs-index) omits the untracked file entirely —
+        // check this BEFORE git_worktree_diff, whose intent-to-add would otherwise
+        // make the file visible to a later plain diff too.
+        let plain = git_diff(&rcap).unwrap();
+        assert!(
+            !plain.contains("pub fn feature"),
+            "plain git_diff is expected to omit untracked content (why we use git_worktree_diff)"
+        );
+        // The HEAD-relative diff DOES include the new file's content.
+        let diff = git_worktree_diff(&rcap).unwrap();
+        assert!(
+            diff.contains("feature.rs") && diff.contains("pub fn feature"),
+            "new-file content must appear in the HEAD-relative diff: {diff}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
