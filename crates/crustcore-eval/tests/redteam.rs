@@ -23,8 +23,9 @@ fn redteam_scenarios_are_enumerated() {
 fn git_config_and_hooks_do_not_execute() {
     use crustcore_path::WorktreeRoot;
     use crustcore_policy::FsReadCap;
+    use crustcore_policy::FsWriteCap;
     use crustcore_types::ScopeId;
-    use crustcore_worktree::{git_diff, git_log, git_status};
+    use crustcore_worktree::{git_apply, git_diff, git_log, git_status};
 
     let mut dir = std::env::temp_dir();
     dir.push(format!("cc-redteam-git-{}", std::process::id()));
@@ -95,16 +96,60 @@ fn git_config_and_hooks_do_not_execute() {
         scope: ScopeId(1),
     };
 
-    // Exercise every read wrapper; none may execute the planted command/hook.
+    // Also plant a clean/smudge filter driver mapped by a committed
+    // .gitattributes — this is the git_apply (smudge) / git_diff (clean) RCE.
+    let filter_marker = dir.join("PWNED_FILTER");
+    let mut config = std::fs::read_to_string(dir.join(".git/config")).unwrap();
+    config.push_str(&format!(
+        "[filter \"evil\"]\n\tclean = touch {0}\n\tsmudge = touch {0}\n",
+        filter_marker.display()
+    ));
+    std::fs::write(dir.join(".git/config"), config).unwrap();
+    std::fs::write(dir.join(".gitattributes"), b"*.rs filter=evil\n").unwrap();
+    std::fs::write(dir.join("a.rs"), b"x\n").unwrap();
+    let _ = git(&["add", "."]);
+    let _ = git(&[
+        "-c",
+        "user.email=ci@cc",
+        "-c",
+        "user.name=ci",
+        "commit",
+        "-q",
+        "-m",
+        "attrs",
+    ]);
+    // Clear any markers created by the (un-hardened) setup git calls, so a marker
+    // present after the wrappers run is attributable to a wrapper.
+    let _ = std::fs::remove_file(&filter_marker);
+    let _ = std::fs::remove_file(&hook_marker);
+    let _ = std::fs::remove_file(&diff_marker);
+
+    // Exercise every wrapper; none may execute the planted command/hook/filter.
     let _ = git_status(&cap);
     let _ = git_diff(&cap);
     let _ = git_log(&cap, 10);
+    let wcap = FsWriteCap {
+        root: WorktreeRoot::open(&dir).unwrap(),
+        scope: ScopeId(1),
+    };
+    let patch = concat!(
+        "--- a/a.rs\n",
+        "+++ b/a.rs\n",
+        "@@ -1 +1,2 @@\n",
+        " x\n",
+        "+added\n"
+    );
+    let _ = git_apply(&wcap, patch.as_bytes());
 
     assert!(
         !diff_marker.exists(),
         "git wrapper executed a repo-local textconv driver (RCE)"
     );
     assert!(!hook_marker.exists(), "git wrapper executed a repo hook");
+    assert!(
+        !filter_marker.exists(),
+        "git wrapper executed a repo-local clean/smudge filter driver (RCE)"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

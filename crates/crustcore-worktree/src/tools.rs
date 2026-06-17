@@ -293,11 +293,55 @@ fn run_git(mut cmd: Command, stdin: Option<&[u8]>) -> Result<String, ToolError> 
     }
 }
 
+/// Neutralizes attribute-driven git **filter** drivers for the repo by writing
+/// `* -filter` to its `.git/info/attributes` (highest-precedence attributes file,
+/// name-agnostic). This is the load-bearing defense against arbitrary code
+/// execution from an untrusted repo: a repo-local `.git/config`
+/// `filter.<n>.clean`/`smudge`/`process` mapped by an in-tree `.gitattributes`
+/// would otherwise run during `git diff` (clean) or `git apply` (smudge).
+/// `core.attributesFile`/`--no-textconv` do NOT cover in-tree attributes;
+/// overriding `info/attributes` does (invariant 7; `docs/sandbox.md`).
+///
+/// Only `-filter` is set (not `-diff`/`-text`): the diff textconv/external driver
+/// RCE is already blocked by `--no-textconv --no-ext-diff` on the diff command,
+/// and `-diff` would wrongly turn every textual diff into "binary files differ".
+/// Best-effort: if the repo dir cannot be resolved the caller git command will
+/// surface the real error.
+fn neutralize_attribute_drivers(worktree: &Path) -> Result<(), ToolError> {
+    let mut probe = hardened_git(worktree);
+    probe.args(["rev-parse", "--git-path", "info/attributes"]);
+    let Ok(rel) = run_git(probe, None) else {
+        return Ok(()); // not a repo (or git missing); the real command will error
+    };
+    let rel = rel.trim();
+    if rel.is_empty() {
+        return Ok(());
+    }
+    let path = worktree.join(rel);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(io)?;
+    }
+    const NEUTRALIZER: &str = "* -filter";
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    if !existing.lines().any(|l| l.trim() == NEUTRALIZER) {
+        // Append so it is the last (winning) line for filter/diff/text on all paths.
+        let mut content = existing;
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(NEUTRALIZER);
+        content.push('\n');
+        std::fs::write(&path, content).map_err(io)?;
+    }
+    Ok(())
+}
+
 /// `git status --porcelain` in the worktree (read capability).
 ///
 /// # Errors
 /// [`ToolError::Git`] if git fails, [`ToolError::Io`] if it cannot be spawned.
 pub fn git_status(cap: &FsReadCap) -> Result<String, ToolError> {
+    neutralize_attribute_drivers(cap.root.as_path())?;
     let mut c = hardened_git(cap.root.as_path());
     c.args(["status", "--porcelain"]);
     run_git(c, None)
@@ -308,11 +352,10 @@ pub fn git_status(cap: &FsReadCap) -> Result<String, ToolError> {
 /// # Errors
 /// As [`git_status`].
 pub fn git_diff(cap: &FsReadCap) -> Result<String, ToolError> {
+    // Neutralize attribute drivers (filter.clean would otherwise run during diff),
+    // plus belt-and-braces flags against textconv/external-diff.
+    neutralize_attribute_drivers(cap.root.as_path())?;
     let mut c = hardened_git(cap.root.as_path());
-    // `--no-ext-diff`/`--no-textconv` are critical: a malicious repo's local
-    // `.git/config` can define an external-diff or textconv driver (via
-    // `.gitattributes`) that git would otherwise execute — arbitrary code
-    // execution from an untrusted repository. These flags suppress both.
     c.args(["diff", "--no-color", "--no-ext-diff", "--no-textconv"]);
     run_git(c, None)
 }
@@ -351,22 +394,26 @@ pub fn git_apply(cap: &FsWriteCap, patch: &[u8]) -> Result<(), ToolError> {
             "refusing a patch that creates or retargets a symlink (mode 120000)".to_string(),
         ));
     }
+    // Critical: `git apply` runs the smudge filter on the working tree. Neutralize
+    // attribute-driven filter/diff drivers before applying.
+    neutralize_attribute_drivers(cap.root.as_path())?;
     let mut c = hardened_git(cap.root.as_path());
     c.args(["apply", "--whitespace=nowarn"]);
     run_git(c, Some(patch)).map(|_| ())
 }
 
-/// Whether a unified diff declares a symlink mode (`120000`) on a file-mode line
-/// (`new file mode 120000`, `old mode 120000`, `new mode 120000`, …).
+/// Whether a unified diff declares a symlink mode (`120000`) on a real diff
+/// extended-header line. Header lines (`new file mode 120000`, `old mode …`,
+/// `new mode …`, `deleted file mode …`) sit at column 0; hunk content lines carry
+/// a `+`/`-`/space prefix, so we match WITHOUT trimming the leading char to avoid
+/// flagging a file content line that merely reads `mode 120000`.
 fn patch_creates_symlink(patch: &[u8]) -> bool {
     String::from_utf8_lossy(patch).lines().any(|line| {
-        let l = line.trim_start();
-        (l.starts_with("new file mode ")
-            || l.starts_with("old mode ")
-            || l.starts_with("new mode ")
-            || l.starts_with("deleted file mode ")
-            || l.starts_with("mode "))
-            && l.trim_end().ends_with("120000")
+        (line.starts_with("new file mode ")
+            || line.starts_with("old mode ")
+            || line.starts_with("new mode ")
+            || line.starts_with("deleted file mode "))
+            && line.trim_end().ends_with("120000")
     })
 }
 
@@ -625,6 +672,85 @@ mod tests {
         assert!(
             !marker.exists(),
             "git_diff executed a repo-local textconv driver (RCE)"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // RCE regression (critical): repo-local `filter.<n>.clean`/`smudge` drivers
+    // (mapped by in-tree `.gitattributes`) must NOT execute during git_diff
+    // (clean) or git_apply (smudge). The `.git/info/attributes` neutralizer
+    // disables them.
+    #[test]
+    fn git_wrappers_do_not_run_repo_filter_drivers() {
+        let Some(dir) = git_repo("filter-rce") else {
+            eprintln!("skipping: git unavailable");
+            return;
+        };
+        let clean_marker = dir.join("CLEAN_PWNED");
+        let smudge_marker = dir.join("SMUDGE_PWNED");
+
+        // Plant a filter driver in the repo-local config.
+        let mut config = std::fs::read_to_string(dir.join(".git/config")).unwrap();
+        config.push_str(&format!(
+            "[filter \"evil\"]\n\tclean = touch {}\n\tsmudge = touch {}\n",
+            clean_marker.display(),
+            smudge_marker.display()
+        ));
+        std::fs::write(dir.join(".git/config"), config).unwrap();
+
+        // Commit an in-tree .gitattributes mapping + a tracked file (setup may run
+        // the clean filter; we clear markers afterward to isolate the wrappers).
+        std::fs::write(dir.join(".gitattributes"), b"*.rs filter=evil\n").unwrap();
+        std::fs::write(dir.join("a.rs"), b"x\n").unwrap();
+        hardened_git(&dir).args(["add", "."]).status().unwrap();
+        hardened_git(&dir)
+            .args([
+                "-c",
+                "user.email=ci@cc",
+                "-c",
+                "user.name=ci",
+                "commit",
+                "-q",
+                "-m",
+                "attrs",
+            ])
+            .status()
+            .unwrap();
+
+        // git_diff: clean must not run.
+        std::fs::write(dir.join("a.rs"), b"y\n").unwrap();
+        let _ = std::fs::remove_file(&clean_marker);
+        let rcap = FsReadCap {
+            root: WorktreeRoot::open(&dir).unwrap(),
+            scope: ScopeId(1),
+        };
+        let _ = git_diff(&rcap);
+        assert!(
+            !clean_marker.exists(),
+            "git_diff executed a repo filter.clean driver (RCE)"
+        );
+
+        // git_apply: smudge must not run.
+        hardened_git(&dir)
+            .args(["checkout", "--", "a.rs"])
+            .status()
+            .ok();
+        let _ = std::fs::remove_file(&smudge_marker);
+        let wcap = FsWriteCap {
+            root: WorktreeRoot::open(&dir).unwrap(),
+            scope: ScopeId(1),
+        };
+        let patch = concat!(
+            "--- a/a.rs\n",
+            "+++ b/a.rs\n",
+            "@@ -1 +1,2 @@\n",
+            " x\n",
+            "+added\n"
+        );
+        let _ = git_apply(&wcap, patch.as_bytes());
+        assert!(
+            !smudge_marker.exists(),
+            "git_apply executed a repo filter.smudge driver (RCE)"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
