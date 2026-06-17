@@ -60,6 +60,7 @@ dependencies = [
  "crustcore-receipts",
  "crustcore-secrets",
  "crustcore-types",
+ "crustcore-worktree",
 ]
 
 [[package]]

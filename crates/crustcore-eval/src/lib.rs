@@ -27,6 +27,7 @@ pub enum RedTeamScenario {
     SneakedWorkflowModification,
     SymlinkEscape,
     PathEnvEscape,
+    GitConfigOrHookExecution,
 }
 
 /// The full set of red-team scenarios that must each have a passing fixture
@@ -46,5 +47,6 @@ pub fn required_redteam_scenarios() -> &'static [RedTeamScenario] {
         SneakedWorkflowModification,
         SymlinkEscape,
         PathEnvEscape,
+        GitConfigOrHookExecution,
     ]
 }

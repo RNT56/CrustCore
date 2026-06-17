@@ -101,6 +101,18 @@ fn normalize_relative(rel: &str) -> Result<PathBuf, PathError> {
     Ok(norm)
 }
 
+/// Canonicalizes the deepest existing ancestor of `target` (resolving any
+/// symlinks along the way). A non-existent leaf (a file about to be created)
+/// walks up to the nearest existing directory. Useful to callers that need the
+/// *real* on-disk location of a would-be path (e.g. to reject writes that land
+/// in `.git` via an in-root symlink).
+///
+/// # Errors
+/// [`PathError::Io`] if no ancestor exists or canonicalization fails.
+pub fn canonical_existing_ancestor(target: &Path) -> Result<PathBuf, PathError> {
+    deepest_existing_canonical(target)
+}
+
 /// Canonicalizes the deepest existing ancestor of `target`. A non-existent leaf
 /// (a file about to be created) walks up to the nearest existing directory.
 fn deepest_existing_canonical(target: &Path) -> Result<PathBuf, PathError> {
@@ -129,9 +141,13 @@ fn assert_under_root(root_canonical: &Path, target: &Path) -> Result<(), PathErr
 }
 
 impl WorktreeRoot {
-    /// Wraps a path as a worktree root **without** canonicalizing it. Use this to
-    /// hold a root in a capability token; use [`WorktreeRoot::open`] when the root
-    /// must exist for real filesystem confinement.
+    /// Wraps a path as a worktree root **without** canonicalizing it — for tests
+    /// and value-holding only.
+    ///
+    /// **Do not** build a capability token from a `new()` root that might be a
+    /// symlink: the tools would then confine to the symlink's *target*. Use
+    /// [`WorktreeRoot::open`] (which canonicalizes) for any root that gates real
+    /// filesystem access.
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
         WorktreeRoot(path.into())

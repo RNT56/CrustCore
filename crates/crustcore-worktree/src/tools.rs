@@ -72,6 +72,25 @@ fn is_dot_git(c: std::path::Component<'_>) -> bool {
         .is_some_and(|s| s.eq_ignore_ascii_case(".git"))
 }
 
+/// Refuses a write whose *real* on-disk location resolves inside `<root>/.git`,
+/// catching in-root symlinks that point at the git metadata dir (the lexical
+/// component check alone misses these).
+fn refuse_real_git_dir(root: &WorktreeRoot, target: &Path) -> Result<(), ToolError> {
+    let Ok(root_canon) = root.as_path().canonicalize() else {
+        return Ok(()); // root not on disk yet; lexical check already ran
+    };
+    let git_dir = root_canon.join(".git");
+    if let Ok(existing) = crustcore_path::canonical_existing_ancestor(target) {
+        // Compare case-insensitively to match case-insensitive filesystems.
+        let a = existing.to_string_lossy().to_lowercase();
+        let g = git_dir.to_string_lossy().to_lowercase();
+        if a == g || a.starts_with(&format!("{g}/")) {
+            return Err(ToolError::GitDir);
+        }
+    }
+    Ok(())
+}
+
 /// Reads up to `max_bytes` of a confined file (bounded). Requires a read
 /// capability whose root matches the path's root.
 ///
@@ -115,6 +134,11 @@ pub fn write_file(
         return Err(ToolError::GitDir);
     }
     let target = path.to_path();
+    // Lexical rejection above is not enough: an in-root symlink (e.g. `link` ->
+    // `.git`) would let `link/config` slip past the component check. Resolve the
+    // real on-disk location of the deepest existing ancestor and refuse if it
+    // lands inside `<root>/.git`.
+    refuse_real_git_dir(&cap.root, &target)?;
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(io)?;
     }
@@ -139,7 +163,10 @@ pub struct SearchHit {
 /// # Errors
 /// [`ToolError::Io`] if the root cannot be read.
 pub fn search(cap: &FsReadCap, needle: &str, max_hits: usize) -> Result<Vec<SearchHit>, ToolError> {
-    let root = cap.root.as_path().to_path_buf();
+    // Canonicalize the cap root before walking: a cap built from a non-canonical
+    // (`WorktreeRoot::new`) symlinked root would otherwise make `read_dir` follow
+    // the root symlink and enumerate files outside the intended worktree.
+    let root = cap.root.as_path().canonicalize().map_err(io)?;
     let mut hits = Vec::new();
     let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
@@ -226,10 +253,13 @@ fn hardened_git(worktree: &Path) -> Command {
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
-        // Disable hooks and pager regardless of repo-local config.
+        // Disable hooks and pager regardless of repo-local config, and ignore any
+        // global attributes file (in-tree `.gitattributes` is further neutralized
+        // per-command, e.g. `git diff --no-textconv --no-ext-diff`).
         .args(["-c", "core.hooksPath=/dev/null"])
         .args(["-c", "core.pager=cat"])
-        .args(["-c", "core.fsmonitor=false"]);
+        .args(["-c", "core.fsmonitor=false"])
+        .args(["-c", "core.attributesFile=/dev/null"]);
     c
 }
 
@@ -279,7 +309,11 @@ pub fn git_status(cap: &FsReadCap) -> Result<String, ToolError> {
 /// As [`git_status`].
 pub fn git_diff(cap: &FsReadCap) -> Result<String, ToolError> {
     let mut c = hardened_git(cap.root.as_path());
-    c.args(["diff", "--no-color"]);
+    // `--no-ext-diff`/`--no-textconv` are critical: a malicious repo's local
+    // `.git/config` can define an external-diff or textconv driver (via
+    // `.gitattributes`) that git would otherwise execute — arbitrary code
+    // execution from an untrusted repository. These flags suppress both.
+    c.args(["diff", "--no-color", "--no-ext-diff", "--no-textconv"]);
     run_git(c, None)
 }
 
@@ -300,15 +334,40 @@ pub fn git_log(cap: &FsReadCap, max_entries: u32) -> Result<String, ToolError> {
 }
 
 /// Applies a unified-diff `patch` to the worktree via `git apply` (write
-/// capability). git's own path handling confines the patch to the tree (no
-/// `--unsafe-paths`); combined with the scrubbed env this is a safe apply.
+/// capability). git refuses `../`/absolute paths and writes-through-symlinks (no
+/// `--unsafe-paths`); combined with the scrubbed env and the symlink-creation
+/// guard below, the patch cannot escape or plant out-of-tree footholds.
+///
+/// Symlink-*creating* patches (`mode 120000`) are rejected: git would otherwise
+/// happily create an in-tree symlink pointing anywhere, a planted foothold a
+/// later (symlink-following) tool could traverse. Phase 3 patches are code, not
+/// symlinks.
 ///
 /// # Errors
-/// [`ToolError::Git`] if the patch does not apply cleanly.
+/// [`ToolError::Git`] if the patch creates a symlink or does not apply cleanly.
 pub fn git_apply(cap: &FsWriteCap, patch: &[u8]) -> Result<(), ToolError> {
+    if patch_creates_symlink(patch) {
+        return Err(ToolError::Git(
+            "refusing a patch that creates or retargets a symlink (mode 120000)".to_string(),
+        ));
+    }
     let mut c = hardened_git(cap.root.as_path());
     c.args(["apply", "--whitespace=nowarn"]);
     run_git(c, Some(patch)).map(|_| ())
+}
+
+/// Whether a unified diff declares a symlink mode (`120000`) on a file-mode line
+/// (`new file mode 120000`, `old mode 120000`, `new mode 120000`, …).
+fn patch_creates_symlink(patch: &[u8]) -> bool {
+    String::from_utf8_lossy(patch).lines().any(|line| {
+        let l = line.trim_start();
+        (l.starts_with("new file mode ")
+            || l.starts_with("old mode ")
+            || l.starts_with("new mode ")
+            || l.starts_with("deleted file mode ")
+            || l.starts_with("mode "))
+            && l.trim_end().ends_with("120000")
+    })
 }
 
 #[cfg(test)]
@@ -369,6 +428,71 @@ mod tests {
         assert!(matches!(
             write_file(&wcap, &upper, b"[core]\n").unwrap_err(),
             ToolError::GitDir
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // An in-root symlink to `.git` must not let a write reach the metadata dir
+    // (the lexical component check alone misses this; the canonical check catches
+    // it).
+    #[test]
+    fn write_through_inroot_symlink_to_git_is_refused() {
+        let dir = temp_dir("symgit");
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::os::unix::fs::symlink(dir.join(".git"), dir.join("link")).unwrap();
+        let root = WorktreeRoot::open(&dir).unwrap();
+        let wcap = FsWriteCap {
+            root: WorktreeRoot::open(&dir).unwrap(),
+            scope: ScopeId(1),
+        };
+        // `link/config` is lexically clean but really resolves into `.git`.
+        let wpath = root.confine_write("link/config").unwrap();
+        assert!(matches!(
+            write_file(&wcap, &wpath, b"[core]\n").unwrap_err(),
+            ToolError::GitDir
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // search() must not follow an in-tree symlink that points outside the root.
+    #[test]
+    fn search_does_not_follow_symlink_outside() {
+        let dir = temp_dir("search-sym");
+        let outside = temp_dir("search-outside");
+        std::fs::write(outside.join("secret.txt"), b"NEEDLE outside\n").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("escape")).unwrap();
+        let rcap = FsReadCap {
+            root: WorktreeRoot::open(&dir).unwrap(),
+            scope: ScopeId(1),
+        };
+        let hits = search(&rcap, "NEEDLE", 10).unwrap();
+        assert!(
+            hits.is_empty(),
+            "search followed a symlink outside: {hits:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn git_apply_rejects_symlink_creating_patch() {
+        let dir = temp_dir("apply-sym");
+        let wcap = FsWriteCap {
+            root: WorktreeRoot::open(&dir).unwrap(),
+            scope: ScopeId(1),
+        };
+        let patch = concat!(
+            "diff --git a/link b/link\n",
+            "new file mode 120000\n",
+            "--- /dev/null\n",
+            "+++ b/link\n",
+            "@@ -0,0 +1 @@\n",
+            "+/etc/passwd\n",
+            "\\ No newline at end of file\n",
+        );
+        assert!(matches!(
+            git_apply(&wcap, patch.as_bytes()).unwrap_err(),
+            ToolError::Git(_)
         ));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -470,6 +594,38 @@ mod tests {
         assert!(git_diff(&rcap).unwrap().contains("+world"));
         // Log shows the init commit.
         assert!(git_log(&rcap, 10).unwrap().contains("init"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // RCE regression (critical): a malicious repo-local `.git/config` textconv
+    // driver must NOT execute during git_diff (`--no-textconv`/`--no-ext-diff`).
+    #[test]
+    fn git_diff_does_not_run_repo_textconv_driver() {
+        let Some(dir) = git_repo("rce-textconv") else {
+            eprintln!("skipping: git unavailable");
+            return;
+        };
+        let marker = dir.join("PWNED");
+        // Plant a textconv driver that would run an arbitrary command.
+        let mut config = std::fs::read_to_string(dir.join(".git/config")).unwrap();
+        config.push_str(&format!(
+            "[diff \"evil\"]\n\ttextconv = touch {}\n",
+            marker.display()
+        ));
+        std::fs::write(dir.join(".git/config"), config).unwrap();
+        std::fs::write(dir.join(".gitattributes"), b"README.md diff=evil\n").unwrap();
+        // Give the diff something to render.
+        std::fs::write(dir.join("README.md"), b"hello\nchanged\n").unwrap();
+
+        let rcap = FsReadCap {
+            root: WorktreeRoot::open(&dir).unwrap(),
+            scope: ScopeId(1),
+        };
+        let _ = git_diff(&rcap).unwrap();
+        assert!(
+            !marker.exists(),
+            "git_diff executed a repo-local textconv driver (RCE)"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
