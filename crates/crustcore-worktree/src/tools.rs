@@ -241,7 +241,7 @@ fn scan_file(root: &Path, file: &Path, needle: &str, max_hits: usize, hits: &mut
 /// Builds a hardened `git` command rooted at `worktree`: scrubbed environment,
 /// no system/global config, no hooks, no pager, no prompts. Callers append the
 /// fixed subcommand.
-fn hardened_git(worktree: &Path) -> Command {
+pub(crate) fn hardened_git(worktree: &Path) -> Command {
     let mut c = Command::new("git");
     c.current_dir(worktree)
         // Scrub the environment so model-set GIT_* / injected vars cannot leak in.
@@ -263,7 +263,7 @@ fn hardened_git(worktree: &Path) -> Command {
     c
 }
 
-fn run_git(mut cmd: Command, stdin: Option<&[u8]>) -> Result<String, ToolError> {
+pub(crate) fn run_git(mut cmd: Command, stdin: Option<&[u8]>) -> Result<String, ToolError> {
     use std::process::Stdio;
     cmd.stdin(if stdin.is_some() {
         Stdio::piped()
@@ -307,7 +307,7 @@ fn run_git(mut cmd: Command, stdin: Option<&[u8]>) -> Result<String, ToolError> 
 /// and `-diff` would wrongly turn every textual diff into "binary files differ".
 /// Best-effort: if the repo dir cannot be resolved the caller git command will
 /// surface the real error.
-fn neutralize_attribute_drivers(worktree: &Path) -> Result<(), ToolError> {
+pub(crate) fn neutralize_attribute_drivers(worktree: &Path) -> Result<(), ToolError> {
     let mut probe = hardened_git(worktree);
     probe.args(["rev-parse", "--git-path", "info/attributes"]);
     let Ok(rel) = run_git(probe, None) else {

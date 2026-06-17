@@ -30,6 +30,35 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Phase 5 — worktree + verify loop (P5.1–P5.6).** The local single-task harness
+  with verifier-owned completion:
+  - `crustcore-worktree::WorktreeManager`: create/reuse/remove a **disposable git
+    worktree** per task (`git worktree add --detach … HEAD` under the hardened git
+    invocation — no hooks, no pager, scrubbed env, no global/system config), plus
+    `head_commit` to reference the verified state without mutating the canonical
+    repo. Phase 5 targets the user's *own* (trusted) repo, so repo-local filters
+    (e.g. Git LFS) keep working — CrustCore does not touch `.git/info/attributes`.
+  - `crustcore-backend::verify`: the **verify loop** — `VerifySpec` (explicit
+    program+args, no shell interpretation; best-effort `detect` of
+    cargo/npm/make), and `run_verify`, which reruns the verify command **in a
+    clean sandbox** (`crustcore_sandbox::run_command`, invariant 9) and, **only**
+    on a zero exit, mints a `VerifiedPatch` carrying a `ToolReceipt` over the real
+    run (invariant 10). A failing verify → `Failed`; no sandbox backend →
+    `Refused`; neither mints anything.
+  - **Verifier-owned completion sealed (invariant 13):** `VerifiedPatch::from_verifier`
+    is now crate-private — `run_verify` is its sole constructor — and a new
+    `complete_task(VerifiedPatch)` takes a verified patch *by value*, so a task can
+    only complete from real verifier evidence (a self-claimed-done backend, a
+    failing verify, or a missing sandbox can never complete it).
+  - `crustcore run -dir <repo> -goal <text> -verify <command>` is wired end to
+    end: it creates a worktree, reruns the verify command sandboxed, and completes
+    only on a `VerifiedPatch` — otherwise it exits non-zero with a clear
+    Failed/Refused state.
+  - Tests: worktree create/reuse/remove/head-commit; the **golden "fix failing
+    test"** task — a failing `test -f FIXED` does not complete; after the fix it
+    verifies and completes — which exercises the real sandbox where one is
+    functional and otherwise asserts the completion gate (never falsely
+    `Verified`); plus `VerifySpec` detect/display unit tests.
 - **Phase 4 — runner + sandbox (P4.1–P4.7).** Execution is bounded, killable, and
   sandboxed:
   - `crustcore-runner`: `run(CommandSpec) -> CommandResult` — spawns in its **own
@@ -212,6 +241,7 @@ agent/PR/role/size/invariant audit trail.
 | 2026-06-17 | P3.1–P3.6 | Implement symlink-safe path confinement (`crustcore-path`) + capability-gated file tools and hardened git wrappers (`crustcore-worktree::tools`); real-fs symlink fixtures; un-ignore the symlink-escape red-team fixture. **Two rounds of critical git-RCE fixes** (textconv/external-diff, then clean/smudge filters via `* -filter` in info/attributes) + a no-follow neutralizer fix, across three review passes. | `claude/p3-path` (PR #5, merged) | Maintainer agent (Architect/Implementer) | +0 KiB (295.6 KiB, 37.0%; tools dead-code-eliminated until wired) | Enforces 7 (untrusted paths) + 8 (cap-gated file/git ops); verifies symlink/absolute/`..` escapes fail and git can't run hooks/model config/filters; none weakened |
 | 2026-06-17 | P4.1–P4.7 | Implement the process runner (bounded capture, timeout, process-group kill, env-from-scratch) and the sandbox (env sanitizer, path-list validator, Linux bubblewrap backend v1 + selection/refusal, `run_command`); un-ignore the path-env-escape red-team fixture. | `claude/p4-sandbox` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (295.6 KiB, 37.0%; runner/sandbox dead-code-eliminated until wired) | Enforces 9 (sandboxed execution), 11 (bounded output/timeout), 12 (kill/cancel); deny-all egress + no inherited secrets; Tier-3 microVM out of v0.1 scope; none weakened |
 | 2026-06-17 | P4 hardening | Fix the Linux-CI timeout-kill hang (procps-ng needs `kill -- -<pgid>`; also SIGKILL the leader via its `Child` handle) — root-caused and verified in a faithful `ubuntu:24.04` container. Address Phase-4 review findings: drop the pid-reuse-TOCTOU clean-exit group sweep; strip JVM/Go/zsh/pager/interpreter-lib exec env vars; reject `HOME`/`XDG_CONFIG_HOME` inside the worktree. | `claude/p4-sandbox` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (295.6 KiB, 37.0%) | Strengthens 9 (sandbox env), 12 (reliable process-tree kill); none weakened |
+| 2026-06-17 | P5.1–P5.6 | Implement the worktree + verify loop: `WorktreeManager` (disposable `git worktree` create/reuse/remove, hardened, no canonical-repo mutation), `crustcore-backend::verify` (`VerifySpec`/`run_verify` rerun-in-sandbox → mint `VerifiedPatch`+receipt only on pass), seal `VerifiedPatch::from_verifier` crate-private + `complete_task` by value, wire `crustcore run -dir/-goal/-verify`; golden "fix failing test" + worktree lifecycle tests (full sandbox path validated in a privileged `ubuntu:24.04` container). | `claude/p5-verify` (PR) | Maintainer agent (Architect/Implementer) | +83.6 KiB (379.2 KiB, 47.4%; runner/sandbox/verify now reachable via `run`) | Enforces 13 (verifier-owned completion, type-sealed), 9 (verify in sandbox), 10 (receipt over the real run); none weakened |
 
 ---
 
