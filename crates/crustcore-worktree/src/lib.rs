@@ -26,11 +26,12 @@ use crustcore_types::TaskId;
 /// Worktrees are created with the hardened git invocation (`tools::hardened_git`):
 /// hooks, the pager, and global/system config are disabled and the environment is
 /// scrubbed, so a worktree add cannot run hooks or read model-written global
-/// config (invariant 7). Phase 5 targets the user's *own* (trusted) repository
-/// (`crustcore run -dir .`), so repo-local filters run normally during checkout
-/// (e.g. Git LFS keeps working — CrustCore does **not** mutate the canonical
-/// repo's `.git/info/attributes`). Hardening the checkout of an *untrusted* clone
-/// against smudge-filter execution is a Phase 6 (external-worker) concern.
+/// config (invariant 7). The checkout the add performs would otherwise run
+/// attribute-driven `filter.*.smudge`/`process` drivers (arbitrary host code from
+/// an untrusted repo), so [`WorktreeManager::create_for`] neutralizes filters for
+/// the duration of the add and restores the repo's attributes file afterward — the
+/// user's normal filters (e.g. Git LFS) are not permanently disabled, and worktree
+/// creation is not an RCE gadget.
 #[derive(Debug, Clone)]
 pub struct WorktreeManager {
     /// The canonical repository these worktrees are derived from.
@@ -114,27 +115,49 @@ impl WorktreeManager {
         self.base.join(format!("cc-wt-{:032x}", task.0))
     }
 
-    /// Creates — or reuses, if it already exists — a disposable worktree for
-    /// `task`, returning its confined root.
+    /// Creates — or reuses, if this repo already registered it — a disposable
+    /// worktree for `task`, returning its confined root.
     ///
     /// Uses a fixed git subcommand (`git worktree add --detach <path> HEAD`) under
     /// the hardened invocation, so the add cannot run repo hooks, the pager, or
     /// model-written global/system config. A detached HEAD is used so no branch is
     /// created or moved.
     ///
+    /// Security:
+    /// - **Filter neutralization.** `git worktree add` *checks out* the tree, which
+    ///   would otherwise run repo-local `filter.<n>.smudge`/`process` drivers
+    ///   mapped by a committed `.gitattributes` — arbitrary host code execution
+    ///   from an untrusted repo (invariant 7). Before the add we write `* -filter`
+    ///   to the repo's highest-precedence attributes file, then **restore** the
+    ///   original afterward (so the user's normal filters — e.g. Git LFS — are not
+    ///   permanently disabled). This mirrors the `git_diff`/`git_apply` wrappers.
+    /// - **No adopting a planted tree.** Reuse happens only for a worktree this
+    ///   repo has *registered* (`git worktree list`), never a bare `.git` found at
+    ///   the (predictable) path — so a directory pre-planted by another local user
+    ///   under a world-writable temp base cannot be adopted as the task's tree.
+    ///
     /// # Errors
     /// Returns [`WorktreeError`] if git is unavailable, the repo has no commit to
-    /// check out, or the worktree path cannot be opened as a confined root.
+    /// check out, a foreign directory occupies the worktree path, or the path
+    /// cannot be opened as a confined root.
     pub fn create_for(&self, task: TaskId) -> Result<WorktreeRoot, WorktreeError> {
         let path = self.worktree_path(task);
 
-        // Reuse an existing worktree: a linked worktree has a `.git` *file* (a
-        // gitdir pointer), so its presence marks a prior create we can reuse.
-        if path.join(".git").exists() {
+        // Reuse ONLY a worktree this repo has registered — not a directory that
+        // merely contains a `.git` pointer (which an attacker could pre-plant).
+        if self.is_registered_worktree(&path) {
             return WorktreeRoot::open(&path).map_err(|e| WorktreeError::Path(format!("{e:?}")));
         }
+        // A leftover/foreign directory at the predictable path is refused rather
+        // than adopted or blindly overwritten.
+        if path.exists() {
+            return Err(WorktreeError::Path(format!(
+                "{} already exists but is not a worktree registered to this repo; remove it",
+                path.display()
+            )));
+        }
 
-        std::fs::create_dir_all(&self.base)?;
+        self.create_base_private()?;
 
         // Drop any stale registration for a path we are about to (re)create.
         let mut prune = tools::hardened_git(&self.repo_root);
@@ -144,11 +167,73 @@ impl WorktreeManager {
         let path_str = path
             .to_str()
             .ok_or_else(|| WorktreeError::Path("worktree path is not valid UTF-8".to_string()))?;
+
+        // Neutralize attribute-driven filters across the checkout, then restore.
+        let attr_path = self.info_attributes_path();
+        let original = attr_path.as_ref().and_then(|p| std::fs::read(p).ok());
+        tools::neutralize_attribute_drivers(&self.repo_root)?;
+
         let mut add = tools::hardened_git(&self.repo_root);
         add.args(["worktree", "add", "--detach", path_str, "HEAD"]);
-        tools::run_git(add, None)?;
+        let add_result = tools::run_git(add, None);
+
+        // Restore the repo's attributes file (write back the original, or remove a
+        // file we created) regardless of whether the add succeeded.
+        if let Some(p) = &attr_path {
+            match &original {
+                Some(bytes) => {
+                    let _ = std::fs::write(p, bytes);
+                }
+                None => {
+                    let _ = std::fs::remove_file(p);
+                }
+            }
+        }
+        add_result?;
 
         WorktreeRoot::open(&path).map_err(|e| WorktreeError::Path(format!("{e:?}")))
+    }
+
+    /// Creates the worktree base directory privately (0700 on Unix), so another
+    /// local user cannot pre-seed entries an attacker could get adopted.
+    fn create_base_private(&self) -> Result<(), WorktreeError> {
+        std::fs::create_dir_all(&self.base)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.base, std::fs::Permissions::from_mode(0o700));
+        }
+        Ok(())
+    }
+
+    /// Whether `path` is a worktree currently registered to this repo (per
+    /// `git worktree list`). Compares canonicalized paths so a symlinked temp dir
+    /// (e.g. macOS `/tmp` -> `/private/tmp`) still matches.
+    fn is_registered_worktree(&self, path: &Path) -> bool {
+        let Ok(want) = std::fs::canonicalize(path) else {
+            return false;
+        };
+        let mut list = tools::hardened_git(&self.repo_root);
+        list.args(["worktree", "list", "--porcelain"]);
+        let Ok(out) = tools::run_git(list, None) else {
+            return false;
+        };
+        out.lines()
+            .filter_map(|l| l.strip_prefix("worktree "))
+            .any(|p| std::fs::canonicalize(p).ok().as_deref() == Some(want.as_path()))
+    }
+
+    /// The repo's highest-precedence attributes file path
+    /// (`<git-dir>/info/attributes`), resolved via hardened git, or `None`.
+    fn info_attributes_path(&self) -> Option<PathBuf> {
+        let mut probe = tools::hardened_git(&self.repo_root);
+        probe.args(["rev-parse", "--git-path", "info/attributes"]);
+        let rel = tools::run_git(probe, None).ok()?;
+        let rel = rel.trim();
+        if rel.is_empty() {
+            return None;
+        }
+        Some(self.repo_root.join(rel))
     }
 
     /// The commit the worktree's `HEAD` points at (hardened `git rev-parse HEAD`).
@@ -263,6 +348,72 @@ mod tests {
 
         // Idempotent remove on an already-gone worktree is Ok.
         assert!(mgr.remove(&wt).is_ok());
+
+        let _ = std::fs::remove_dir_all(&base_tmp);
+    }
+
+    /// Red-team (invariant 7): an untrusted repo plants a repo-local
+    /// `filter.<n>.smudge` driver mapped by a committed `.gitattributes`. The
+    /// checkout that `git worktree add` performs must NOT execute it (RCE), and the
+    /// canonical repo's attributes file must be restored (not left polluted).
+    #[test]
+    fn create_for_does_not_run_repo_smudge_filter() {
+        let base_tmp = std::env::temp_dir().join(format!("cc-wtrce-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base_tmp);
+        let repo = base_tmp.join("repo");
+        let wt_base = base_tmp.join("wts");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        if !git(&repo, &["init", "-q"]) {
+            eprintln!("skipping: git unavailable");
+            let _ = std::fs::remove_dir_all(&base_tmp);
+            return;
+        }
+
+        let marker = base_tmp.join("PWNED_SMUDGE");
+        // Repo-local config: an `evil` filter whose smudge command touches a marker.
+        assert!(git(
+            &repo,
+            &[
+                "config",
+                "filter.evil.smudge",
+                &format!("touch {}", marker.display()),
+            ],
+        ));
+        // Committed .gitattributes maps a file to the evil filter; commit both.
+        std::fs::write(repo.join(".gitattributes"), b"secret.txt filter=evil\n").unwrap();
+        std::fs::write(repo.join("secret.txt"), b"content\n").unwrap();
+        assert!(git(&repo, &["add", "."]));
+        assert!(git(
+            &repo,
+            &[
+                "-c",
+                "user.email=ci@cc",
+                "-c",
+                "user.name=ci",
+                "commit",
+                "-q",
+                "-m",
+                "attrs",
+            ],
+        ));
+        // Clear any marker the setup may have created, so a marker afterward is
+        // attributable to the worktree-add checkout.
+        let _ = std::fs::remove_file(&marker);
+
+        let mgr = WorktreeManager::with_base(&repo, &wt_base);
+        let _wt = mgr.create_for(TaskId(3)).expect("create worktree");
+
+        assert!(
+            !marker.exists(),
+            "git worktree add executed a repo-local smudge filter (RCE)"
+        );
+        // The repo had no info/attributes before; the neutralizer must have been
+        // restored (removed), not left polluting the canonical repo.
+        assert!(
+            !repo.join(".git/info/attributes").exists(),
+            "create_for left .git/info/attributes polluted instead of restoring it"
+        );
 
         let _ = std::fs::remove_dir_all(&base_tmp);
     }

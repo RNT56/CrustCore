@@ -75,29 +75,13 @@ fn run_task(run_args: &[String]) -> ExitCode {
         }
     };
 
-    // Resolve the verify command: explicit `-verify` (whitespace-split, no shell
-    // interpretation) or best-effort detection from the repo shape.
-    let spec = match parsed.verify.as_deref() {
-        Some(raw) => {
-            let mut toks = raw.split_whitespace().map(str::to_string);
-            match toks.next() {
-                Some(program) => VerifySpec::new(program, toks.collect()),
-                None => {
-                    eprintln!("crustcore run: -verify was empty");
-                    return ExitCode::from(2);
-                }
-            }
+    // Resolve the verify command: explicit `-verify` or best-effort detection.
+    let spec = match resolve_verify_spec(parsed.verify.as_deref(), &repo_root) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("crustcore run: {e}");
+            return ExitCode::from(2);
         }
-        None => match VerifySpec::detect(&repo_root) {
-            Some(s) => s,
-            None => {
-                eprintln!(
-                    "crustcore run: no -verify command given and none could be detected \
-                     (no Cargo.toml/package.json/Makefile)."
-                );
-                return ExitCode::from(2);
-            }
-        },
     };
 
     if let Some(goal) = parsed.goal.as_deref() {
@@ -139,7 +123,8 @@ fn run_task(run_args: &[String]) -> ExitCode {
         now: now_ts(),
     };
 
-    match run_verify(&cap, &profile, &worktree, &spec, patch, &mut receipts, &ids) {
+    let outcome = run_verify(&cap, &profile, &worktree, &spec, patch, &mut receipts, &ids);
+    let code = match outcome {
         VerifyOutcome::Verified(verified) => {
             let _completion = complete_task(*verified);
             println!("VERIFIED: '{}' passed — task completed.", spec.display());
@@ -164,6 +149,37 @@ fn run_task(run_args: &[String]) -> ExitCode {
             );
             ExitCode::from(1)
         }
+    };
+
+    // Tear down the disposable worktree on every path (best-effort).
+    let _ = manager.remove(&worktree);
+    code
+}
+
+/// Resolves the verify command from an explicit `-verify` string or, when absent,
+/// by detecting it from the repo shape. The explicit string is split on
+/// whitespace into program + args with **no shell interpretation**, so an
+/// untrusted value cannot smuggle a second command (invariant 7).
+///
+/// # Errors
+/// Returns a message if `-verify` is empty/blank or no command can be detected.
+fn resolve_verify_spec(
+    verify: Option<&str>,
+    repo_root: &std::path::Path,
+) -> Result<VerifySpec, String> {
+    match verify {
+        Some(raw) => {
+            let mut toks = raw.split_whitespace().map(str::to_string);
+            match toks.next() {
+                Some(program) => Ok(VerifySpec::new(program, toks.collect())),
+                None => Err("-verify was empty".to_string()),
+            }
+        }
+        None => VerifySpec::detect(repo_root).ok_or_else(|| {
+            "no -verify command given and none could be detected \
+             (no Cargo.toml/package.json/Makefile)"
+                .to_string()
+        }),
     }
 }
 
@@ -285,5 +301,50 @@ fn selftest() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_verify_spec_splits_without_shell_interpretation() {
+        // A shell-injection attempt is split on whitespace into inert argv tokens:
+        // `true` runs with `;`, `rm`, ... as literal args — no second command runs.
+        let dir = std::env::temp_dir();
+        let spec = resolve_verify_spec(Some("true ; rm -rf /"), &dir).unwrap();
+        assert_eq!(spec.program, "true");
+        assert_eq!(spec.args, vec![";", "rm", "-rf", "/"]);
+        // Quotes are literal, not shell-stripped.
+        let spec2 = resolve_verify_spec(Some("sh -c \"evil\""), &dir).unwrap();
+        assert_eq!(spec2.program, "sh");
+        assert_eq!(spec2.args, vec!["-c", "\"evil\""]);
+    }
+
+    #[test]
+    fn resolve_verify_spec_rejects_blank_and_detects_otherwise() {
+        let dir = std::env::temp_dir().join(format!("cc-rvs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Blank -verify is an error.
+        assert!(resolve_verify_spec(Some("   "), &dir).is_err());
+        // No -verify and no recognizable project => error (no guessing).
+        assert!(resolve_verify_spec(None, &dir).is_err());
+        // No -verify but a Cargo.toml => detected `cargo test`.
+        std::fs::write(dir.join("Cargo.toml"), b"[package]\n").unwrap();
+        let detected = resolve_verify_spec(None, &dir).unwrap();
+        assert_eq!(detected.program, "cargo");
+        assert_eq!(detected.args, vec!["test"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_key_returns_nonzero_key() {
+        // Either the OS RNG (normal) or the deterministic fallback yields a
+        // non-zero 32-byte key; an all-zero key would be a bug.
+        assert_ne!(run_key(), [0u8; 32]);
     }
 }

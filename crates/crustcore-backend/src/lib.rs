@@ -84,13 +84,42 @@ pub struct CommandEvidence {
     pub passed: bool,
 }
 
+/// The name/command line of the verifier that produced a [`VerifiedPatch`]
+/// (`docs/backend-contract.md` §2.3). A bounded-text newtype so provenance is a
+/// distinct type, not a bare string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifierName(BoundedText);
+
+impl VerifierName {
+    /// Builds a verifier name from a command line, bounded to the default cap.
+    #[must_use]
+    pub fn new(name: impl AsRef<str>) -> Self {
+        VerifierName(BoundedText::truncated(
+            name.as_ref(),
+            BoundedText::DEFAULT_MAX,
+        ))
+    }
+
+    /// The underlying bounded text.
+    #[must_use]
+    pub fn as_text(&self) -> &BoundedText {
+        &self.0
+    }
+
+    /// The verifier name as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
 /// A patch the verifier has confirmed in a clean sandbox. **Only** the verifier
 /// constructs this (no `From<UnverifiedPatch>`); it is the only thing that may
 /// integrate, complete, or open a PR (invariant 13).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedPatch {
     patch: PatchRef,
-    verifier: BoundedText,
+    verifier: VerifierName,
     commands: Vec<CommandEvidence>,
     passed_at: Timestamp,
     receipt: ToolReceipt,
@@ -105,7 +134,7 @@ impl VerifiedPatch {
     #[must_use]
     pub(crate) fn from_verifier(
         patch: PatchRef,
-        verifier: BoundedText,
+        verifier: VerifierName,
         commands: Vec<CommandEvidence>,
         passed_at: Timestamp,
         receipt: ToolReceipt,
@@ -127,7 +156,7 @@ impl VerifiedPatch {
 
     /// The verifier that produced the evidence.
     #[must_use]
-    pub fn verifier(&self) -> &BoundedText {
+    pub fn verifier(&self) -> &VerifierName {
         &self.verifier
     }
 

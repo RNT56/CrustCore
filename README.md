@@ -88,8 +88,8 @@ The trusted core is real today:
 
 - `cargo xtask verify` is green — fmt, clippy `-D warnings`, tests, the
   forbidden-dependency check, and the nano size gate.
-- `crustcore --version` builds in the `nano` profile at **~379 KiB stripped**
-  (47% of the 800 KiB budget) — now that `crustcore run` links the runner,
+- `crustcore --version` builds in the `nano` profile at **~395 KiB stripped**
+  (49% of the 800 KiB budget) — now that `crustcore run` links the runner,
   sandbox, and verify loop.
 - `crustcore run -dir . -verify "<cmd>"` creates a disposable worktree and
   completes only if `<cmd>` passes in the sandbox; `crustcore selftest` drives the

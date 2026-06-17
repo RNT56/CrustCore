@@ -15,10 +15,10 @@ use crustcore_path::WorktreeRoot;
 use crustcore_policy::SandboxExecCap;
 use crustcore_receipts::{ReceiptChain, ReceiptParams};
 use crustcore_runner::{CommandResult, CommandSpec, ExitStatus};
-use crustcore_sandbox::{run_command, SandboxProfile};
+use crustcore_sandbox::{run_command, SandboxError, SandboxProfile};
 use crustcore_types::{BoundedText, EventSeq, JobId, TaskId, Timestamp, ToolCallId};
 
-use crate::{CommandEvidence, PatchRef, VerifiedPatch};
+use crate::{CommandEvidence, PatchRef, VerifiedPatch, VerifierName};
 
 /// Cap on verify output captured into a receipt/result (bounded; invariant 11).
 const MAX_VERIFY_OUTPUT: usize = 256 * 1024;
@@ -108,6 +108,16 @@ pub enum VerifyOutcome {
     Refused(String),
 }
 
+impl VerifyOutcome {
+    /// Whether the task completed — i.e. the verifier passed. Only `Verified`
+    /// completes; `Failed` and `Refused` do not (invariant 13). The CLI maps this
+    /// to its exit code (success vs. a clear non-zero failure state).
+    #[must_use]
+    pub fn completed(&self) -> bool {
+        matches!(self, VerifyOutcome::Verified(_))
+    }
+}
+
 /// Reruns `spec` in a clean sandbox against `worktree` and, only on a zero exit,
 /// mints a [`VerifiedPatch`] for `patch`. This is the sole constructor of a
 /// `VerifiedPatch` (invariant 13).
@@ -126,13 +136,37 @@ pub fn run_verify(
     receipts: &mut ReceiptChain,
     ids: &VerifyIds,
 ) -> VerifyOutcome {
+    // The executor is the sandbox: there is no run-unsandboxed path. The seam
+    // exists only so the mint→complete→receipt logic can be unit-tested with a
+    // fake executor on hosts without a functional sandbox (invariant 9 holds —
+    // production always passes `run_command`).
+    run_verify_with(worktree, spec, patch, receipts, ids, |command| {
+        run_command(cap, profile, command)
+    })
+}
+
+/// The verify loop parameterized over the command executor. `exec` is the only
+/// way the command runs; in production it is the sandbox (`run_command`). Returns
+/// `Refused` if `exec` errors (e.g. no sandbox backend), `Failed` on a non-zero
+/// exit, and mints a `VerifiedPatch` only on a zero exit.
+fn run_verify_with<E>(
+    worktree: &WorktreeRoot,
+    spec: &VerifySpec,
+    patch: PatchRef,
+    receipts: &mut ReceiptChain,
+    ids: &VerifyIds,
+    exec: E,
+) -> VerifyOutcome
+where
+    E: FnOnce(CommandSpec) -> Result<CommandResult, SandboxError>,
+{
     let mut command = CommandSpec::new(spec.program.clone());
     command.args = spec.args.clone();
     command.cwd = Some(worktree.as_path().to_string_lossy().into_owned());
     command.env = BTreeMap::new();
     command.max_output_bytes = MAX_VERIFY_OUTPUT;
 
-    let result: CommandResult = match run_command(cap, profile, command) {
+    let result: CommandResult = match exec(command) {
         Ok(r) => r,
         Err(e) => return VerifyOutcome::Refused(e.to_string()),
     };
@@ -167,9 +201,9 @@ pub fn run_verify(
         event_seq: ids.event_seq,
     });
 
-    let verifier = BoundedText::truncated(&cmdline, BoundedText::DEFAULT_MAX);
+    let verifier = VerifierName::new(&cmdline);
     let evidence = vec![CommandEvidence {
-        command: verifier.clone(),
+        command: verifier.as_text().clone(),
         passed: true,
     }];
     let verified = VerifiedPatch::from_verifier(patch, verifier, evidence, ids.now, receipt);
@@ -204,6 +238,149 @@ mod tests {
             VerifySpec::new("sh", vec!["-c".to_string(), "true".to_string()]).display(),
             "sh -c true"
         );
+    }
+
+    // ---- Executor-seam tests (deterministic, no OS sandbox required) ----
+    //
+    // These exercise the load-bearing mint→complete→receipt logic on EVERY
+    // platform by injecting a fake command executor — so the positive (Verified)
+    // and negative (Failed/Refused) paths, and the receipt binding, are covered in
+    // CI even where no real sandbox backend exists. The real sandbox path is
+    // additionally checked by `golden_fix_failing_test_gates_completion` where a
+    // functional bubblewrap is present.
+
+    fn tmp_worktree() -> (std::path::PathBuf, WorktreeRoot) {
+        let dir = std::env::temp_dir().join(format!(
+            "cc-verifyseam-{}-{}",
+            std::process::id(),
+            // disambiguate concurrent tests in the same process
+            std::thread::current()
+                .name()
+                .unwrap_or("t")
+                .replace("::", "_")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = WorktreeRoot::open(&dir).unwrap();
+        (dir, root)
+    }
+
+    fn result(status: ExitStatus, out: &[u8]) -> CommandResult {
+        CommandResult {
+            status,
+            stdout: out.to_vec(),
+            stderr: Vec::new(),
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn seam_mints_verified_and_binds_receipt_on_zero_exit() {
+        let (dir, root) = tmp_worktree();
+        let spec = VerifySpec::new("/bin/true", vec![]);
+        let mut receipts = ReceiptChain::new(MacKey::new([0x44; 32]));
+        let outcome = run_verify_with(
+            &root,
+            &spec,
+            PatchRef {
+                diff_hash: [7u8; 32],
+            },
+            &mut receipts,
+            &ids(),
+            |_command| Ok(result(ExitStatus::Code(0), b"all good")),
+        );
+        assert!(outcome.completed(), "a passing verify reports completed()");
+        match outcome {
+            VerifyOutcome::Verified(v) => {
+                // The receipt binds to exactly the command output (invariant 10).
+                assert!(v.receipt().result_matches(b"all good"));
+                assert!(!v.receipt().result_matches(b"tampered"));
+                assert_eq!(v.patch().diff_hash, [7u8; 32]);
+                assert_eq!(v.verifier().as_str(), "/bin/true");
+                // Only a VerifiedPatch reaches completion.
+                let completion = crate::complete_task(*v);
+                assert!(completion.patch.receipt().result_matches(b"all good"));
+            }
+            other => panic!("zero exit must mint a VerifiedPatch, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seam_reports_failed_on_nonzero_exit_and_mints_nothing() {
+        let (dir, root) = tmp_worktree();
+        let spec = VerifySpec::new("/bin/false", vec![]);
+        let mut receipts = ReceiptChain::new(MacKey::new([0x44; 32]));
+        let outcome = run_verify_with(
+            &root,
+            &spec,
+            PatchRef {
+                diff_hash: [0u8; 32],
+            },
+            &mut receipts,
+            &ids(),
+            |_command| Ok(result(ExitStatus::Code(1), b"boom\n")),
+        );
+        assert!(!outcome.completed(), "a failing verify does not complete");
+        match outcome {
+            VerifyOutcome::Failed { status, output } => {
+                assert_eq!(status, ExitStatus::Code(1));
+                assert!(output.as_str().contains("boom"));
+            }
+            other => panic!("nonzero exit must be Failed, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seam_treats_timeout_as_failed_not_verified() {
+        let (dir, root) = tmp_worktree();
+        let spec = VerifySpec::new("/bin/sleep", vec!["999".to_string()]);
+        let mut receipts = ReceiptChain::new(MacKey::new([0x44; 32]));
+        let outcome = run_verify_with(
+            &root,
+            &spec,
+            PatchRef {
+                diff_hash: [0u8; 32],
+            },
+            &mut receipts,
+            &ids(),
+            |_command| Ok(result(ExitStatus::TimedOut, b"")),
+        );
+        assert!(
+            matches!(
+                outcome,
+                VerifyOutcome::Failed {
+                    status: ExitStatus::TimedOut,
+                    ..
+                }
+            ),
+            "a timeout must be Failed, never Verified, got {outcome:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seam_refuses_when_executor_errors() {
+        let (dir, root) = tmp_worktree();
+        let spec = VerifySpec::new("/bin/true", vec![]);
+        let mut receipts = ReceiptChain::new(MacKey::new([0x44; 32]));
+        let outcome = run_verify_with(
+            &root,
+            &spec,
+            PatchRef {
+                diff_hash: [0u8; 32],
+            },
+            &mut receipts,
+            &ids(),
+            |_command| Err(SandboxError::NoBackend),
+        );
+        assert!(!outcome.completed(), "a refused verify does not complete");
+        assert!(
+            matches!(outcome, VerifyOutcome::Refused(_)),
+            "an executor error must Refuse (never Verified), got {outcome:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---- Golden task: "fix failing test" (P5.6) ----

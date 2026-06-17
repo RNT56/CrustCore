@@ -59,6 +59,24 @@ agent/PR/role/size/invariant audit trail.
     verifies and completes — which exercises the real sandbox where one is
     functional and otherwise asserts the completion gate (never falsely
     `Verified`); plus `VerifySpec` detect/display unit tests.
+  - **Hardened per adversarial review** (8 confirmed findings fixed):
+    - `create_for` now **neutralizes attribute-driven git filters during the
+      `git worktree add` checkout** (writing `* -filter`, then restoring the repo's
+      attributes file) so a repo-local `filter.*.smudge`/`process` driver mapped by
+      a committed `.gitattributes` cannot execute host code (invariant 7) —
+      mirroring the `git_diff`/`git_apply` wrappers; an RCE regression test plants
+      such a filter and asserts it does not run.
+    - Worktree **reuse only adopts a worktree this repo has registered** (`git
+      worktree list`), never a bare `.git` at the predictable temp path, and the
+      base dir is created `0700` — so a directory pre-planted by another local user
+      cannot be adopted as the task tree.
+    - `run_verify` gained a test-only executor seam, so the **mint→complete→receipt
+      and Failed/Refused paths are unit-tested deterministically on every
+      platform** (not skipped when no sandbox is present); CI now installs
+      bubblewrap so the full sandboxed path runs there too.
+    - `crustcore run` **removes the disposable worktree on every exit path**;
+      verify-spec resolution and the completion decision are extracted into tested
+      functions (no-shell-split asserted); added the `VerifierName` contract type.
 - **Phase 4 — runner + sandbox (P4.1–P4.7).** Execution is bounded, killable, and
   sandboxed:
   - `crustcore-runner`: `run(CommandSpec) -> CommandResult` — spawns in its **own
@@ -241,7 +259,7 @@ agent/PR/role/size/invariant audit trail.
 | 2026-06-17 | P3.1–P3.6 | Implement symlink-safe path confinement (`crustcore-path`) + capability-gated file tools and hardened git wrappers (`crustcore-worktree::tools`); real-fs symlink fixtures; un-ignore the symlink-escape red-team fixture. **Two rounds of critical git-RCE fixes** (textconv/external-diff, then clean/smudge filters via `* -filter` in info/attributes) + a no-follow neutralizer fix, across three review passes. | `claude/p3-path` (PR #5, merged) | Maintainer agent (Architect/Implementer) | +0 KiB (295.6 KiB, 37.0%; tools dead-code-eliminated until wired) | Enforces 7 (untrusted paths) + 8 (cap-gated file/git ops); verifies symlink/absolute/`..` escapes fail and git can't run hooks/model config/filters; none weakened |
 | 2026-06-17 | P4.1–P4.7 | Implement the process runner (bounded capture, timeout, process-group kill, env-from-scratch) and the sandbox (env sanitizer, path-list validator, Linux bubblewrap backend v1 + selection/refusal, `run_command`); un-ignore the path-env-escape red-team fixture. | `claude/p4-sandbox` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (295.6 KiB, 37.0%; runner/sandbox dead-code-eliminated until wired) | Enforces 9 (sandboxed execution), 11 (bounded output/timeout), 12 (kill/cancel); deny-all egress + no inherited secrets; Tier-3 microVM out of v0.1 scope; none weakened |
 | 2026-06-17 | P4 hardening | Fix the Linux-CI timeout-kill hang (procps-ng needs `kill -- -<pgid>`; also SIGKILL the leader via its `Child` handle) — root-caused and verified in a faithful `ubuntu:24.04` container. Address Phase-4 review findings: drop the pid-reuse-TOCTOU clean-exit group sweep; strip JVM/Go/zsh/pager/interpreter-lib exec env vars; reject `HOME`/`XDG_CONFIG_HOME` inside the worktree. | `claude/p4-sandbox` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (295.6 KiB, 37.0%) | Strengthens 9 (sandbox env), 12 (reliable process-tree kill); none weakened |
-| 2026-06-17 | P5.1–P5.6 | Implement the worktree + verify loop: `WorktreeManager` (disposable `git worktree` create/reuse/remove, hardened, no canonical-repo mutation), `crustcore-backend::verify` (`VerifySpec`/`run_verify` rerun-in-sandbox → mint `VerifiedPatch`+receipt only on pass), seal `VerifiedPatch::from_verifier` crate-private + `complete_task` by value, wire `crustcore run -dir/-goal/-verify`; golden "fix failing test" + worktree lifecycle tests (full sandbox path validated in a privileged `ubuntu:24.04` container). | `claude/p5-verify` (PR) | Maintainer agent (Architect/Implementer) | +83.6 KiB (379.2 KiB, 47.4%; runner/sandbox/verify now reachable via `run`) | Enforces 13 (verifier-owned completion, type-sealed), 9 (verify in sandbox), 10 (receipt over the real run); none weakened |
+| 2026-06-17 | P5.1–P5.6 | Implement the worktree + verify loop: `WorktreeManager` (disposable `git worktree` create/reuse/remove, hardened), `crustcore-backend::verify` (`VerifySpec`/`run_verify` rerun-in-sandbox → mint `VerifiedPatch`+receipt only on pass), seal `VerifiedPatch::from_verifier` crate-private + `complete_task` by value, wire `crustcore run -dir/-goal/-verify`; golden "fix failing test" + worktree lifecycle tests. **Hardened per a 7-dimension adversarial review (8 confirmed findings fixed):** worktree-add filter neutralization+restore (RCE), registered-only worktree reuse + 0700 base, executor-seam unit tests for the mint/Failed/Refused paths, worktree teardown on all `run` paths, `VerifierName` type, extracted+tested verify-spec/exit logic. CI now installs bubblewrap so the real sandbox path runs. Full sandbox path validated in a privileged `ubuntu:24.04` container. | `claude/p5-verify` (PR) | Maintainer agent (Architect/Implementer) | +99.9 KiB (395.5 KiB, 49.4%; runner/sandbox/verify now reachable via `run`) | Enforces 13 (verifier-owned completion, type-sealed), 9 (verify in sandbox), 10 (receipt over the real run), 7 (worktree-add RCE neutralized); none weakened |
 
 ---
 
