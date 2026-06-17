@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 
 pub mod budget;
+pub mod hash;
 pub mod ids;
 pub mod refs;
 pub mod status;
@@ -20,6 +21,7 @@ pub mod text;
 pub mod time;
 
 pub use budget::{Budget, BudgetAxis, BudgetCheck, BudgetDelta, Meter, BUDGET_AXIS_COUNT};
+pub use hash::{hmac_sha256, sha256};
 pub use ids::{
     ApprovalId, ArtifactId, CapabilityId, EventSeq, JobId, LeaseOwner, ScopeId, SecretId, TaskId,
     ToolCallId,

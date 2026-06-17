@@ -30,6 +30,27 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Phase 2 — event log + receipts (P2.1–P2.6).** The audit backbone is real and
+  inspectable:
+  - `crustcore-types`: a vendored, dependency-free **SHA-256 / HMAC-SHA-256**
+    (`hash` module) validated against the NIST (FIPS 180-4) and RFC 4231 test
+    vectors — keeps the workspace std-only and offline-buildable instead of
+    pulling `sha2`/`blake3`.
+  - `crustcore-eventlog`: the compact binary **`EventFrame`** format + append/
+    read/**verify** hash chain (`prev_hash` links each frame's `frame_hash`), so
+    any modification, reorder, insertion, deletion, or truncation is detected
+    (`ChainStatus`/`BreakReason`); `crustcore inspect` (chain status + per-task
+    summary) and `crustcore export` (JSONL, redaction-respecting); a hostile-bytes
+    no-panic fuzz over the untrusted decoder.
+  - `crustcore-receipts`: **`ToolReceipt`** generation + verification — a MAC
+    chain keyed by a CrustCore-held `MacKey` (the model never holds it, so
+    receipts are unforgeable) plus `prev_receipt_hash` linkage; `result_matches`
+    binds a shown result to its hash (invariant 10).
+  - The `crustcore` nano binary wires `inspect`/`export <log>` and the selftest
+    now drives the event-log pipeline; an `examples/write_demo_log` produces a
+    sample log to try them.
+  - Red-team fixture `fabricated_tool_result_is_rejected` un-ignored (P2.6): a
+    receipt forged under the wrong key, or a swapped result, fails verification.
 - **Phase 1 — kernel state machine (P1.1–P1.7).** The trusted `Kernel::step`
   reducer is now real: a synchronous, deterministic, allocation-light
   `event -> state mutation -> bounded action list` over compact `Vec`-of-records
@@ -117,6 +138,7 @@ agent/PR/role/size/invariant audit trail.
 | 2026-06-16 | Pre-P0 | Add AGENTS.md router; reconcile flagged doc inconsistencies end to end | `claude/crustcore-docs-reconcile-q0kr2p` (PR) | Maintainer agent (DocumentationWriter) | n/a (docs only) | Clarifies 1–3, 13, 15, 19, 20; none weakened |
 | 2026-06-16 | P0.1–P0.5 | Bootstrap compiling workspace (19 crates + xtask), CI + nano size gate + CODEOWNERS, Apache-2.0 license; `cargo xtask verify` green | `claude/crustcore-project-docs-q0kr2p` | Maintainer agent (Architect/Implementer) | +296 KiB baseline (37% of 800 KiB budget) | Enforces/encodes 8, 9, 13, 14, 16, 19, 20; embeds 1–3 in types; none weakened |
 | 2026-06-17 | P1.1–P1.7 | Implement the kernel state machine: transition tables, budgets, approvals, lease/expiry; exhaustive property tests + no-panic fuzz + microbench; design & two adversarial-review passes. **Contract file touched:** `crates/crustcore-kernel/src/event.rs` (additive payload fields, reviewed). | `claude/p1-kernel` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (295.5 KiB, 36.9% of budget; within section alignment) | Enforces 4, 8, 11, 14 in code; partial 12 (lease/expiry/stale-owner); verifies determinism/idempotency/bounded-fan-out/no-panic; none weakened |
+| 2026-06-17 | P2.1–P2.6 | Implement the hash-chained event log + tool receipts: vendored SHA-256/HMAC (NIST/RFC vectors), `EventFrame` binary format + append/verify, `ToolReceipt` MAC chain, `crustcore inspect`/`export`, tamper tests + hostile-bytes decoder fuzz; un-ignore the fabricated-tool-result red-team fixture. Stacked on `claude/p1-kernel`. | `claude/p2-eventlog` (PR) | Maintainer agent (Architect/Implementer) | +0.1 KiB (295.6 KiB, 37.0% of budget) | Enforces 10 (receipts) + the event-log half of the audit story; verifies tamper-evidence + no-panic decode; none weakened |
 
 ---
 

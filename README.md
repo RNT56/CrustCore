@@ -59,26 +59,32 @@ general assistant.
 
 ## Status
 
-**Phase 1 — kernel implemented.** On top of the Phase 0 workspace bootstrap, the
-trusted nanokernel is now real: `Kernel::step` is a synchronous, deterministic,
-allocation-light `event -> state mutation -> bounded action list` reducer with no
-async/network/db and no wall clock. It owns the task/job state machine, typed
-budgets (exhaustion *pauses* a task), and the approval request/resolution flow —
-so the four load-bearing invariants are enforced in code: the model can't approve
-its own side effects, every effect passes through policy, every task has budget
-limits, and irreversible actions require an approval token. The sidecar crates
-remain documented skeletons with `TODO(Pn)` markers for their phases.
+**Phase 2 — kernel + audit log implemented.** On top of the Phase 0 bootstrap,
+the trusted nanokernel (`Kernel::step`) is a synchronous, deterministic,
+allocation-light `event -> state mutation -> bounded action list` reducer (no
+async/network/db, no wall clock) owning the task/job state machine, typed budgets,
+and the approval flow — so the model can't approve its own side effects, every
+effect passes through policy, every task has budget limits, and irreversible
+actions require an approval token. On top of that, the **append-only,
+hash-chained event log** makes runs replayable and tamper-evident, and
+**tool receipts** (a MAC chain the model can't forge) bind every model-visible
+tool result to a real call (invariant 10). Hashing is a vendored, dependency-free
+SHA-256/HMAC, so the workspace stays std-only and builds offline. The sidecar
+crates remain documented skeletons with `TODO(Pn)` markers for their phases.
 
 The trusted core is real today:
 
 - `cargo xtask verify` is green — fmt, clippy `-D warnings`, tests, the
   forbidden-dependency check, and the nano size gate.
 - `crustcore --version` builds in the `nano` profile at **~296 KiB stripped**
-  (37% of the 800 KiB budget) — the kernel implementation added nothing
-  measurable to the binary.
-- `crustcore selftest` drives one real `Kernel::step` end to end; the kernel
-  carries exhaustive impossible-transition property tests, a no-panic fuzz, and a
-  sub-microsecond `kernel_step` microbench.
+  (37% of the 800 KiB budget) — the kernel + audit log added nothing measurable.
+- `crustcore selftest` drives the kernel **and** event-log pipelines;
+  `crustcore inspect <log>` verifies the hash chain and prints a task summary, and
+  `crustcore export <log>` renders it as JSONL.
+- The trusted core carries exhaustive impossible-transition property tests, a
+  sub-microsecond `kernel_step` microbench, SHA-256/HMAC vector tests, event-log
+  tamper tests, a hostile-bytes decoder fuzz, and a receipt-forgery red-team
+  fixture.
 
 See the [roadmap](./ROADMAP.md) for the full plan and the v0.1 definition of
 done, and [Building](#building) below to run it.
