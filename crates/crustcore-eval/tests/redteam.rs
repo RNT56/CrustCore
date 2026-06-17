@@ -212,7 +212,7 @@ fn path_env_escape_is_blocked() {
     let mut hostile = BTreeMap::new();
     hostile.insert("LD_PRELOAD".to_string(), "/tmp/evil.so".to_string());
     hostile.insert("PATH".to_string(), ":/usr/bin".to_string());
-    assert!(sanitize_env(&hostile, &profile).is_err());
+    assert!(sanitize_env(&hostile, &profile, None).is_err());
 
     // With a clean PATH, the loader var is dropped and PATH survives.
     let mut env = BTreeMap::new();
@@ -222,7 +222,7 @@ fn path_env_escape_is_blocked() {
         "/tmp/evil.dylib".to_string(),
     );
     env.insert("PATH".to_string(), "/usr/bin:/bin".to_string());
-    let out = sanitize_env(&env, &profile).unwrap();
+    let out = sanitize_env(&env, &profile, None).unwrap();
     assert!(!out.contains_key("LD_PRELOAD"));
     assert!(!out.contains_key("DYLD_INSERT_LIBRARIES"));
     assert_eq!(out.get("PATH").map(String::as_str), Some("/usr/bin:/bin"));

@@ -70,18 +70,37 @@ impl SandboxProfile {
 #[must_use]
 pub fn default_stripped_env() -> Vec<String> {
     [
+        // Loader injection.
         "LD_PRELOAD",
         "LD_LIBRARY_PATH",
         "DYLD_INSERT_LIBRARIES",
         "DYLD_LIBRARY_PATH",
+        // Git config/hook redirection.
         "GIT_CONFIG",
         "GIT_CONFIG_GLOBAL",
+        // Agent/credential forwarding.
         "SSH_AUTH_SOCK",
+        "SSH_ASKPASS",
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "GCP_CREDENTIALS",
         "AZURE_CLIENT_SECRET",
         "NPM_TOKEN",
+        // Interpreter/shell code-execution vectors: each can run arbitrary code
+        // when the corresponding interpreter starts inside the sandbox.
+        "BASH_ENV",
+        "ENV",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "PROMPT_COMMAND",
+        "PS4",
+        "PERL5OPT",
+        "PERL5DB",
+        "RUBYOPT",
+        "PYTHONSTARTUP",
+        "PYTHONINSPECT",
+        "NODE_OPTIONS",
+        "GEM_HOME",
     ]
     .iter()
     .map(|s| (*s).to_string())
@@ -156,13 +175,18 @@ const STRIPPED_PREFIXES: &[&str] = &[
 /// credential (so secrets are never inherited — invariant 2).
 #[must_use]
 pub fn is_stripped(name: &str, profile: &SandboxProfile) -> bool {
-    if profile.stripped_env.iter().any(|s| s == name) {
-        return true;
-    }
-    if STRIPPED_PREFIXES.iter().any(|p| name.starts_with(p)) {
-        return true;
-    }
+    // Match case-insensitively throughout (defense in depth).
     let upper = name.to_ascii_uppercase();
+    if profile
+        .stripped_env
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case(name))
+    {
+        return true;
+    }
+    if STRIPPED_PREFIXES.iter().any(|p| upper.starts_with(p)) {
+        return true;
+    }
     [
         "TOKEN",
         "SECRET",
@@ -171,6 +195,7 @@ pub fn is_stripped(name: &str, profile: &SandboxProfile) -> bool {
         "APIKEY",
         "API_KEY",
         "PRIVATE_KEY",
+        "CREDENTIAL",
     ]
     .iter()
     .any(|needle| upper.contains(needle))
@@ -209,7 +234,9 @@ pub fn validate_path_list(value: &str) -> Result<(), String> {
 
 /// Builds the sanitized environment for a sandbox launch from a requested set:
 /// strips dangerous/credential vars, validates path-list vars, and rejects NUL
-/// bytes (`docs/sandbox.md` §5).
+/// bytes (`docs/sandbox.md` §5). When `worktree` is given, a path-list component
+/// inside it is rejected too — a writable worktree dir on `PATH`/`PYTHONPATH`/…
+/// is a code-execution vector (the model controls the worktree contents).
 ///
 /// # Errors
 /// [`SandboxError::Setup`] if a surviving path-list var has an invalid component
@@ -217,6 +244,7 @@ pub fn validate_path_list(value: &str) -> Result<(), String> {
 pub fn sanitize_env(
     requested: &BTreeMap<String, String>,
     profile: &SandboxProfile,
+    worktree: Option<&Path>,
 ) -> Result<BTreeMap<String, String>, SandboxError> {
     let mut out = BTreeMap::new();
     for (name, value) in requested {
@@ -231,6 +259,15 @@ pub fn sanitize_env(
         if PATH_LIST_VARS.contains(&name.as_str()) {
             validate_path_list(value)
                 .map_err(|e| SandboxError::Setup(format!("env {name}: {e}")))?;
+            if let Some(root) = worktree {
+                for comp in value.split(':') {
+                    if Path::new(comp).starts_with(root) {
+                        return Err(SandboxError::Setup(format!(
+                            "env {name}: component '{comp}' is inside the (writable) worktree"
+                        )));
+                    }
+                }
+            }
         }
         out.insert(name.clone(), value.clone());
     }
@@ -252,10 +289,11 @@ fn find_executable(name: &str) -> Option<PathBuf> {
 }
 
 /// The Linux `bubblewrap` backend (`docs/sandbox.md` §3): wraps the command in an
-/// unprivileged container with a read-only system, a read-write worktree, and —
-/// for the default deny-all posture — **no network** (`--unshare-all`). Network
-/// is re-enabled only for an explicit `Allowlist` profile (egress is then
-/// mediated by the trusted proxy, built later).
+/// unprivileged container with a read-only system, a read-write worktree, and
+/// **no network** (`--unshare-all`). Network is never re-enabled here in v1:
+/// allowlisted egress requires the trusted proxy (not yet built), so an
+/// `Allowlist` profile is **refused** by [`run_command`] rather than granting raw
+/// unproxied host networking.
 #[derive(Debug, Clone)]
 pub struct BubblewrapBackend {
     bwrap: PathBuf,
@@ -268,18 +306,15 @@ impl BubblewrapBackend {
         find_executable("bwrap").map(|bwrap| BubblewrapBackend { bwrap })
     }
 
-    /// Builds the `bwrap`-wrapped [`CommandSpec`] for `inner` under `profile`.
-    fn wrap(&self, profile: &SandboxProfile, inner: &CommandSpec) -> CommandSpec {
+    /// Builds the `bwrap`-wrapped [`CommandSpec`] for `inner`. Network is always
+    /// denied (`--unshare-all`, no `--share-net`).
+    fn wrap(&self, inner: &CommandSpec) -> CommandSpec {
         let mut args: Vec<String> = vec![
             "--die-with-parent".into(),
-            // Unshare every namespace (network, pid, ipc, uts, cgroup, user)...
+            // Unshare every namespace, including the network: deny-all egress.
             "--unshare-all".into(),
+            "--new-session".into(),
         ];
-        // ...then re-add the network only for an explicit allowlist profile.
-        if profile.network == NetworkPosture::Allowlist {
-            args.push("--share-net".into());
-        }
-        args.push("--new-session".into());
         // Read-only system directories.
         for ro in ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt"] {
             if Path::new(ro).exists() {
@@ -318,8 +353,8 @@ impl BubblewrapBackend {
 
     /// The bwrap argv this backend would use (exposed for tests/inspection).
     #[must_use]
-    pub fn wrapped_spec(&self, profile: &SandboxProfile, inner: &CommandSpec) -> CommandSpec {
-        self.wrap(profile, inner)
+    pub fn wrapped_spec(&self, inner: &CommandSpec) -> CommandSpec {
+        self.wrap(inner)
     }
 }
 
@@ -329,7 +364,11 @@ impl SandboxBackend for BubblewrapBackend {
         profile: &SandboxProfile,
         spec: CommandSpec,
     ) -> Result<CommandResult, SandboxError> {
-        let wrapped = self.wrap(profile, &spec);
+        // Sanitize the environment at the launch boundary (not just one layer up),
+        // so invoking the backend directly cannot fail open.
+        let worktree = spec.cwd.clone().map(PathBuf::from);
+        let env = sanitize_env(&spec.env, profile, worktree.as_deref())?;
+        let wrapped = self.wrap(&CommandSpec { env, ..spec });
         run(&wrapped).map_err(|e| SandboxError::Setup(e.to_string()))
     }
 }
@@ -361,8 +400,13 @@ pub fn run_command(
         ExecutionTier::Sandboxed | ExecutionTier::Hostile => {}
     }
 
-    let env = sanitize_env(&spec.env, profile)?;
-    let spec = CommandSpec { env, ..spec };
+    // Allowlisted egress requires the trusted proxy (not yet built); until then,
+    // refuse rather than grant raw unproxied host networking.
+    if profile.network == NetworkPosture::Allowlist {
+        return Err(SandboxError::Setup(
+            "network allowlist requires the egress proxy (not yet implemented)".to_string(),
+        ));
+    }
 
     // Tier 3 (hostile) requires a microVM (Firecracker), out of scope for v0.1:
     // refuse rather than downgrade to bwrap.
@@ -370,6 +414,7 @@ pub fn run_command(
         return Err(SandboxError::NoBackend);
     }
 
+    // The backend sanitizes the environment at the launch boundary (§5).
     let backend = BubblewrapBackend::detect().ok_or(SandboxError::NoBackend)?;
     backend.run(profile, spec)
 }
@@ -400,7 +445,7 @@ mod tests {
             ("RUST_BACKTRACE", "1"),
             ("LANG", "C"),
         ]);
-        let out = sanitize_env(&requested, &profile).unwrap();
+        let out = sanitize_env(&requested, &profile, None).unwrap();
         // Safe vars survive.
         assert_eq!(out.get("PATH").map(String::as_str), Some("/usr/bin:/bin"));
         assert_eq!(out.get("RUST_BACKTRACE").map(String::as_str), Some("1"));
@@ -433,7 +478,38 @@ mod tests {
         let profile = SandboxProfile::default_sandboxed();
         // A prepended empty PATH entry (current dir) is an exec-injection vector.
         let requested = env(&[("PATH", ":/usr/bin")]);
-        assert!(sanitize_env(&requested, &profile).is_err());
+        assert!(sanitize_env(&requested, &profile, None).is_err());
+    }
+
+    #[test]
+    fn sanitizer_strips_interpreter_exec_vars() {
+        let profile = SandboxProfile::default_sandboxed();
+        let requested = env(&[
+            ("BASH_ENV", "/tmp/evil.sh"),
+            ("ENV", "/tmp/evil.sh"),
+            ("NODE_OPTIONS", "--require /tmp/evil.js"),
+            ("PERL5OPT", "-Mevil"),
+            ("RUBYOPT", "-revil"),
+            ("PROMPT_COMMAND", "evil"),
+            ("PYTHONSTARTUP", "/tmp/evil.py"),
+        ]);
+        let out = sanitize_env(&requested, &profile, None).unwrap();
+        assert!(
+            out.is_empty(),
+            "interpreter exec vars must be stripped: {out:?}"
+        );
+    }
+
+    #[test]
+    fn sanitizer_rejects_writable_worktree_on_path() {
+        use std::path::Path;
+        let profile = SandboxProfile::default_sandboxed();
+        // A PATH component inside the (model-writable) worktree is an exec vector.
+        let requested = env(&[("PATH", "/work/tree/bin:/usr/bin")]);
+        assert!(sanitize_env(&requested, &profile, Some(Path::new("/work/tree"))).is_err());
+        // Outside the worktree it is accepted.
+        let ok = env(&[("PATH", "/usr/bin:/bin")]);
+        assert!(sanitize_env(&ok, &profile, Some(Path::new("/work/tree"))).is_ok());
     }
 
     #[test]
@@ -442,11 +518,10 @@ mod tests {
         let backend = BubblewrapBackend {
             bwrap: PathBuf::from("/usr/bin/bwrap"),
         };
-        let profile = SandboxProfile::default_sandboxed();
         let mut inner = CommandSpec::new("/bin/echo");
         inner.args = vec!["hi".to_string()];
         inner.cwd = Some("/work/tree".to_string());
-        let wrapped = backend.wrapped_spec(&profile, &inner);
+        let wrapped = backend.wrapped_spec(&inner);
         assert!(wrapped.program.ends_with("bwrap"));
         assert!(wrapped.args.iter().any(|a| a == "--unshare-all"));
         assert!(!wrapped.args.iter().any(|a| a == "--share-net")); // deny-all => no net
@@ -465,17 +540,22 @@ mod tests {
     }
 
     #[test]
-    fn allowlist_profile_shares_net() {
-        let backend = BubblewrapBackend {
-            bwrap: PathBuf::from("/usr/bin/bwrap"),
+    fn allowlist_profile_is_refused_until_proxy_exists() {
+        // Until the trusted egress proxy is built, an allowlist profile must be
+        // refused rather than granting raw, unproxied host networking.
+        let cap = SandboxExecCap {
+            profile: ScopeId(1),
+            scope: ScopeId(1),
         };
         let profile = SandboxProfile {
             tier: ExecutionTier::Sandboxed,
             network: NetworkPosture::Allowlist,
             stripped_env: default_stripped_env(),
         };
-        let wrapped = backend.wrapped_spec(&profile, &CommandSpec::new("/bin/true"));
-        assert!(wrapped.args.iter().any(|a| a == "--share-net"));
+        assert!(matches!(
+            run_command(&cap, &profile, CommandSpec::new("/bin/true")),
+            Err(SandboxError::Setup(_))
+        ));
     }
 
     #[test]

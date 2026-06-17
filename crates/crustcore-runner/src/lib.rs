@@ -96,8 +96,35 @@ impl core::fmt::Display for RunError {
 
 impl std::error::Error for RunError {}
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
 /// Grace period between SIGTERM and SIGKILL when killing a timed-out process tree.
 const KILL_GRACE: Duration = Duration::from_millis(200);
+
+/// Maximum time to wait for reader threads to finish after the process group has
+/// been swept. After this, a still-blocked reader (a grandchild that escaped the
+/// group via `setsid` and holds the pipe — only possible without a PID namespace)
+/// is detached so `run()` returns with the output captured so far, never hanging.
+const READER_DRAIN: Duration = Duration::from_secs(5);
+
+/// Shared, incrementally-filled capture for a stream reader thread, so `run()`
+/// can recover the bytes read so far even if it has to detach the thread.
+struct Capture {
+    buf: Mutex<Vec<u8>>,
+    truncated: AtomicBool,
+    done: AtomicBool,
+}
+
+impl Capture {
+    fn new() -> Arc<Self> {
+        Arc::new(Capture {
+            buf: Mutex::new(Vec::new()),
+            truncated: AtomicBool::new(false),
+            done: AtomicBool::new(false),
+        })
+    }
+}
 
 /// Runs a [`CommandSpec`] to completion (or timeout), returning a **bounded**
 /// [`CommandResult`]. The command runs in its **own process group** so that, on
@@ -136,38 +163,72 @@ pub fn run(spec: &CommandSpec) -> Result<CommandResult, RunError> {
     let mut child = cmd.spawn().map_err(|e| RunError::Spawn(e.to_string()))?;
     let pgid = child.id();
 
-    let out_reader = child
-        .stdout
-        .take()
-        .map(|s| spawn_reader(s, spec.max_output_bytes));
-    let err_reader = child
-        .stderr
-        .take()
-        .map(|s| spawn_reader(s, spec.max_output_bytes));
+    let (out_cap, out_h) = match child.stdout.take() {
+        Some(s) => {
+            let cap = Capture::new();
+            (
+                Some(cap.clone()),
+                Some(spawn_reader(s, spec.max_output_bytes, cap)),
+            )
+        }
+        None => (None, None),
+    };
+    let (err_cap, err_h) = match child.stderr.take() {
+        Some(s) => {
+            let cap = Capture::new();
+            (
+                Some(cap.clone()),
+                Some(spawn_reader(s, spec.max_output_bytes, cap)),
+            )
+        }
+        None => (None, None),
+    };
 
     let start = Instant::now();
     let mut timed_out = false;
-    let exit_status = loop {
+    let leader_status = loop {
         match child.try_wait().map_err(|e| RunError::Io(e.to_string()))? {
             Some(status) => break status,
             None => {
                 if start.elapsed() >= spec.timeout {
-                    kill_group(pgid, "TERM");
                     timed_out = true;
-                    break wait_after_kill(&mut child, pgid)?;
+                    // Ask the whole tree to stop, give it the grace window, then
+                    // SIGKILL the group unconditionally (a SIGTERM-ignoring
+                    // grandchild must not survive — invariant 12).
+                    kill_group(pgid, "TERM");
+                    let grace = Instant::now() + KILL_GRACE;
+                    while Instant::now() < grace
+                        && child
+                            .try_wait()
+                            .map_err(|e| RunError::Io(e.to_string()))?
+                            .is_none()
+                    {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    kill_group(pgid, "KILL");
+                    break child.wait().map_err(|e| RunError::Io(e.to_string()))?;
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
     };
 
-    let (stdout, out_trunc) = join_reader(out_reader);
-    let (stderr, err_trunc) = join_reader(err_reader);
+    // Even on a clean exit, sweep the group with SIGKILL: a backgrounded
+    // grandchild the command left behind (holding the stdout/stderr pipe) would
+    // otherwise keep the readers from reaching EOF and wedge the join below.
+    if !timed_out {
+        kill_group(pgid, "KILL");
+    }
+
+    // Collect with a hard deadline so nothing can make `run()` hang.
+    let deadline = Instant::now() + READER_DRAIN;
+    let (stdout, out_trunc) = collect_reader(out_cap, out_h, deadline);
+    let (stderr, err_trunc) = collect_reader(err_cap, err_h, deadline);
 
     let status = if timed_out {
         ExitStatus::TimedOut
     } else {
-        from_std_status(&exit_status)
+        from_std_status(&leader_status)
     };
 
     Ok(CommandResult {
@@ -190,71 +251,86 @@ fn from_std_status(st: &std::process::ExitStatus) -> ExitStatus {
     }
 }
 
-/// Signals a whole process group via `kill -<sig> -<pgid>` (negative pid = group).
-/// Std-only (no libc): the child was placed in its own group, so `pgid == child
-/// pid`.
+/// Signals a whole process group via `kill -<sig> -<pgid>` (negative pid = the
+/// group). Std-only (no libc): the child was placed in its own group, so
+/// `pgid == child pid`. Uses an **absolute** `kill` path (not PATH-resolved) so
+/// the signal delivery cannot be redirected. Best-effort: a kill targeting an
+/// already-empty group simply does nothing, and the bounded reader collection
+/// below guarantees `run()` returns regardless.
 #[cfg(unix)]
 fn kill_group(pgid: u32, sig: &str) {
     use std::process::{Command, Stdio};
-    let _ = Command::new("kill")
-        .args([format!("-{sig}"), format!("-{pgid}")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-}
-
-/// After a SIGTERM to the group, wait briefly for the child to exit; if it
-/// lingers past the grace period, SIGKILL the group and reap.
-#[cfg(unix)]
-fn wait_after_kill(
-    child: &mut std::process::Child,
-    pgid: u32,
-) -> Result<std::process::ExitStatus, RunError> {
-    let deadline = std::time::Instant::now() + KILL_GRACE;
-    loop {
-        match child.try_wait().map_err(|e| RunError::Io(e.to_string()))? {
-            Some(status) => return Ok(status),
-            None => {
-                if std::time::Instant::now() >= deadline {
-                    kill_group(pgid, "KILL");
-                    return child.wait().map_err(|e| RunError::Io(e.to_string()));
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
+    for kill_bin in ["/bin/kill", "/usr/bin/kill"] {
+        if std::path::Path::new(kill_bin).exists() {
+            let _ = Command::new(kill_bin)
+                .args([format!("-{sig}"), format!("-{pgid}")])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            return;
         }
     }
 }
 
-/// Spawns a thread that reads up to `max` bytes from `stream`, then drains the
-/// remainder (so the child never blocks on a full pipe). Returns the captured
-/// bytes and whether the stream was truncated.
+/// Spawns a thread that reads `stream` into a shared [`Capture`]: it keeps the
+/// first `max` bytes and drains the rest (so the writer never blocks on a full
+/// pipe), flagging truncation, and sets `done` when the stream reaches EOF.
 fn spawn_reader<R: std::io::Read + Send + 'static>(
     mut stream: R,
     max: usize,
-) -> std::thread::JoinHandle<(Vec<u8>, bool)> {
-    use std::io::Read;
+    cap: Arc<Capture>,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        let mut captured = Vec::new();
-        let _ = (&mut stream).take(max as u64).read_to_end(&mut captured);
-        // Drain the rest to EOF so the writer never blocks on a full pipe.
-        let mut scratch = [0u8; 8192];
-        let mut truncated = false;
+        let mut total = 0usize;
+        let mut chunk = [0u8; 8192];
         loop {
-            match stream.read(&mut scratch) {
+            match stream.read(&mut chunk) {
                 Ok(0) => break,
-                Ok(_) => truncated = true,
+                Ok(n) => {
+                    if total < max {
+                        let take = (max - total).min(n);
+                        if let Ok(mut buf) = cap.buf.lock() {
+                            buf.extend_from_slice(&chunk[..take]);
+                        }
+                        total += take;
+                        if take < n {
+                            cap.truncated.store(true, Ordering::Relaxed);
+                        }
+                    } else {
+                        cap.truncated.store(true, Ordering::Relaxed);
+                    }
+                }
                 Err(_) => break,
             }
         }
-        (captured, truncated)
+        cap.done.store(true, Ordering::Relaxed);
     })
 }
 
-fn join_reader(handle: Option<std::thread::JoinHandle<(Vec<u8>, bool)>>) -> (Vec<u8>, bool) {
-    handle
-        .map(|h| h.join().unwrap_or((Vec::new(), false)))
-        .unwrap_or((Vec::new(), false))
+/// Waits (until `deadline`) for a reader to finish, joining it cleanly if so;
+/// otherwise detaches it (the thread is left blocked on a pipe a `setsid`-escaped
+/// straggler still holds) and returns the bytes captured so far — so `run()`
+/// never hangs.
+fn collect_reader(
+    cap: Option<Arc<Capture>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+    deadline: std::time::Instant,
+) -> (Vec<u8>, bool) {
+    let Some(cap) = cap else {
+        return (Vec::new(), false);
+    };
+    while !cap.done.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    if let Some(h) = handle {
+        if cap.done.load(Ordering::Relaxed) {
+            let _ = h.join();
+        }
+        // else: drop `h` to detach the still-blocked reader thread.
+    }
+    let buf = cap.buf.lock().map(|b| b.clone()).unwrap_or_default();
+    (buf, cap.truncated.load(Ordering::Relaxed))
 }
 
 #[cfg(all(test, unix))]
@@ -302,6 +378,27 @@ mod tests {
         let r = run(&s).unwrap();
         assert_eq!(r.status, ExitStatus::TimedOut);
         assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn signal_ignoring_grandchild_does_not_hang_run() {
+        // Parent backgrounds a grandchild that IGNORES SIGTERM and inherits the
+        // stdout pipe, then sleeps. A naive child-only kill (or unbounded reader
+        // join) would hang run() forever; the unconditional group SIGKILL reaps
+        // the grandchild so the pipe closes and run() returns promptly.
+        let mut s = spec(
+            "/bin/sh",
+            &["-c", "sh -c 'trap \"\" TERM; sleep 30' & sleep 30"],
+        );
+        s.timeout = Duration::from_millis(300);
+        let start = std::time::Instant::now();
+        let r = run(&s).unwrap();
+        assert_eq!(r.status, ExitStatus::TimedOut);
+        assert!(
+            start.elapsed() < Duration::from_secs(8),
+            "run() hung on a signal-ignoring grandchild: {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]
