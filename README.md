@@ -59,20 +59,26 @@ general assistant.
 
 ## Status
 
-**Phase 0 — workspace bootstrapped.** The repository contains the complete
-project contract (vision, invariants, architecture, security model, phased build
-plan) **and** a compiling Cargo workspace: the nano binary, the trusted-core
-crates, the sidecar skeletons, the `xtask` task runner, and CI. Every crate is a
-type-true skeleton with `TODO(Pn)` markers pointing at the phase that implements
-it, so the next session can start coding immediately.
+**Phase 1 — kernel implemented.** On top of the Phase 0 workspace bootstrap, the
+trusted nanokernel is now real: `Kernel::step` is a synchronous, deterministic,
+allocation-light `event -> state mutation -> bounded action list` reducer with no
+async/network/db and no wall clock. It owns the task/job state machine, typed
+budgets (exhaustion *pauses* a task), and the approval request/resolution flow —
+so the four load-bearing invariants are enforced in code: the model can't approve
+its own side effects, every effect passes through policy, every task has budget
+limits, and irreversible actions require an approval token. The sidecar crates
+remain documented skeletons with `TODO(Pn)` markers for their phases.
 
 The trusted core is real today:
 
 - `cargo xtask verify` is green — fmt, clippy `-D warnings`, tests, the
   forbidden-dependency check, and the nano size gate.
 - `crustcore --version` builds in the `nano` profile at **~296 KiB stripped**
-  (37% of the 800 KiB budget).
-- `crustcore selftest` drives one real `Kernel::step` end to end.
+  (37% of the 800 KiB budget) — the kernel implementation added nothing
+  measurable to the binary.
+- `crustcore selftest` drives one real `Kernel::step` end to end; the kernel
+  carries exhaustive impossible-transition property tests, a no-panic fuzz, and a
+  sub-microsecond `kernel_step` microbench.
 
 See the [roadmap](./ROADMAP.md) for the full plan and the v0.1 definition of
 done, and [Building](#building) below to run it.

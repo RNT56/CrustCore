@@ -12,16 +12,19 @@
 //! marked with `TODO(Pn)`.
 #![forbid(unsafe_code)]
 
+pub mod budget;
 pub mod ids;
 pub mod refs;
 pub mod status;
 pub mod text;
 pub mod time;
 
+pub use budget::{Budget, BudgetAxis, BudgetCheck, BudgetDelta, Meter, BUDGET_AXIS_COUNT};
 pub use ids::{
-    ApprovalId, ArtifactId, CapabilityId, EventSeq, JobId, ScopeId, SecretId, TaskId, ToolCallId,
+    ApprovalId, ArtifactId, CapabilityId, EventSeq, JobId, LeaseOwner, ScopeId, SecretId, TaskId,
+    ToolCallId,
 };
 pub use refs::{BranchPrefix, DomainAllowlist, RepoRef};
-pub use status::{JobStatus, Reversibility, TaskStatus};
+pub use status::{ApprovalResolution, ApprovalStatus, JobStatus, Reversibility, TaskStatus};
 pub use text::{BoundedText, BoundedTextError};
 pub use time::Timestamp;

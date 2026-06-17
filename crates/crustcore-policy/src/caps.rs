@@ -58,9 +58,29 @@ pub struct SandboxExecCap {
 }
 
 /// A user authorized to grant approvals (e.g. an allowlisted Telegram chat).
-/// The model is never an `AuthorizedUser` (invariant 4).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// The model is never an `AuthorizedUser` (invariant 4). Instances exist only
+/// where the runtime binds an authorized identity at setup; model/worker output
+/// never becomes one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AuthorizedUser(pub u64);
+
+impl AuthorizedUser {
+    /// Mints an [`Approved`] token for `value`. This is the **only** public path
+    /// to an `Approved<T>`, and it structurally requires an `AuthorizedUser`
+    /// (`&self`): there is no path from model/worker output to this call
+    /// (invariant 4 — the model cannot approve its own side effects). The kernel
+    /// never invokes this from event payloads; it flips an internal approval
+    /// status after an `Actor::User` resolution and the runtime mints the token.
+    #[must_use]
+    pub fn approve<T>(
+        &self,
+        value: T,
+        approval_id: ApprovalId,
+        expires_at: Timestamp,
+    ) -> Approved<T> {
+        Approved::new(value, approval_id, *self, expires_at)
+    }
+}
 
 /// Wraps a value (capability or action) together with the human approval that
 /// unlocked it. Irreversible operations take `Approved<T>`, never bare `T`
@@ -79,11 +99,11 @@ pub struct Approved<T> {
 }
 
 impl<T> Approved<T> {
-    /// Constructed by the approval engine only. TODO(P1.5/P8): make this
-    /// `pub(crate)` to the approval engine and route minting through it.
-    #[doc(hidden)]
+    /// Constructed by the approval engine only. Crate-private so the **only** way
+    /// to obtain an `Approved<T>` is [`AuthorizedUser::approve`] — there is no
+    /// constructor reachable from model-derived data (invariant 4).
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         value: T,
         approval_id: ApprovalId,
         approved_by: AuthorizedUser,
@@ -113,4 +133,28 @@ pub struct IrreversibleAction {
     pub summary: crustcore_types::BoundedText,
     /// How irreversible it is.
     pub reversibility: Reversibility,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crustcore_types::ApprovalId;
+
+    #[test]
+    fn authorized_user_is_the_only_mint_path() {
+        let user = AuthorizedUser(7);
+        let approved = user.approve(42u32, ApprovalId(1), Timestamp::from_millis(1_000));
+        assert_eq!(approved.value, 42);
+        assert_eq!(approved.approved_by, user);
+        assert_eq!(approved.approval_id, ApprovalId(1));
+    }
+
+    #[test]
+    fn approval_validity_respects_expiry() {
+        let user = AuthorizedUser(7);
+        let approved = user.approve((), ApprovalId(1), Timestamp::from_millis(1_000));
+        assert!(approved.is_valid_at(Timestamp::from_millis(1_000)));
+        assert!(approved.is_valid_at(Timestamp::from_millis(999)));
+        assert!(!approved.is_valid_at(Timestamp::from_millis(1_001)));
+    }
 }

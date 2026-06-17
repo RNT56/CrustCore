@@ -30,6 +30,29 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Phase 1 — kernel state machine (P1.1–P1.7).** The trusted `Kernel::step`
+  reducer is now real: a synchronous, deterministic, allocation-light
+  `event -> state mutation -> bounded action list` over compact `Vec`-of-records
+  arenas (tasks/jobs/approvals), with **no** async/network/db and **no wall clock**
+  (all time is event-carried, so replay is deterministic).
+  - `crustcore-types`: a `budget` module (`Budget`/`Meter`/`BudgetDelta`/
+    `BudgetCheck`/`BudgetAxis`, integer-only, saturating) modelling all eight
+    invariant-11 axes; `LeaseOwner`; `EventSeq::next_saturating`;
+    `ApprovalStatus`/`ApprovalResolution`; `JobStatus::is_terminal`.
+  - `crustcore-kernel`: pure, **exhaustive, total** task/job transition tables
+    (`state.rs`); the `step` safety-ordered gates (idempotency frontier → terminal
+    absorb → budget pause → source-state effect gate → bounded ready-drain);
+    typed budget pause to `Blocked` (resumable); the approval request/resolution
+    flow with operation-binding, expiry-at-use, one-pending-per-task, and the
+    authorized-user-only guard; lease grant/expiry and stale-worker rejection.
+  - `crustcore-policy`: `Approved<T>` minting is now crate-private behind
+    `AuthorizedUser::approve` — the only path to an approval token requires an
+    `AuthorizedUser`, so model/worker output can never mint one (invariant 4).
+  - Tests: exhaustive impossible-transition property tests, a deterministic-LCG
+    no-panic fuzz, determinism/idempotency/bounded-fan-out tests, and one negative
+    test per acceptance criterion and per touched invariant.
+  - `kernel_step` microbench wired (`benches/kernel_step.rs`, std-timer,
+    `harness = false`): ~40 ns p50, well under the 1 µs budget (P1.7).
 - Project documentation foundation: single-source-of-truth `CLAUDE.md`;
   authoritative `ROADMAP.md`; product laws in `INVARIANTS.md`; `THREAT_MODEL.md`,
   `SECURITY.md`, `CONTRIBUTING.md`, and `README.md`.
@@ -93,6 +116,7 @@ agent/PR/role/size/invariant audit trail.
 | 2026-06-16 | Pre-P0 | Author CLAUDE.md single source of truth + full documentation set from approved roadmap | `claude/crustcore-project-docs-q0kr2p` | Maintainer agent (DocumentationWriter) | n/a (docs only) | Documents all 20; none weakened |
 | 2026-06-16 | Pre-P0 | Add AGENTS.md router; reconcile flagged doc inconsistencies end to end | `claude/crustcore-docs-reconcile-q0kr2p` (PR) | Maintainer agent (DocumentationWriter) | n/a (docs only) | Clarifies 1–3, 13, 15, 19, 20; none weakened |
 | 2026-06-16 | P0.1–P0.5 | Bootstrap compiling workspace (19 crates + xtask), CI + nano size gate + CODEOWNERS, Apache-2.0 license; `cargo xtask verify` green | `claude/crustcore-project-docs-q0kr2p` | Maintainer agent (Architect/Implementer) | +296 KiB baseline (37% of 800 KiB budget) | Enforces/encodes 8, 9, 13, 14, 16, 19, 20; embeds 1–3 in types; none weakened |
+| 2026-06-17 | P1.1–P1.7 | Implement the kernel state machine: transition tables, budgets, approvals, lease/expiry; exhaustive property tests + no-panic fuzz + microbench; design & two adversarial-review passes. **Contract file touched:** `crates/crustcore-kernel/src/event.rs` (additive payload fields, reviewed). | `claude/p1-kernel` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (295.5 KiB, 36.9% of budget; within section alignment) | Enforces 4, 8, 11, 14 in code; partial 12 (lease/expiry/stale-owner); verifies determinism/idempotency/bounded-fan-out/no-panic; none weakened |
 
 ---
 

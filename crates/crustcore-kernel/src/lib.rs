@@ -21,7 +21,16 @@
 pub mod action;
 pub mod event;
 mod kernel;
+mod state;
 
 pub use action::Action;
 pub use event::{Actor, Event, EventKind, Visibility};
 pub use kernel::Kernel;
+pub use state::BlockReason;
+
+/// The bounded list of [`Action`]s a [`Kernel::step`] returns. Aliased so the
+/// container is a single swap point: today a `Vec` (keeping the workspace
+/// std-only and offline — `ROADMAP.md` §6.1), and the documented allocation-light
+/// upgrade to `SmallVec<[Action; 4]>` (`docs/architecture.md` §2.1) is a one-line
+/// change behind a measured dependency-admission PR.
+pub type ActionVec = Vec<Action>;

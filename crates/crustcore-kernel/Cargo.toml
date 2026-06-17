@@ -14,3 +14,11 @@ crustcore-policy = { workspace = true }
 # FORBIDDEN here (CLAUDE.md §5.1): tokio, reqwest, serde_json, clap, sqlx, rmcp,
 # axum, or anything async/net/db. `smallvec`/`arrayvec`/`thiserror` may be added
 # later only if measured (`ROADMAP.md` §6.1). The scaffold uses std `Vec`.
+
+# Phase 1 kernel microbench (P1.7). `harness = false` => a plain `fn main()` with
+# a std-timer; adds NO dependency and never enters the nano dependency tree, so it
+# cannot affect the size gate (`docs/nano-size-budget.md`, `benches/README.md`).
+[[bench]]
+name = "kernel_step"
+path = "../../benches/kernel_step.rs"
+harness = false
