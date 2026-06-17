@@ -133,25 +133,34 @@ impl SecretMaterial {
 
 impl Drop for SecretMaterial {
     fn drop(&mut self) {
-        // Best-effort zeroization without `unsafe` or an external crate: zero the
-        // bytes, then force the optimizer to treat the buffer as observed so the
-        // dead store is not elided (`black_box` is std + stable). A `zeroize`-backed
-        // `Zeroizing<Vec<u8>>` (volatile writes + fences) is the out-of-nano
-        // hardening (`docs/secrets.md` §2.1); nano keeps this dep-free, no-`unsafe`
-        // best-effort version.
-        for b in &mut self.bytes {
-            *b = 0;
-        }
-        std::hint::black_box(&self.bytes);
+        scrub(&mut self.bytes);
     }
+}
+
+/// Best-effort zeroization without `unsafe` or an external crate: zero the bytes,
+/// then force the optimizer to treat the buffer as observed so the dead store is
+/// not elided (`black_box` is std + stable). A `zeroize`-backed
+/// `Zeroizing<Vec<u8>>` (volatile writes + fences) is the out-of-nano hardening
+/// (`docs/secrets.md` §2.1); nano keeps this dep-free, no-`unsafe` best-effort
+/// version. Used by every type that holds secret bytes ([`SecretMaterial`],
+/// [`Redactor`]).
+fn scrub(bytes: &mut [u8]) {
+    for b in bytes.iter_mut() {
+        *b = 0;
+    }
+    std::hint::black_box(bytes);
 }
 
 // ---------------------------------------------------------------------------
 // The redaction / taint boundary
 // ---------------------------------------------------------------------------
 
-/// The marker substituted for a redacted secret in outbound text.
-pub const REDACTION_MARKER: &str = "[REDACTED]";
+/// Builds the marker substituted for a redacted secret in outbound text. Single
+/// source of truth for the emitted form (`[REDACTED:<label>]`). The `label` is the
+/// secret's non-sensitive [`SecretHandle`] label, never the value.
+fn redaction_marker(label: &str) -> String {
+    format!("[REDACTED:{label}]")
+}
 
 /// Text that has passed through the [`Redactor`] and is therefore safe to put in
 /// front of a model, a log, Telegram, or a GitHub comment. The boundary is sealed
@@ -181,11 +190,16 @@ impl core::fmt::Display for ModelVisibleText {
 /// through [`redact`](Self::redact) / [`to_model_visible`](Self::to_model_visible)
 /// before becoming model- or world-visible (`docs/security-model.md` §4–§5,
 /// invariant 2).
-#[derive(Default, Clone)]
+/// Like [`SecretMaterial`], the redactor holds secret values (it must, to scrub
+/// them), so it is deliberately **not `Clone`** (no silent fan-out of the copies)
+/// and **not `Debug`**, and it zeroizes each stored value on drop. Hand out
+/// `&Redactor` (as [`SecretBroker::redactor`] does), never a clone.
+#[derive(Default)]
 pub struct Redactor {
-    // (label, secret-value) pairs. Stored longest-first so an overlapping longer
-    // secret is redacted before a shorter one.
-    needles: Vec<(String, String)>,
+    // (label, secret-value-bytes) pairs, longest-first. The bytes are a second copy
+    // of each secret (redaction is impossible without the value); they are zeroized
+    // on drop and never exposed.
+    needles: Vec<(String, Vec<u8>)>,
 }
 
 impl Redactor {
@@ -197,34 +211,77 @@ impl Redactor {
         }
     }
 
-    /// Registers a secret value (with a label, used only inside the marker) to be
-    /// scrubbed. Empty values are ignored (a zero-length needle would match
-    /// everywhere). Kept sorted longest-first.
+    /// Registers a secret value (with a non-sensitive label, used only inside the
+    /// marker) to be scrubbed. Empty values are ignored (a zero-length needle would
+    /// match everywhere). Kept sorted longest-first so overlapping needles resolve
+    /// to the longest match.
     pub fn register(&mut self, label: &str, value: &[u8]) {
         if value.is_empty() {
             return;
         }
-        let value = String::from_utf8_lossy(value).into_owned();
-        if value.is_empty() {
-            return;
-        }
-        self.needles.push((label.to_string(), value));
-        // Longest needle first, so a superstring secret is replaced before a
-        // substring secret (avoids leaving a fragment behind).
+        self.needles.push((label.to_string(), value.to_vec()));
         self.needles
             .sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
     }
 
-    /// Redacts every registered secret occurrence in `text`, returning scrubbed
-    /// text. Each hit becomes `[REDACTED:<label>]`.
+    /// Redacts every registered secret occurrence in `text`. It collects **all**
+    /// match spans over the *original* text, **merges overlapping/adjacent spans**
+    /// into covering intervals, and emits one marker per interval — so every byte
+    /// that belongs to *any* secret occurrence is covered. This defeats the
+    /// boundary-overlap fragment leak that a per-needle `replace()` (or a
+    /// first-match scan) misses: two distinct secrets sharing an edge substring,
+    /// e.g. `TOKENONE99` + `99TOKENTWO` in `...TOKENONE99TOKENTWO...`, are redacted
+    /// as one interval with nothing left over (review RC-1). Because matches are
+    /// found against the original text and markers are only ever written to the
+    /// output (never re-scanned), a marker can never reintroduce or re-match a
+    /// secret (review RC-2/ROB-1; `docs/security-model.md` §5).
     #[must_use]
     pub fn redact(&self, text: &str) -> String {
-        let mut out = text.to_string();
+        // 1. Collect (start, end, label) for every occurrence of every needle.
+        let mut spans: Vec<(usize, usize, &str)> = Vec::new();
         for (label, value) in &self.needles {
-            if out.contains(value.as_str()) {
-                out = out.replace(value.as_str(), &format!("[REDACTED:{label}]"));
+            // A secret only appears in a `&str` if it is itself valid UTF-8; a
+            // non-UTF-8 secret cannot occur verbatim (documented limitation).
+            let Ok(v) = std::str::from_utf8(value) else {
+                continue;
+            };
+            if v.is_empty() {
+                continue;
+            }
+            let mut from = 0;
+            while let Some(pos) = text[from..].find(v) {
+                let start = from + pos;
+                let end = start + v.len();
+                spans.push((start, end, label.as_str()));
+                from = end;
             }
         }
+        if spans.is_empty() {
+            return text.to_string();
+        }
+        // 2. Sort by start ascending, then by end descending (longest first), so a
+        //    merged interval is labelled by its earliest, longest secret.
+        spans.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+        // 3. Merge overlapping/adjacent spans and splice markers into the output.
+        let mut out = String::with_capacity(text.len());
+        let mut cursor = 0usize;
+        let mut idx = 0usize;
+        while idx < spans.len() {
+            let (start, mut end, label) = spans[idx];
+            idx += 1;
+            while idx < spans.len() && spans[idx].0 <= end {
+                if spans[idx].1 > end {
+                    end = spans[idx].1;
+                }
+                idx += 1;
+            }
+            if start > cursor {
+                out.push_str(&text[cursor..start]);
+            }
+            out.push_str(&redaction_marker(label));
+            cursor = end;
+        }
+        out.push_str(&text[cursor..]);
         out
     }
 
@@ -235,19 +292,45 @@ impl Redactor {
         ModelVisibleText(self.redact(text))
     }
 
-    /// Whether any registered secret appears in `text` (a leak check for tests /
-    /// defense in depth).
+    /// Whether any registered secret value appears verbatim in `text` (the dual of
+    /// [`redact`](Self::redact) for tests / defense in depth).
     #[must_use]
     pub fn would_leak(&self, text: &str) -> bool {
-        self.needles.iter().any(|(_, v)| text.contains(v.as_str()))
+        self.needles
+            .iter()
+            .any(|(_, v)| std::str::from_utf8(v).is_ok_and(|s| !s.is_empty() && text.contains(s)))
     }
 }
 
-/// A wrapper marking data as **tainted** (potentially secret-bearing). The only
-/// way to derive model-visible text from tainted data is through a [`Redactor`],
-/// so taint cannot silently cross a boundary (`docs/security-model.md` §4).
-#[derive(Debug, Clone)]
+impl Drop for Redactor {
+    fn drop(&mut self) {
+        for (_, v) in &mut self.needles {
+            scrub(v);
+        }
+    }
+}
+
+/// A wrapper marking data as **tainted** (potentially secret-bearing, e.g. raw
+/// tool stdout before redaction). The only way to derive model-visible text from
+/// it is through a [`Redactor`] ([`declassify`](Self::declassify)), so taint cannot
+/// silently cross a boundary (`docs/security-model.md` §4). Like [`SecretMaterial`]
+/// it is **not `Clone`** (no fan-out) and its `Debug` is a non-revealing placeholder
+/// — so a stray `{:?}` in a log/panic/error cannot dump the tainted value (S5;
+/// review findings LTS-1/CDF-1).
+///
+/// `Tainted` is not `Clone` (no silent fan-out of the tainted value):
+/// ```compile_fail
+/// let t = crustcore_secrets::Tainted::new(String::from("x"));
+/// let _ = t.clone();
+/// ```
 pub struct Tainted<T>(T);
+
+impl<T> core::fmt::Debug for Tainted<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Never print the inner value — that is the whole point of taint.
+        f.write_str("Tainted(<redacted>)")
+    }
+}
 
 impl<T: AsRef<str>> Tainted<T> {
     /// Marks a value tainted.
@@ -520,7 +603,7 @@ impl HeaderInjection {
     /// A model-/log-safe rendering: the value is replaced by a redaction marker.
     #[must_use]
     pub fn redacted(&self) -> String {
-        format!("{}: [REDACTED:{}]", self.header_name, self.label)
+        format!("{}: {}", self.header_name, redaction_marker(&self.label))
     }
 }
 
@@ -721,6 +804,43 @@ mod tests {
     }
 
     #[test]
+    fn redactor_two_secrets_sharing_an_edge_leave_no_fragment() {
+        // Review RC-1: two DISTINCT secrets overlapping at a boundary. The old
+        // sequential replace() let the first consume the shared "99", leaving
+        // "TOKENTWO" in the output. The single-pass scan redacts the longest match
+        // at each position over the ORIGINAL text, so no fragment survives.
+        let mut r = Redactor::new();
+        r.register("k1", b"TOKENONE99");
+        r.register("k2", b"99TOKENTWO");
+        let out = r.redact("creds=TOKENONE99TOKENTWO");
+        assert!(!out.contains("TOKENTWO"), "leaked a secret fragment: {out}");
+        assert!(!out.contains("TOKENONE"), "leaked a secret fragment: {out}");
+        assert!(
+            !r.would_leak(&out),
+            "redacted output still contains a secret: {out}"
+        );
+    }
+
+    #[test]
+    fn redactor_is_a_fixed_point_no_marker_reinjection() {
+        // Review RC-2/ROB-1: because matches are found on the ORIGINAL text and
+        // markers are only written to the output (never re-scanned), redacting an
+        // already-redacted string is a fixed point and no marker reintroduces a
+        // secret. (A secret literally equal to the fixed word "REDACTED" is not a
+        // realistic credential and is out of scope.)
+        let mut r = Redactor::new();
+        r.register("a", b"alpha-secret-1");
+        r.register("b", b"beta-secret-2");
+        let once = r.redact("a=alpha-secret-1 b=beta-secret-2 a=alpha-secret-1");
+        assert!(!r.would_leak(&once), "a real secret survived: {once}");
+        assert_eq!(
+            r.redact(&once),
+            once,
+            "redaction must be a fixed point (markers are not re-matched)"
+        );
+    }
+
+    #[test]
     fn empty_secret_is_not_registered() {
         let mut r = Redactor::new();
         r.register("empty", b"");
@@ -747,5 +867,10 @@ mod tests {
         assert!(t.raw().contains("SENTINEL"));
         let safe = t.declassify(broker.redactor());
         assert!(!safe.as_str().contains("SENTINEL"));
+        // S5: a stray `{:?}` on a tainted value must NOT dump it (non-revealing
+        // Debug placeholder), so it cannot leak via a log/panic/error.
+        let dbg = format!("{t:?}");
+        assert!(!dbg.contains("SENTINEL"), "Tainted Debug leaked: {dbg}");
+        assert_eq!(dbg, "Tainted(<redacted>)");
     }
 }
