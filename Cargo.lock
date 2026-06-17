@@ -13,7 +13,7 @@ dependencies = [
  "crustcore-index",
  "crustcore-kernel",
  "crustcore-mcp",
- "crustcore-net",
+ "crustcore-netproto",
  "crustcore-path",
  "crustcore-policy",
  "crustcore-receipts",
@@ -122,6 +122,14 @@ dependencies = [
 
 [[package]]
 name = "crustcore-net"
+version = "0.1.0"
+dependencies = [
+ "crustcore-netproto",
+ "crustcore-types",
+]
+
+[[package]]
+name = "crustcore-netproto"
 version = "0.1.0"
 dependencies = [
  "crustcore-types",

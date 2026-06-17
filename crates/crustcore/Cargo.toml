@@ -22,7 +22,12 @@ nano = []
 
 # Capability packs — NOT part of nano. These pull heavy sidecar crates and must
 # never be enabled in the size-gate build (CLAUDE.md §5.1, invariants 19/20).
-net = ["dep:crustcore-net"]
+#
+# `net` links only the **std-only** helper protocol (`crustcore-netproto`); the
+# HTTP/TLS/provider stack lives in the `crustcore-net` *helper binary*, which the
+# caller **spawns** (never links) — so even the net build embeds no HTTP/TLS
+# (`docs/model-routing.md` §6, Phase 7 acceptance).
+net = ["dep:crustcore-netproto"]
 daemon = ["dep:crustcore-daemon", "net"]
 mcp = ["dep:crustcore-mcp"]
 index = ["dep:crustcore-index"]
@@ -44,8 +49,10 @@ crustcore-sandbox = { workspace = true }
 crustcore-worktree = { workspace = true }
 crustcore-backend = { workspace = true }
 
-# Optional capability packs (off in nano).
-crustcore-net = { workspace = true, optional = true }
+# Optional capability packs (off in nano). The model-transport sidecar
+# (`crustcore-net`, with HTTP/TLS) is a *spawned helper binary*, not a linked
+# dependency — the caller links only the std-only `crustcore-netproto` client.
+crustcore-netproto = { workspace = true, optional = true }
 crustcore-daemon = { workspace = true, optional = true }
 crustcore-mcp = { workspace = true, optional = true }
 crustcore-index = { workspace = true, optional = true }

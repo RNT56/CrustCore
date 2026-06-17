@@ -30,6 +30,48 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Phase 7 — `crustcore-net` model-transport protocol + routing engine (P7.1–P7.7).**
+  The sidecar architecture that lets nano call the model transport **without
+  linking HTTP/TLS** (invariants 17, 11, 19, 20; `docs/model-routing.md`):
+  - **`crustcore-netproto`** (new crate, **std-only, no serde/HTTP/TLS**): the
+    local helper protocol (P7.1) — newline-delimited *flat* JSON messages
+    (`Request`/`Response`: probe, complete, model/registry_end, chunk, final,
+    error), a small audited flat-JSON codec, bounded line reads, and the
+    caller-side `NetHelper` client + `SpawnedHelper` (spawn the sidecar, talk over
+    a pipe). **This is the only model-transport code the trusted caller links.**
+  - **`crustcore-net`** routing engine: a `Provider` trait (provider-agnostic
+    request/response model — P7.2); a **dynamic registry** built by probing
+    providers (invariant 17 — P7.4); the three meta-provider behaviors —
+    `select_candidates` (RouterProvider: role + hard-constraint filter + soft
+    order — P7.6), `apply_budget` (BudgetProvider: cost ceiling, refuses rather
+    than breaches — P7.7), `run_reliable` (ReliableProvider: fallback chain that
+    never crosses a hard constraint — P7.5) — composed by `Engine::complete`;
+    **streaming** chunks through a sink (P7.3); **budget accounting**
+    (`BudgetLedger` — P7.7); and the `serve` loop the helper binary runs. A
+    deterministic `MockProvider` + `default_mock_engine` make routing/fallback/
+    budget/registry observable with **no network**.
+  - The **`crustcore-net` helper binary** (`src/bin/helper.rs`) serves the engine
+    over stdin/stdout; `crustcore net probe|complete` (gated behind the `net`
+    feature) spawns it and round-trips. The `net` feature now links only
+    `crustcore-netproto` (the HTTP-bearing `crustcore-net` is a *spawned* binary,
+    not a linked dep), so even the net build embeds no HTTP/TLS.
+  - **Deferred (`TODO(P7-live)`):** the concrete OpenAI/Anthropic/OpenRouter/local
+    wire adapters + the Tokio/HTTP/TLS transport. They need credentials from the
+    **secret broker (Phase 8)** — a worker/provider never receives a raw key
+    (invariant 1) — and real network (unavailable in CI). The engine is
+    transport-agnostic, so a live `Provider` drops in without touching the
+    router/registry/budget logic; `docs/model-routing.md`'s own testing notes are
+    mock-based.
+  - **Tests:** flat-JSON codec round-trips + malformed/nested/over-long rejection;
+    protocol request/response round-trips; router constraint+ordering, budget
+    ceiling, reliable fallback (no partial-output leak), dynamic registry,
+    local-only-never-remote, end-to-end `serve`↔caller over an in-memory pipe; and
+    an **integration test that spawns the real helper binary** and probes/completes
+    over a pipe (the boundary proof). Acceptance met: nano calls the helper without
+    linking HTTP/TLS; provider failures fall back safely; the registry is dynamic.
+  - **Nano size impact: +0 KiB** (411.9 KiB, 51.5%) — all net code is cfg-gated or
+    in the sidecar; the nano size-gate build links neither `crustcore-netproto` nor
+    `crustcore-net`.
 - **Phase 6 — external backend protocol (P6.1–P6.6).** The one backend contract
   plus an external-command worker that runs `codex`/`claude` (or any worker) under
   the sandbox/worktree and proves *workers are patch producers, not truth
@@ -332,6 +374,7 @@ agent/PR/role/size/invariant audit trail.
 | 2026-06-17 | P4 hardening | Fix the Linux-CI timeout-kill hang (procps-ng needs `kill -- -<pgid>`; also SIGKILL the leader via its `Child` handle) — root-caused and verified in a faithful `ubuntu:24.04` container. Address Phase-4 review findings: drop the pid-reuse-TOCTOU clean-exit group sweep; strip JVM/Go/zsh/pager/interpreter-lib exec env vars; reject `HOME`/`XDG_CONFIG_HOME` inside the worktree. | `claude/p4-sandbox` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (295.6 KiB, 37.0%) | Strengthens 9 (sandbox env), 12 (reliable process-tree kill); none weakened |
 | 2026-06-17 | P5.1–P5.6 | Implement the worktree + verify loop: `WorktreeManager` (disposable `git worktree` create/reuse/remove, hardened), `crustcore-backend::verify` (`VerifySpec`/`run_verify` rerun-in-sandbox → mint `VerifiedPatch`+receipt only on pass), seal `VerifiedPatch::from_verifier` crate-private + `complete_task` by value, wire `crustcore run -dir/-goal/-verify`; golden "fix failing test" + worktree lifecycle tests. **Hardened per a 7-dimension adversarial review (8 confirmed findings fixed):** worktree-add filter neutralization+restore (RCE), registered-only worktree reuse + 0700 base, executor-seam unit tests for the mint/Failed/Refused paths, worktree teardown on all `run` paths, `VerifierName` type, extracted+tested verify-spec/exit logic. CI now installs bubblewrap so the real sandbox path runs. Full sandbox path validated in a privileged `ubuntu:24.04` container. | `claude/p5-verify` (PR) | Maintainer agent (Architect/Implementer) | +99.9 KiB (395.5 KiB, 49.4%; runner/sandbox/verify now reachable via `run`) | Enforces 13 (verifier-owned completion, type-sealed), 9 (verify in sandbox), 10 (receipt over the real run), 7 (worktree-add RCE neutralized); none weakened |
 | 2026-06-17 | P6.1–P6.6 | Implement the external backend protocol: the `CodingBackend` contract + `ExternalCommandBackend`/`CodexBackend`/`ClaudeCodeBackend`; `WorkerInput` (type-pinned `secrets:none`/`network:deny`) and JSON contract; `run_external_worker` supervisor validation (sandboxed secret-free run, bounded transcript, `GuardManifest` out-of-root detection, worktree-confined diff extraction via new `git_status_all`, per-path confinement, sensitive-file classification) → `UnverifiedPatch` only; `CommandSpec.stdin` delivery through runner+bwrap; wire `crustcore run -backend/-worker-cmd` (produce → re-derive → confine → verify). Worker-contract tests + runner stdin tests; **un-ignore the `worker_write_outside_worktree_is_rejected` red-team fixture**; implement the `golden_add_small_feature` golden. Full sandboxed worker→verify→complete path validated in a privileged container. | `claude/p6-backend` (PR) | Maintainer agent (Architect/Implementer) | +16.4 KiB (411.9 KiB, 51.5%; worker module + CLI wiring) | Enforces 6 (workers are patch producers, not authorities), 7 (out-of-root/escape rejection), 1–3 + 9 (no-secret, deny-net, sandboxed worker), 13 (only the verifier completes); none weakened |
+| 2026-06-17 | P7.1–P7.7 | Implement the `crustcore-net` model-transport protocol + routing engine: new **std-only `crustcore-netproto`** (flat-JSON helper protocol + codec + `NetHelper`/`SpawnedHelper` client — the only transport code the caller links, no HTTP/TLS); `crustcore-net` engine (`Provider` trait, dynamic registry/probe, `select_candidates`/`apply_budget`/`run_reliable` = Router/Budget/Reliable meta-providers, streaming, `BudgetLedger`, `serve`); `MockProvider`/`default_mock_engine` + helper binary; `crustcore net probe\|complete` gated behind the `net` feature (links only netproto). Live HTTP adapters deferred to `TODO(P7-live)` (need the Phase 8 secret broker + network). Unit + protocol + end-to-end + real-subprocess integration tests. **Contract files touched:** `Cargo.toml`/`Cargo.lock` (add the `crustcore-netproto` workspace member; repoint the `net` feature). | `claude/p7-net` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (411.9 KiB, 51.5%; all net code cfg-gated/sidecar) | Enforces 17 (dynamic registry, no hard-coded models), 11 (budget ceiling + accounting), 19/20 (nano links no HTTP/TLS; net is a spawned helper); pin-by-construction for the no-secret-to-worker path (live providers gated on Phase 8); none weakened |
 | 2026-06-17 | P6 hardening | Fix the 5 confirmed findings from a 7-dimension adversarial review (7 refuted/out-of-scope): (high) move the runner stdin write to a dedicated thread so a non-draining worker can't hang `run()` past the timeout (invariants 11/12); (med) parse `git status -z` so quoted/space/non-ASCII paths reach confinement+classification verbatim; (med) new `git_worktree_diff` (intent-to-add + `diff HEAD`) so new-file content is in the diff and patch content-address; (med) stream `run_git` output into capped buffers (no unbounded-output OOM from a hostile worktree). Added regression tests for each. Full sandboxed path re-validated in a privileged container. | `claude/p6-backend` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (411.9 KiB, 51.5%) | Strengthens 11/12 (bounded/killable execution), 7 (verbatim-path confinement), 6 (faithful re-derived diff); none weakened |
 
 ---

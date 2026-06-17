@@ -31,6 +31,7 @@ members = [
     "crates/crustcore-worktree",
     "crates/crustcore-backend",
     "crates/crustcore-cli",
+    "crates/crustcore-netproto",
     "crates/crustcore-net",
     "crates/crustcore-daemon",
     "crates/crustcore-mcp",
@@ -66,6 +67,7 @@ crustcore-sandbox = { path = "crates/crustcore-sandbox", version = "0.1.0" }
 crustcore-worktree = { path = "crates/crustcore-worktree", version = "0.1.0" }
 crustcore-backend = { path = "crates/crustcore-backend", version = "0.1.0" }
 crustcore-cli = { path = "crates/crustcore-cli", version = "0.1.0" }
+crustcore-netproto = { path = "crates/crustcore-netproto", version = "0.1.0" }
 crustcore-net = { path = "crates/crustcore-net", version = "0.1.0" }
 crustcore-daemon = { path = "crates/crustcore-daemon", version = "0.1.0" }
 crustcore-mcp = { path = "crates/crustcore-mcp", version = "0.1.0" }

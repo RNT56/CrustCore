@@ -10,7 +10,17 @@ description = "Network/provider sidecar for CrustCore (model transport, Telegram
 
 [dependencies]
 crustcore-types = { workspace = true }
-# TODO(P7): add tokio, a minimal HTTP client, rustls/platform TLS, and provider
-# adapters (OpenAI/Anthropic/OpenRouter/local) here — behind this crate only,
-# never leaking into nano (CLAUDE.md §5.1). Network access is blocked in this
-# scaffold environment, so these are documented, not yet added.
+crustcore-netproto = { workspace = true }
+# TODO(P7-live, gated on the Phase 8 secret broker): add tokio, a minimal HTTP
+# client, rustls/platform TLS, and the concrete OpenAI/Anthropic/OpenRouter/local
+# wire adapters here — behind this crate only, never leaking into nano
+# (CLAUDE.md §5.1). The routing engine (registry/probe, Reliable/Router/Budget
+# meta-providers, streaming, accounting) is implemented now over a Provider trait
+# with deterministic mock providers; live providers need credentials from the
+# secret broker (Phase 8) and real network (unavailable in CI), so they are added
+# once that exists. The caller links `crustcore-netproto` (std-only), not this.
+
+# The sidecar helper binary nano spawns and talks to over the local protocol.
+[[bin]]
+name = "crustcore-net"
+path = "src/bin/helper.rs"
