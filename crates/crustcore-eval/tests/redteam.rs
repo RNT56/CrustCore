@@ -11,12 +11,189 @@ use crustcore_eval::required_redteam_scenarios;
 #[test]
 fn redteam_scenarios_are_enumerated() {
     // Sanity: the canonical scenario list is non-empty and stable.
-    assert_eq!(required_redteam_scenarios().len(), 11);
+    assert_eq!(required_redteam_scenarios().len(), 12);
 }
 
+/// Red-team (P3.5): an untrusted repository plants a malicious repo-local
+/// `.git/config` (a `textconv` diff driver that runs an arbitrary command) and an
+/// executable hook. The hardened git wrappers must neither execute the textconv
+/// driver (RCE) nor run hooks (Phase 3 acceptance: "git commands cannot execute
+/// hooks or read model-written config").
 #[test]
-#[ignore = "TODO(P3.6): malicious path / symlink escape fixture"]
-fn symlink_escape_is_blocked() {}
+fn git_config_and_hooks_do_not_execute() {
+    use crustcore_path::WorktreeRoot;
+    use crustcore_policy::FsReadCap;
+    use crustcore_policy::FsWriteCap;
+    use crustcore_types::ScopeId;
+    use crustcore_worktree::{git_apply, git_diff, git_log, git_status};
+
+    let mut dir = std::env::temp_dir();
+    dir.push(format!("cc-redteam-git-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Initialize a repo with one commit, using a config-scrubbed git for setup.
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(&dir)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("HOME", "/dev/null")
+            .args(args)
+            .status()
+    };
+    let Ok(init) = git(&["init", "-q"]) else {
+        eprintln!("skipping: git unavailable");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    };
+    if !init.success() {
+        eprintln!("skipping: git init failed");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    std::fs::write(dir.join("README.md"), b"hello\n").unwrap();
+    let _ = git(&["add", "."]);
+    let _ = git(&[
+        "-c",
+        "user.email=ci@cc",
+        "-c",
+        "user.name=ci",
+        "commit",
+        "-q",
+        "-m",
+        "init",
+    ]);
+
+    let diff_marker = dir.join("PWNED_DIFF");
+    let hook_marker = dir.join("PWNED_HOOK");
+
+    // Malicious repo-local config: a textconv driver running an arbitrary command.
+    let mut config = std::fs::read_to_string(dir.join(".git/config")).unwrap_or_default();
+    config.push_str(&format!(
+        "[diff \"evil\"]\n\ttextconv = touch {}\n",
+        diff_marker.display()
+    ));
+    std::fs::write(dir.join(".git/config"), config).unwrap();
+    std::fs::write(dir.join(".gitattributes"), b"README.md diff=evil\n").unwrap();
+    std::fs::write(dir.join("README.md"), b"hello\nchanged\n").unwrap();
+
+    // An executable hook that would fire if hooks were honored.
+    std::fs::create_dir_all(dir.join(".git/hooks")).unwrap();
+    let hook = dir.join(".git/hooks/post-index-change");
+    std::fs::write(
+        &hook,
+        format!("#!/bin/sh\ntouch {}\n", hook_marker.display()),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let cap = FsReadCap {
+        root: WorktreeRoot::open(&dir).unwrap(),
+        scope: ScopeId(1),
+    };
+
+    // Also plant a clean/smudge filter driver mapped by a committed
+    // .gitattributes — this is the git_apply (smudge) / git_diff (clean) RCE.
+    let filter_marker = dir.join("PWNED_FILTER");
+    let mut config = std::fs::read_to_string(dir.join(".git/config")).unwrap();
+    config.push_str(&format!(
+        "[filter \"evil\"]\n\tclean = touch {0}\n\tsmudge = touch {0}\n",
+        filter_marker.display()
+    ));
+    std::fs::write(dir.join(".git/config"), config).unwrap();
+    std::fs::write(dir.join(".gitattributes"), b"*.rs filter=evil\n").unwrap();
+    std::fs::write(dir.join("a.rs"), b"x\n").unwrap();
+    let _ = git(&["add", "."]);
+    let _ = git(&[
+        "-c",
+        "user.email=ci@cc",
+        "-c",
+        "user.name=ci",
+        "commit",
+        "-q",
+        "-m",
+        "attrs",
+    ]);
+    // Clear any markers created by the (un-hardened) setup git calls, so a marker
+    // present after the wrappers run is attributable to a wrapper.
+    let _ = std::fs::remove_file(&filter_marker);
+    let _ = std::fs::remove_file(&hook_marker);
+    let _ = std::fs::remove_file(&diff_marker);
+
+    // Exercise every wrapper; none may execute the planted command/hook/filter.
+    let _ = git_status(&cap);
+    let _ = git_diff(&cap);
+    let _ = git_log(&cap, 10);
+    let wcap = FsWriteCap {
+        root: WorktreeRoot::open(&dir).unwrap(),
+        scope: ScopeId(1),
+    };
+    let patch = concat!(
+        "--- a/a.rs\n",
+        "+++ b/a.rs\n",
+        "@@ -1 +1,2 @@\n",
+        " x\n",
+        "+added\n"
+    );
+    let _ = git_apply(&wcap, patch.as_bytes());
+
+    assert!(
+        !diff_marker.exists(),
+        "git wrapper executed a repo-local textconv driver (RCE)"
+    );
+    assert!(!hook_marker.exists(), "git wrapper executed a repo hook");
+    assert!(
+        !filter_marker.exists(),
+        "git wrapper executed a repo-local clean/smudge filter driver (RCE)"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Red-team (P3.6): a malicious relative path tries to escape the worktree — via
+/// `..`, an absolute path, or a symlink pointing outside the root. The confined
+/// path resolver rejects all of them, so no escaping path can reach a file tool
+/// (invariant 7; Phase 3 acceptance "symlink escapes fail").
+#[test]
+fn symlink_escape_is_blocked() {
+    use crustcore_path::{PathError, WorktreeRoot};
+
+    let mut dir = std::env::temp_dir();
+    dir.push(format!("cc-redteam-symesc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // A symlink inside the worktree pointing at a sensitive location outside it.
+    std::os::unix::fs::symlink("/etc", dir.join("escape")).unwrap();
+
+    let root = WorktreeRoot::open(&dir).unwrap();
+
+    // Lexical escapes.
+    assert_eq!(
+        root.confine_read("../../etc/passwd").unwrap_err(),
+        PathError::Escape
+    );
+    assert_eq!(
+        root.confine_write("/etc/passwd").unwrap_err(),
+        PathError::AbsoluteNotAllowed
+    );
+    // Symlink escape: reading or writing through the escaping symlink fails.
+    assert_eq!(
+        root.confine_read("escape/passwd").unwrap_err(),
+        PathError::SymlinkEscape
+    );
+    assert_eq!(
+        root.confine_write("escape/evil").unwrap_err(),
+        PathError::SymlinkEscape
+    );
+    // A legitimate in-root path still resolves.
+    assert!(root.confine_write("src/main.rs").is_ok());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
 
 #[test]
 #[ignore = "TODO(P4.7): LD_PRELOAD / path-env escape fixture"]

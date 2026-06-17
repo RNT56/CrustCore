@@ -3,10 +3,16 @@
 //! disposable worktree, not the user's canonical tree (NilCore lesson). The
 //! worktree root is the anchor for path confinement (`crustcore-path`).
 //!
-//! Status: Phase 0 scaffold. The manager wraps `git worktree` via a fixed set of
-//! subcommands (no hooks, no model-written config); the operations land in
+//! Phase 3 adds the structured, capability-gated file tools and safe git
+//! wrappers in [`tools`]. The `git worktree` lifecycle manager itself lands in
 //! Phase 5 (`TODO(P5.*)`).
 #![forbid(unsafe_code)]
+
+pub mod tools;
+
+pub use tools::{
+    git_apply, git_diff, git_log, git_status, read_file, search, write_file, SearchHit, ToolError,
+};
 
 use crustcore_path::WorktreeRoot;
 use crustcore_types::TaskId;

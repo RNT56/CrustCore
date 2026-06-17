@@ -60,6 +60,7 @@ dependencies = [
  "crustcore-receipts",
  "crustcore-secrets",
  "crustcore-types",
+ "crustcore-worktree",
 ]
 
 [[package]]
@@ -174,6 +175,7 @@ name = "crustcore-worktree"
 version = "0.1.0"
 dependencies = [
  "crustcore-path",
+ "crustcore-policy",
  "crustcore-types",
 ]
 
