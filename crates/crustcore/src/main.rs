@@ -35,6 +35,13 @@ fn main() -> ExitCode {
         return selftest();
     }
 
+    // The model transport runs as a spawned sidecar; the caller links only the
+    // std-only protocol (no HTTP/TLS). Gated on the `net` feature — the base nano
+    // build carries only a tiny stub (invariants 19, 20).
+    if args.first().map(String::as_str) == Some("net") {
+        return net_subcommand(&args[1..]);
+    }
+
     match crustcore_cli::parse(&args) {
         Command::Version => {
             println!("crustcore {}", crustcore_cli::VERSION);
@@ -415,6 +422,100 @@ fn export(path: Option<&str>) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// `crustcore net [probe|complete <prompt>]` — reach the model transport by
+/// **spawning** the `crustcore-net` sidecar and speaking the std-only helper
+/// protocol over a pipe (no HTTP/TLS linked here; `docs/model-routing.md` §6). The
+/// helper path is the `CRUSTCORE_NET_HELPER` env var or `crustcore-net` on PATH.
+#[cfg(feature = "net")]
+fn net_subcommand(args: &[String]) -> ExitCode {
+    use crustcore_netproto::{
+        BoundedText, CompleteRequest, Require, Role, SpawnedHelper, MAX_TEXT_BYTES,
+    };
+
+    let helper =
+        std::env::var("CRUSTCORE_NET_HELPER").unwrap_or_else(|_| "crustcore-net".to_string());
+    let mut spawned = match SpawnedHelper::spawn(&helper, &[]) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("crustcore net: cannot spawn helper '{helper}': {e}");
+            eprintln!("set CRUSTCORE_NET_HELPER to the crustcore-net binary path.");
+            return ExitCode::from(1);
+        }
+    };
+
+    match args.first().map(String::as_str) {
+        Some("probe") | None => match spawned.helper().probe() {
+            Ok(models) => {
+                println!("dynamic model registry ({} model(s)):", models.len());
+                for m in models {
+                    println!(
+                        "  {}/{}  ctx={} tools={} stream={} healthy={} cost/1k={}u",
+                        m.provider,
+                        m.model,
+                        m.context,
+                        m.tools,
+                        m.streaming,
+                        m.healthy,
+                        m.cost_per_1k_micros
+                    );
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("crustcore net probe: {e}");
+                ExitCode::from(1)
+            }
+        },
+        Some("complete") => {
+            let prompt = args.get(1).cloned().unwrap_or_default();
+            let req = CompleteRequest {
+                role: Role::Implementation,
+                system: BoundedText::truncated("", MAX_TEXT_BYTES),
+                prompt: BoundedText::truncated(&prompt, MAX_TEXT_BYTES),
+                max_tokens: 256,
+                stream: true,
+                max_cost_micros: 0,
+                require: Require::default(),
+            };
+            let result = spawned.helper().complete(&req, |c| {
+                use std::io::Write as _;
+                print!("{c}");
+                let _ = std::io::stdout().flush();
+            });
+            match result {
+                Ok(fin) => {
+                    println!(
+                        "\n--- served by {}/{} ({} output tokens, {} micros) ---",
+                        fin.provider, fin.model, fin.usage.output_tokens, fin.usage.cost_micros
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("crustcore net complete: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Some(other) => {
+            eprintln!("crustcore net: unknown subcommand '{other}' (expected probe|complete)");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Stub when the `net` capability is not built in (the base nano binary). Keeps
+/// the model-transport code — and any protocol dependency — out of nano
+/// (invariants 19, 20).
+#[cfg(not(feature = "net"))]
+fn net_subcommand(_args: &[String]) -> ExitCode {
+    eprintln!(
+        "crustcore: the 'net' capability is not built into this binary \
+         (rebuild with --features net). The model transport runs as the spawned \
+         `crustcore-net` helper; nano links no HTTP/TLS."
+    );
+    ExitCode::from(2)
 }
 
 /// Drives the kernel + event log to confirm the trusted core is wired together.

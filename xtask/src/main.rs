@@ -164,8 +164,60 @@ fn size_check() -> Result<(), String> {
     Ok(())
 }
 
-/// Fails if any forbidden crate appears in the nano dependency tree.
+/// Fails if any forbidden crate is linked into the nano build, or if the `net`
+/// build links the HTTP-bearing sidecar (`crustcore-net`) or any forbidden stack.
+///
+/// The `net` check codifies the Phase-7 boundary (`docs/model-routing.md` §6): the
+/// caller links only the std-only `crustcore-netproto` and *spawns* the
+/// `crustcore-net` helper — so even the net build embeds no HTTP/TLS. Without this
+/// gate, a future feature repoint or a heavy dep sneaking into `crustcore-netproto`
+/// would silently break invariant 20.
 fn forbidden_deps() -> Result<(), String> {
+    // 1. The nano build links no forbidden crate.
+    let nano = tree_crate_names("nano")?;
+    let found: Vec<&str> = FORBIDDEN_IN_NANO
+        .iter()
+        .copied()
+        .filter(|b| nano.iter().any(|n| n == b))
+        .collect();
+    if !found.is_empty() {
+        return Err(format!(
+            "forbidden crate(s) linked into nano: {}. These belong in sidecar crates only (CLAUDE.md §5.1).",
+            found.join(", ")
+        ));
+    }
+    println!(
+        "  no forbidden crates in the nano dependency tree ({} checked)",
+        FORBIDDEN_IN_NANO.len()
+    );
+
+    // 2. The `net` build links the std-only protocol only — never the HTTP-bearing
+    //    `crustcore-net` helper (it is spawned), nor any forbidden stack.
+    let net = tree_crate_names("net")?;
+    let mut net_found: Vec<String> = FORBIDDEN_IN_NANO
+        .iter()
+        .filter(|b| net.iter().any(|n| n == *b))
+        .map(|s| (*s).to_string())
+        .collect();
+    if net.iter().any(|n| n == "crustcore-net") {
+        net_found.push(
+            "crustcore-net (the HTTP-bearing helper must be spawned, not linked)".to_string(),
+        );
+    }
+    if !net_found.is_empty() {
+        return Err(format!(
+            "the `net` build links what it must not: {}. The caller links only crustcore-netproto and spawns the helper (docs/model-routing.md §6, invariant 20).",
+            net_found.join(", ")
+        ));
+    }
+    println!("  net build links the std-only protocol only (no crustcore-net / HTTP/TLS)");
+    Ok(())
+}
+
+/// Returns the set of crate names in the `crustcore` dependency tree built with
+/// the given feature (and no defaults). `cargo tree --prefix none` prints
+/// "name vX.Y.Z" per line, so the first whitespace token is the crate name.
+fn tree_crate_names(feature: &str) -> Result<Vec<String>, String> {
     let out = Command::new("cargo")
         .args([
             "tree",
@@ -173,7 +225,7 @@ fn forbidden_deps() -> Result<(), String> {
             "crustcore",
             "--no-default-features",
             "--features",
-            "nano",
+            feature,
             "--edges",
             "normal",
             "--prefix",
@@ -181,39 +233,17 @@ fn forbidden_deps() -> Result<(), String> {
         ])
         .output()
         .map_err(|e| format!("failed to run `cargo tree`: {e}"))?;
-
     if !out.status.success() {
-        // Offline environments may fail to build the tree if a network fetch is
-        // required; in the dependency-free scaffold this should not happen.
         let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("`cargo tree` failed:\n{stderr}"));
+        return Err(format!(
+            "`cargo tree --features {feature}` failed:\n{stderr}"
+        ));
     }
-
     let tree = String::from_utf8_lossy(&out.stdout);
-    let mut found = Vec::new();
-    for banned in FORBIDDEN_IN_NANO {
-        // Match a crate name at a line/word boundary (cargo tree prints
-        // "name vX.Y.Z" per line with --prefix none).
-        if tree
-            .lines()
-            .any(|l| l.split_whitespace().next() == Some(banned))
-        {
-            found.push(*banned);
-        }
-    }
-
-    if found.is_empty() {
-        println!(
-            "  no forbidden crates in the nano dependency tree ({} checked)",
-            FORBIDDEN_IN_NANO.len()
-        );
-        Ok(())
-    } else {
-        Err(format!(
-            "forbidden crate(s) linked into nano: {}. These belong in sidecar crates only (CLAUDE.md §5.1).",
-            found.join(", ")
-        ))
-    }
+    Ok(tree
+        .lines()
+        .filter_map(|l| l.split_whitespace().next().map(str::to_string))
+        .collect())
 }
 
 /// Runs a command, inheriting stdio, and errors on non-zero exit.

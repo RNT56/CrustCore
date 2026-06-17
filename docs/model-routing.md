@@ -206,6 +206,18 @@ Provider failures fallback safely.                   -> §4 (ReliableProvider)
 Model registry is dynamic.                            -> §1.1
 ```
 
+**Status (Phase 7 implemented).** The protocol (`crustcore-netproto`, std-only),
+the routing engine (`crustcore-net`: dynamic registry/probe, Router/Budget/Reliable
+meta-providers, streaming, budget accounting), the helper binary, and the
+spawn-based caller are implemented and tested over **deterministic mock providers**
+— satisfying all three acceptance criteria without a live call. The concrete
+OpenAI/Anthropic/OpenRouter/local **wire adapters and the Tokio/HTTP/TLS transport
+are deferred** (`TODO(P7-live)`): a live provider needs credentials from the
+**secret broker (Phase 8)** — a worker/provider never receives a raw key
+(invariant 1) — and real network, which CI cannot exercise. The engine is
+transport-agnostic, so a live `Provider` impl drops in without touching the
+router/registry/budget logic.
+
 ### 7.1 Testing notes
 
 - **Dynamic registry (invariant 17):** router tests run against a *mutable* registry

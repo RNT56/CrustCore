@@ -1,0 +1,12 @@
+[package]
+name = "crustcore-netproto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "The std-only local helper protocol nano speaks to the crustcore-net sidecar (no HTTP/TLS)."
+
+[dependencies]
+crustcore-types = { workspace = true }
