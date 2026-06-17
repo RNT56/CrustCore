@@ -64,6 +64,14 @@ fn roots_match(cap_root: &WorktreeRoot, path_root: &WorktreeRoot) -> bool {
     cap_root.as_path() == path_root.as_path()
 }
 
+/// Whether a path component is the git metadata dir, case-insensitively (so a
+/// case-insensitive filesystem cannot smuggle `.GIT` past the guard).
+fn is_dot_git(c: std::path::Component<'_>) -> bool {
+    c.as_os_str()
+        .to_str()
+        .is_some_and(|s| s.eq_ignore_ascii_case(".git"))
+}
+
 /// Reads up to `max_bytes` of a confined file (bounded). Requires a read
 /// capability whose root matches the path's root.
 ///
@@ -100,12 +108,10 @@ pub fn write_file(
         return Err(ToolError::CapRootMismatch);
     }
     // The git metadata dir is off-limits to structured writes (so the model can
-    // never plant config/hooks that a later git command would honor).
-    if path
-        .relative()
-        .components()
-        .any(|c| c.as_os_str() == ".git")
-    {
+    // never plant config/hooks that a later git command would honor). Compare
+    // case-insensitively: on case-insensitive filesystems (macOS/Windows) `.GIT`
+    // is the same directory as `.git`.
+    if path.relative().components().any(is_dot_git) {
         return Err(ToolError::GitDir);
     }
     let target = path.to_path();
@@ -159,7 +165,10 @@ pub fn search(cap: &FsReadCap, needle: &str, max_hits: usize) -> Result<Vec<Sear
             }
             let p = entry.path();
             if ftype.is_dir() {
-                if p.file_name().is_some_and(|n| n == ".git") {
+                if p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.eq_ignore_ascii_case(".git"))
+                {
                     continue;
                 }
                 stack.push(p);
@@ -353,6 +362,12 @@ mod tests {
         let wpath = root.confine_write(".git/hooks/pre-commit").unwrap();
         assert!(matches!(
             write_file(&wcap, &wpath, b"#!/bin/sh\nevil").unwrap_err(),
+            ToolError::GitDir
+        ));
+        // Case-insensitive: `.GIT` is the same dir on macOS/Windows and is refused.
+        let upper = root.confine_write(".GIT/config").unwrap();
+        assert!(matches!(
+            write_file(&wcap, &upper, b"[core]\n").unwrap_err(),
             ToolError::GitDir
         ));
         let _ = std::fs::remove_dir_all(&dir);
