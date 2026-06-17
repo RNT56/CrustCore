@@ -23,6 +23,11 @@ pub struct CommandSpec {
     pub cwd: Option<String>,
     /// The *minimal* environment to expose (no inherited ambient secrets).
     pub env: BTreeMap<String, String>,
+    /// Bytes to write to the child's stdin, then close it (empty = stdin is
+    /// `/dev/null`). Used to hand a worker its input-contract JSON as **data**.
+    /// Bounded by the caller; written after the output readers start, so a child
+    /// that emits output while reading stdin cannot deadlock on a full pipe.
+    pub stdin: Vec<u8>,
     /// Maximum wall-clock duration before the process tree is killed.
     pub timeout: Duration,
     /// Maximum captured output per stream, in bytes (bounded; invariant 11).
@@ -38,6 +43,7 @@ impl CommandSpec {
             args: Vec::new(),
             cwd: None,
             env: BTreeMap::new(),
+            stdin: Vec::new(),
             timeout: Duration::from_secs(300),
             max_output_bytes: 8 * 1024 * 1024,
         }
@@ -148,10 +154,15 @@ pub fn run(spec: &CommandSpec) -> Result<CommandResult, RunError> {
     use std::time::Instant;
 
     let mut cmd = Command::new(&spec.program);
+    let want_stdin = !spec.stdin.is_empty();
     cmd.args(&spec.args)
         .env_clear()
         .envs(&spec.env)
-        .stdin(Stdio::null())
+        .stdin(if want_stdin {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         // Own process group (pgid == child pid) so we can signal the whole tree.
@@ -183,6 +194,28 @@ pub fn run(spec: &CommandSpec) -> Result<CommandResult, RunError> {
         }
         None => (None, None),
     };
+
+    // Feed stdin from a **dedicated thread**, never a blocking write on this thread.
+    // The payload can exceed the OS pipe buffer (~64 KiB), and a child that does not
+    // drain its stdin (one that takes its input elsewhere, loops, or hangs) would
+    // otherwise leave a synchronous `write_all` blocked *before* the timeout loop
+    // arms — making `run()` hang forever and defeating the timeout (invariants 11,
+    // 12). With a writer thread, this thread proceeds straight into the timeout/kill
+    // loop; on timeout the process-group kill closes the read end, so the writer's
+    // `write_all` returns (BrokenPipe) and the thread exits. The thread is
+    // fire-and-forget (like the bounded output readers): a broken pipe is expected
+    // (the child may read none of the input), and it is bounded by the child's
+    // lifetime, so `run()` never waits on it.
+    if want_stdin {
+        if let Some(mut sink) = child.stdin.take() {
+            let data = spec.stdin.clone();
+            std::thread::spawn(move || {
+                use std::io::Write as _;
+                let _ = sink.write_all(&data);
+                // `sink` drops here, closing the child's stdin (EOF).
+            });
+        }
+    }
 
     let start = Instant::now();
     let mut timed_out = false;
@@ -383,6 +416,45 @@ mod tests {
         let r = run(&spec("/bin/sh", &["-c", "exit 3"])).unwrap();
         assert_eq!(r.status, ExitStatus::Code(3));
         assert!(!r.is_success());
+    }
+
+    #[test]
+    fn delivers_stdin_to_child() {
+        // `cat` echoes whatever it reads on stdin; the bytes we wrote must come back
+        // out (proving stdin delivery + EOF), with no deadlock.
+        let mut s = spec("/bin/cat", &[]);
+        s.stdin = b"input-contract-json".to_vec();
+        let r = run(&s).unwrap();
+        assert!(r.is_success());
+        assert_eq!(r.stdout, b"input-contract-json");
+    }
+
+    #[test]
+    fn stdin_write_to_a_child_that_ignores_it_does_not_hang() {
+        // A child that never reads stdin (and exits 0) must not make `run` hang on
+        // the stdin write; the broken pipe is swallowed.
+        let mut s = spec("/bin/sh", &["-c", "exit 0"]);
+        s.stdin = vec![b'x'; 4096];
+        let r = run(&s).unwrap();
+        assert_eq!(r.status, ExitStatus::Code(0));
+    }
+
+    #[test]
+    fn large_stdin_to_a_live_nonreading_child_times_out_not_hangs() {
+        // The regression for the adversarial-review HIGH finding: a payload far
+        // larger than the OS pipe buffer (~64 KiB) sent to a child that stays alive
+        // and never reads stdin must NOT make `run` hang — the timeout still fires.
+        // (A synchronous write_all before the timeout loop would block forever here.)
+        let mut s = spec("/bin/sh", &["-c", "sleep 30"]);
+        s.stdin = vec![b'x'; 512 * 1024];
+        s.timeout = Duration::from_millis(300);
+        let start = std::time::Instant::now();
+        let r = run(&s).unwrap();
+        assert_eq!(r.status, ExitStatus::TimedOut);
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "run() must return promptly via the timeout, not hang on the stdin write"
+        );
     }
 
     #[test]

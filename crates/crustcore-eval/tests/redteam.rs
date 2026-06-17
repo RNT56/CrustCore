@@ -284,9 +284,93 @@ fn fabricated_tool_result_is_rejected() {
 #[ignore = "TODO(P8.5): secret never reaches model output / logs / telegram"]
 fn secret_never_leaks_to_model() {}
 
+/// Red-team (P6.6, R6): a malicious external worker writes **outside** its
+/// disposable worktree — the classic escape is appending an attacker key to
+/// `~/.ssh/authorized_keys` — or sneaks an escaping path (an in-tree symlink that
+/// resolves outside the root) into its change set. The supervisor's two
+/// confinement arms (`docs/backend-contract.md` §4.2 "reject outside-root
+/// changes") reject the result, so a worker that escaped its confinement can never
+/// produce a patch — hence can never be verified or complete a task (invariants 6,
+/// 7, 13). Workers are patch producers, not truth authorities.
+///
+/// This exercises the *real* supervisor validators (`GuardManifest::check` and
+/// `confine_worktree_changes`) that `run_external_worker` calls — directly, so the
+/// rejection is asserted deterministically on every platform (the OS sandbox is
+/// the primary defense and physically prevents the write where it is functional;
+/// these checks are the sandbox-independent depth that the contract requires).
 #[test]
-#[ignore = "TODO(P6.6): external worker writing outside the worktree is rejected"]
-fn worker_write_outside_worktree_is_rejected() {}
+fn worker_write_outside_worktree_is_rejected() {
+    use crustcore_backend::worker::{confine_worktree_changes, GuardManifest, WorkerError};
+    use crustcore_path::WorktreeRoot;
+
+    let base = std::env::temp_dir().join(format!("cc-redteam-worker-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+
+    // --- Arm 1: out-of-root write (the guard manifest). ---
+    // A worker that escapes confinement and appends to ~/.ssh/authorized_keys.
+    let home = base.join("home");
+    let ssh = home.join(".ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    let authorized = ssh.join("authorized_keys");
+    std::fs::write(&authorized, b"legit-key\n").unwrap();
+
+    let guard = GuardManifest::snapshot(std::slice::from_ref(&home), &[]);
+    // Clean before any escape.
+    assert!(
+        guard.check().is_ok(),
+        "guard must be clean before the worker escapes"
+    );
+    // The worker writes outside its worktree.
+    std::fs::write(&authorized, b"legit-key\nattacker-key\n").unwrap();
+    assert!(
+        matches!(guard.check(), Err(WorkerError::OutOfRootWrite(_))),
+        "an out-of-root write must be rejected"
+    );
+
+    // --- Arm 2: an escaping changed path (per-path confinement). ---
+    // A git worktree with an in-tree symlink pointing OUTSIDE the root; a worker
+    // that adds it makes `git status` list `escape`, which must fail confinement.
+    let repo = base.join("wt");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(&repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("HOME", "/dev/null")
+            .args(args)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    if git(&["init", "-q"]) {
+        std::fs::write(repo.join("README.md"), b"hello\n").unwrap();
+        let _ = git(&["add", "."]);
+        let _ = git(&[
+            "-c",
+            "user.email=ci@cc",
+            "-c",
+            "user.name=ci",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ]);
+        // The worker plants an in-tree symlink whose target is outside the worktree.
+        std::os::unix::fs::symlink("/etc", repo.join("escape")).unwrap();
+        let worktree = WorktreeRoot::open(&repo).unwrap();
+        let result = confine_worktree_changes(&worktree);
+        assert!(
+            matches!(result, Err(WorkerError::EscapingChange(_))),
+            "a changed path that escapes the worktree root must be rejected, got {result:?}"
+        );
+    } else {
+        eprintln!("skipping arm 2: git unavailable");
+    }
+
+    let _ = std::fs::remove_dir_all(&base);
+}
 
 #[test]
 #[ignore = "TODO(P13.6): MCP server returning hidden instructions is treated as data"]

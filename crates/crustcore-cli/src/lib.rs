@@ -53,16 +53,25 @@ where
     }
 }
 
-/// Parsed arguments for `crustcore run` (`-dir`/`-goal`/`-verify`).
+/// Parsed arguments for `crustcore run` (`-dir`/`-goal`/`-verify`/`-backend`/`-worker-cmd`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunArgs {
     /// The repository directory (`-dir`). Defaults to `.` when omitted.
     pub dir: Option<String>,
-    /// The task goal (`-goal`). Recorded; the autonomous backend lands in Phase 6.
+    /// The task goal (`-goal`). Passed to a worker backend; recorded otherwise.
     pub goal: Option<String>,
     /// The verify command (`-verify`), as a raw whitespace-separated string. When
     /// omitted, the caller detects one from the repo shape.
     pub verify: Option<String>,
+    /// The coding backend (`-backend`): `native` (default — verify the worktree as
+    /// is), `codex`, `claude`, or `cmd` (a generic external worker, see
+    /// `-worker-cmd`). An external worker produces a candidate change in the
+    /// worktree that is then re-derived and verified (Phase 6).
+    pub backend: Option<String>,
+    /// The generic external worker command (`-worker-cmd`), required when
+    /// `-backend cmd`. Whitespace-split into program + args with **no shell
+    /// interpretation** (invariant 7).
+    pub worker_cmd: Option<String>,
 }
 
 /// Parses `run` arguments (everything after the `run` subcommand). Accepts both
@@ -87,6 +96,8 @@ pub fn parse_run(args: &[String]) -> Result<RunArgs, String> {
             "-dir" | "--dir" => out.dir = Some(take(&mut i)?),
             "-goal" | "--goal" => out.goal = Some(take(&mut i)?),
             "-verify" | "--verify" => out.verify = Some(take(&mut i)?),
+            "-backend" | "--backend" => out.backend = Some(take(&mut i)?),
+            "-worker-cmd" | "--worker-cmd" => out.worker_cmd = Some(take(&mut i)?),
             other => return Err(format!("unknown 'run' flag '{other}'")),
         }
         i += 1;
@@ -112,8 +123,13 @@ pub fn help_text() -> String {
          \n\
          RUN:\n\
          \x20   crustcore run -dir <repo> -goal <text> -verify <command>\n\
+         \x20                 [-backend native|codex|claude|cmd] [-worker-cmd <command>]\n\
          \x20   Creates a disposable git worktree, reruns <command> in a sandbox,\n\
          \x20   and completes only if it passes (-verify auto-detected if omitted).\n\
+         \x20   With -backend, an external worker first produces a candidate change\n\
+         \x20   in the worktree (sandboxed, no secrets); CrustCore re-derives the\n\
+         \x20   diff, rejects out-of-root writes, then verifies. -worker-cmd gives\n\
+         \x20   the generic worker command for -backend cmd.\n\
          \n\
          The CLI is setup/admin/emergency only. Runtime control is via Telegram\n\
          (see docs/telegram.md).\n"
@@ -169,5 +185,14 @@ mod tests {
     fn parse_run_rejects_unknown_flag_and_missing_value() {
         assert!(parse_run(&s(&["-bogus", "x"])).is_err());
         assert!(parse_run(&s(&["-dir"])).is_err());
+    }
+
+    #[test]
+    fn parse_run_collects_backend_flags() {
+        let a = parse_run(&s(&["-backend", "cmd", "-worker-cmd", "/bin/sh -c true"])).unwrap();
+        assert_eq!(a.backend.as_deref(), Some("cmd"));
+        assert_eq!(a.worker_cmd.as_deref(), Some("/bin/sh -c true"));
+        // Backend flags are optional (Phase-5 behavior when omitted).
+        assert_eq!(parse_run(&s(&["-dir", "."])).unwrap().backend, None);
     }
 }

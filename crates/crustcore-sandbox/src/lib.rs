@@ -397,6 +397,8 @@ impl BubblewrapBackend {
             args,
             cwd: None,
             env: inner.env.clone(),
+            // Forward the inner command's stdin through bwrap to the worker.
+            stdin: inner.stdin.clone(),
             timeout: inner.timeout,
             max_output_bytes: inner.max_output_bytes,
         }
