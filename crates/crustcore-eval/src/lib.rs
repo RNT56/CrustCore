@@ -7,10 +7,10 @@
 //! the repo-root `tests/` and `fixtures/` trees; the runnable assertions live in
 //! this crate's `tests/`.
 //!
-//! Status: Phase 0 scaffold. The harness is a placeholder; each scenario is an
-//! `#[ignore]`d test that the relevant phase implements and un-ignores (so the
-//! suite never reports false green). See `tests/redteam.rs` and
-//! `tests/golden.rs`.
+//! Status: implemented. The red-team and golden suites run end to end; each
+//! scenario is a real fixture. A few remain `#[ignore]`d **only** where they need
+//! live network/exec (e.g. the GitHub issue-to-PR flow) — shown as ignored, never
+//! as false green. See `tests/redteam.rs` and `tests/golden.rs`.
 #![forbid(unsafe_code)]
 
 /// A red-team scenario id (mirrors `ROADMAP.md` §19.3 / `THREAT_MODEL.md`).

@@ -13,9 +13,9 @@
 //! }
 //! ```
 //!
-//! Status: Phase 0 scaffold. The event/action vocabulary and the `step`
-//! signature are in place; the full transition table, arenas, budgets, and
-//! approval flow are implemented in Phase 1 (`TODO(P1.*)`).
+//! Status: implemented (Phase 1). The full task/job transition tables, typed
+//! budgets, capability/approval flow, and lease/expiry semantics are in place;
+//! `step` is exhaustively property-tested, no-panic-fuzzed, and benchmarked.
 #![forbid(unsafe_code)]
 
 pub mod action;

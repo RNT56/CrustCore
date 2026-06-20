@@ -4,9 +4,9 @@
 //! (invariant 9), with deny-all egress by default and a sanitized environment
 //! (`docs/sandbox.md`).
 //!
-//! Status: Phase 0 scaffold. Profiles/tiers and the backend trait are defined;
-//! the Linux backend (Landlock/namespaces/bubblewrap), env sanitation, and
-//! path-list env validation land in Phase 4 (`TODO(P4.*)`).
+//! Status: implemented (Phase 4). Profiles/tiers, the backend trait, the Linux
+//! `bubblewrap` backend (deny-all egress), env sanitation, and path-list env
+//! validation are in place; execution is refused when no backend is available.
 //!
 //! NOTE: unlike the pure kernel crates, the real backends here will require
 //! `unsafe`/FFI for syscalls. Such code must be isolated, justified, and tested

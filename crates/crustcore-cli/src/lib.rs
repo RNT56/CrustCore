@@ -5,8 +5,9 @@
 //! (invariant 16). It deliberately avoids `clap` to stay within the nano size
 //! budget; this is a minimal, allocation-light hand-rolled parser.
 //!
-//! Status: Phase 0 scaffold. `version` is real; `run`/`inspect`/`export` are
-//! recognized and routed in later phases (`TODO(P2.4/P5.1)`).
+//! Status: implemented. `version`/`help`/`run`/`inspect`/`export`/`doctor` are
+//! all parsed here and routed by the nano binary; the `DoctorReport` render and
+//! readiness verdict live in this crate (Phase 16).
 #![forbid(unsafe_code)]
 
 /// The CrustCore semantic version (from the crate metadata at build time).

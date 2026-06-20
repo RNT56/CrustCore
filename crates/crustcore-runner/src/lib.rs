@@ -4,8 +4,9 @@
 //! runner itself does not sandbox — it is wrapped by `crustcore-sandbox`, which
 //! supplies the sandbox profile and environment sanitation.
 //!
-//! Status: Phase 0 scaffold. `CommandSpec`/`CommandResult` are defined; spawn,
-//! bounded capture, and timeout/kill land in Phase 4 (`TODO(P4.*)`).
+//! Status: implemented (Phase 4). `run` spawns with bounded stdout/stderr
+//! capture, a timeout, and process-tree kill (process-group signal + leader
+//! kill); it is reused by `crustcore-sandbox`.
 #![forbid(unsafe_code)]
 
 use std::collections::BTreeMap;
