@@ -9,10 +9,13 @@
 //!
 //! The kernel never sees raw Telegram JSON — only normalized
 //! `UserMessageQueued` / `UserSteerReceived` / `ApprovalResolved` events
-//! (`docs/telegram.md` §1). The actual Bot API HTTP long-polling + `sendMessage`
-//! (authenticated by the Phase-8 credential proxy) is `TODO(P9-net)`; this module
-//! works on already-decoded [`RawUpdate`]s so the trust-critical logic is
-//! deterministic and fully tested.
+//! (`docs/telegram.md` §1). The **runtime loop** ([`TelegramPoller`], P9-net) drives
+//! the long-poll → dedupe → normalize → route pipeline over a [`TelegramApi`] and
+//! sends only rendered, redacted [`ModelVisibleText`] back — fully testable with a
+//! mock, no network. The live Bot API HTTP (getUpdates/sendMessage over the spawned
+//! `crustcore-net` helper, the bot token in the URL path via the credential proxy)
+//! is `TODO(P9-net-live)`; this module works on already-decoded [`RawUpdate`]s so the
+//! trust-critical logic is deterministic and fully tested.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -735,6 +738,126 @@ fn hash_hex(bytes: &[u8; 32]) -> String {
     s
 }
 
+// ---------------------------------------------------------------------------
+// The Bot API runtime loop (P9-net): long-poll → normalize/dedupe/route, and the
+// redacted-only outbound send. The live HTTP transport (getUpdates/sendMessage over
+// the spawned `crustcore-net` helper, authenticated by the credential proxy — the
+// bot token goes in the URL path) is `TODO(P9-net-live)`; this loop drives the
+// already-tested core over a `TelegramApi` so it is fully testable with no network.
+// ---------------------------------------------------------------------------
+
+/// A transport-level failure talking to the Bot API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TgError {
+    /// A connect/timeout/io failure.
+    Transport(String),
+    /// The Bot API returned an error (`ok: false`) — never carrying the token.
+    Api(String),
+}
+
+impl core::fmt::Display for TgError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            TgError::Transport(e) => write!(f, "telegram transport: {e}"),
+            TgError::Api(e) => write!(f, "telegram api: {e}"),
+        }
+    }
+}
+
+/// The Bot API operations the runtime loop needs. The live `crustcore-net`-backed
+/// impl is `TODO(P9-net-live)`; a mock drives the loop deterministically in tests.
+///
+/// `send_message` takes a [`ModelVisibleText`] — which can be constructed **only**
+/// through the [`Redactor`] — so by the type system the channel can emit nothing but
+/// redacted, rendered output: the model cannot push arbitrary text to the user
+/// (invariants 2, 5; `docs/telegram.md`).
+pub trait TelegramApi {
+    /// Long-poll for updates with `update_id >= offset` (Telegram's offset advances
+    /// past acknowledged updates). The returned updates are **untrusted data**.
+    ///
+    /// # Errors
+    /// [`TgError`] on a transport/API failure.
+    fn get_updates(&self, offset: i64) -> Result<Vec<RawUpdate>, TgError>;
+
+    /// Sends a **redacted, rendered** reply to a chat; returns the message id.
+    ///
+    /// # Errors
+    /// [`TgError`] on a transport/API failure.
+    fn send_message(&self, chat: ChatId, text: &ModelVisibleText) -> Result<i64, TgError>;
+}
+
+/// The inbound runtime loop: each poll fetches updates, advances the long-poll
+/// offset past every fetched update (so Telegram does not re-deliver them), drops
+/// duplicates ([`Deduper`]), enforces the allowlist + normalizes ([`normalize`]),
+/// and routes survivors to [`RuntimeEvent`]s for the supervisor to dispatch. It holds
+/// no outward channel itself — replies are sent explicitly via [`TelegramApi::send_message`]
+/// with rendered [`ModelVisibleText`], so the model never gains a direct user channel
+/// (invariant 5). Deterministic given the `TelegramApi`, so fully CI-testable.
+pub struct TelegramPoller {
+    offset: i64,
+    deduper: Deduper,
+    allowlist: ChatAllowlist,
+    rejected: u32,
+}
+
+impl TelegramPoller {
+    /// A poller over `allowlist`, starting at offset 0.
+    #[must_use]
+    pub fn new(allowlist: ChatAllowlist) -> Self {
+        TelegramPoller {
+            offset: 0,
+            deduper: Deduper::new(),
+            allowlist,
+            rejected: 0,
+        }
+    }
+
+    /// The next long-poll offset (one past the highest update seen).
+    #[must_use]
+    pub fn offset(&self) -> i64 {
+        self.offset
+    }
+
+    /// How many updates have been rejected as not-allowlisted (a spoof/abuse signal
+    /// the supervisor can rate-limit-surface as risk; `docs/telegram.md` §4).
+    #[must_use]
+    pub fn rejected_count(&self) -> u32 {
+        self.rejected
+    }
+
+    /// Runs one poll cycle and returns the [`RuntimeEvent`]s for the supervisor to
+    /// dispatch. Advances the offset past **every** fetched update (even rejected or
+    /// duplicate ones) so they are acknowledged and never re-delivered.
+    ///
+    /// # Errors
+    /// [`TgError`] if the fetch fails.
+    pub fn poll_once(
+        &mut self,
+        api: &dyn TelegramApi,
+        now: Timestamp,
+    ) -> Result<Vec<RuntimeEvent>, TgError> {
+        let updates = api.get_updates(self.offset)?;
+        let mut events = Vec::new();
+        for raw in &updates {
+            // Acknowledge by advancing the offset past this update, regardless of
+            // whether it survives dedupe/allowlisting.
+            self.offset = self.offset.max(raw.update_id.saturating_add(1));
+            if !self.deduper.accept(raw.update_id) {
+                continue; // a replayed update_id
+            }
+            match normalize(raw, &self.allowlist, now) {
+                Ok(envelope) => events.push(route(envelope)),
+                Err(RejectReason::NotAllowlisted) => {
+                    self.rejected = self.rejected.saturating_add(1);
+                }
+                // Empty / bad-callback updates are dropped (no kernel event).
+                Err(_) => {}
+            }
+        }
+        Ok(events)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1035,5 +1158,95 @@ mod tests {
             logs.as_str()
         );
         assert!(logs.as_str().contains("[REDACTED:model-key]"));
+    }
+
+    // --- P9-net runtime loop ---
+
+    struct MockTelegram {
+        updates: std::cell::RefCell<Vec<RawUpdate>>,
+        sent: std::cell::RefCell<Vec<(ChatId, String)>>,
+    }
+    impl MockTelegram {
+        fn new(updates: Vec<RawUpdate>) -> Self {
+            MockTelegram {
+                updates: std::cell::RefCell::new(updates),
+                sent: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+    }
+    impl TelegramApi for MockTelegram {
+        fn get_updates(&self, offset: i64) -> Result<Vec<RawUpdate>, TgError> {
+            // Honor Telegram's offset semantics: only updates at/after the offset.
+            Ok(self
+                .updates
+                .borrow()
+                .iter()
+                .filter(|u| u.update_id >= offset)
+                .cloned()
+                .collect())
+        }
+        fn send_message(&self, chat: ChatId, text: &ModelVisibleText) -> Result<i64, TgError> {
+            self.sent
+                .borrow_mut()
+                .push((chat, text.as_str().to_string()));
+            Ok(self.sent.borrow().len() as i64)
+        }
+    }
+
+    fn upd(update_id: i64, chat: i64, text: &str) -> RawUpdate {
+        RawUpdate {
+            update_id,
+            chat_id: chat,
+            message_id: update_id,
+            from_user_id: 1,
+            from_username: None,
+            text: Some(text.into()),
+            callback_data: None,
+        }
+    }
+
+    #[test]
+    fn poll_advances_offset_dedupes_allowlists_and_routes() {
+        let api = MockTelegram::new(vec![
+            upd(1, 100, "/help"),       // allowlisted command
+            upd(2, 100, "fix the bug"), // allowlisted text -> queued turn
+            upd(3, 100, "!steer now"),  // allowlisted steer
+            upd(4, 999, "spoof"),       // NOT allowlisted -> rejected
+            upd(2, 100, "replayed"),    // duplicate update_id 2 -> dropped
+        ]);
+        let mut poller = TelegramPoller::new(ChatAllowlist::of(&[100]));
+        let events = poller.poll_once(&api, ts(1000)).unwrap();
+
+        assert_eq!(events.len(), 3, "help + queued turn + steer survive");
+        assert!(matches!(events[0], RuntimeEvent::Command(Command::Help)));
+        assert!(matches!(events[1], RuntimeEvent::QueuedTurn(_)));
+        assert!(matches!(events[2], RuntimeEvent::Steer(_)));
+        // Offset advanced past the highest update id (4 → 5) — even rejected/dup ones.
+        assert_eq!(poller.offset(), 5);
+        // The non-allowlisted update was rejected and counted (spoof signal).
+        assert_eq!(poller.rejected_count(), 1);
+    }
+
+    #[test]
+    fn long_poll_offset_skips_acknowledged_and_send_is_redacted_only() {
+        let api = MockTelegram::new(vec![upd(1, 100, "hi"), upd(2, 100, "there")]);
+        let mut poller = TelegramPoller::new(ChatAllowlist::of(&[100]));
+        assert_eq!(poller.poll_once(&api, ts(1)).unwrap().len(), 2);
+        assert_eq!(poller.offset(), 3);
+        // A second poll sees nothing new (offset acknowledged the first two).
+        assert!(poller.poll_once(&api, ts(2)).unwrap().is_empty());
+
+        // Outbound: the channel can emit ONLY redacted ModelVisibleText — the type of
+        // `send_message` makes raw/unredacted text unrepresentable (invariants 2, 5).
+        let mut redactor = Redactor::new();
+        redactor.register("tok", b"sk-TGSENTINEL");
+        let rendered = OutboundRenderer::new(&redactor).logs("status leaked sk-TGSENTINEL");
+        api.send_message(ChatId(100), &rendered).unwrap();
+        let sent = api.sent.borrow();
+        assert_eq!(sent.len(), 1);
+        assert!(
+            !sent[0].1.contains("TGSENTINEL"),
+            "outbound must be redacted"
+        );
     }
 }
