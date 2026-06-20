@@ -865,6 +865,53 @@ mod tests {
         );
     }
 
+    // --- Format version / migration compatibility (P16.6) ---
+
+    #[test]
+    fn frame_format_version_is_stable_and_stamped() {
+        // Format-contract guard: changing either of these is a migration event, and a
+        // reader/writer migration must accompany it (DoD #6, P16.6). This test exists
+        // so a silent format bump trips CI.
+        assert_eq!(FRAME_MAGIC, *b"CCEL");
+        assert_eq!(FRAME_VERSION, 1);
+
+        let log = sample_log();
+        // Every frame is stamped with the current magic + version (LE u16) in its
+        // header, and the current version round-trips intact.
+        for (start, _end) in spans(&log) {
+            assert_eq!(&log.bytes()[start..start + 4], &FRAME_MAGIC);
+            let v = u16::from_le_bytes([log.bytes()[start + 4], log.bytes()[start + 5]]);
+            assert_eq!(v, FRAME_VERSION);
+        }
+        assert!(EventLog::from_bytes(log.bytes().to_vec())
+            .verify()
+            .is_intact());
+    }
+
+    #[test]
+    fn future_frame_version_is_rejected_not_misread() {
+        // Forward compatibility / migration boundary (P16.6): a frame stamped with a
+        // NEWER format version must be **rejected** with `BadVersion`, never silently
+        // misinterpreted under the old layout. An old reader refuses a newer log rather
+        // than guessing — the safe direction for an audit log.
+        let log = sample_log();
+        let mut bytes = log.bytes().to_vec();
+        let future = FRAME_VERSION + 1;
+        bytes[4..6].copy_from_slice(&future.to_le_bytes());
+        match EventLog::from_bytes(bytes).verify() {
+            ChainStatus::Broken {
+                frame_index,
+                reason,
+            } => {
+                assert_eq!(reason, BreakReason::BadVersion);
+                assert_eq!(frame_index, 0);
+            }
+            ChainStatus::Intact { .. } => {
+                panic!("a future frame version must not verify as intact")
+            }
+        }
+    }
+
     #[test]
     fn frames_roundtrip_through_iter() {
         let log = sample_log();
