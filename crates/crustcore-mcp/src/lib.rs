@@ -272,9 +272,16 @@ pub struct McpCallIds {
 /// receipt** over the redacted, shown bytes (invariant 10 — no receipt, no
 /// model-visible claim that the tool ran). MCP output is untrusted data: nothing
 /// here interprets it as a command (invariant 7).
+///
+/// `call_args` is the **canonicalized** argument bytes the tool was actually called
+/// with; the receipt's `args_hash` binds them (`docs/mcp.md` §5), so the result is
+/// tied to a specific call's inputs — two calls to the same tool with different args
+/// produce distinguishable receipts. Pass already-redacted, non-secret arg bytes:
+/// the receipt covers redacted data only (invariants 1–2).
 pub fn filter_result(
     server: McpServerId,
     tool: &str,
+    call_args: &[u8],
     raw_output: &[u8],
     redactor: &Redactor,
     receipts: &mut ReceiptChain,
@@ -287,14 +294,15 @@ pub fn filter_result(
     let redacted = redactor.to_model_visible(&String::from_utf8_lossy(raw_output));
     let summary = ModelVisibleTextExt::bounded(&redacted, MAX_MCP_SUMMARY);
 
-    // Receipt over exactly the bytes the model is shown (the redacted summary).
+    // Receipt over exactly the bytes the model is shown (the redacted summary), and
+    // bound to the canonicalized call args so the receipt commits to a specific call.
     let tool_name = format!("mcp:{}:{}", server.0, tool);
     let receipt = receipts.mint(&ReceiptParams {
         task_id: ids.task_id,
         job_id: ids.job_id,
         tool_call_id: ids.tool_call_id,
         tool_name: tool_name.as_bytes(),
-        args: tool.as_bytes(),
+        args: call_args,
         result: summary.as_str().as_bytes(),
         artifacts: &[ArtifactId(artifact_hash)],
         event_seq: ids.event_seq,
@@ -319,13 +327,18 @@ impl ModelVisibleTextExt {
 }
 
 /// Wraps untrusted MCP-supplied text (a tool **description**, prompt, or resource)
-/// for model context — redacted and clearly *data*. Tool descriptions are untrusted
-/// too (`docs/mcp.md` §2): an MCP server cannot smuggle an instruction into the
-/// model through its self-description, because that text never controls the gateway
-/// and is redacted before it is shown.
+/// for model context — redacted, **bounded**, and clearly *data*. Tool descriptions
+/// are untrusted too (`docs/mcp.md` §2): an MCP server cannot smuggle an instruction
+/// into the model through its self-description, because that text never controls the
+/// gateway and is redacted before it is shown. It is bounded for the same reason
+/// [`filter_result`] bounds tool output: a hostile server's description/resource is
+/// attacker-controlled and could otherwise flood model context with megabytes of
+/// (redacted but unbounded) text — "bounded everything" (CLAUDE.md §6.5). Redaction
+/// runs first, then the already-redacted text is truncated, so no raw is reintroduced.
 #[must_use]
 pub fn wrap_untrusted(text: &str, redactor: &Redactor) -> ModelVisibleText {
-    redactor.to_model_visible(text)
+    let redacted = redactor.to_model_visible(text);
+    ModelVisibleTextExt::bounded(&redacted, MAX_MCP_SUMMARY)
 }
 
 // ---------------------------------------------------------------------------
@@ -468,9 +481,11 @@ mod tests {
             event_seq: EventSeq(1),
         };
         let raw = b"result with secret sk-MCPSENTINEL and lots of data";
+        let call_args = br#"{"query":"needle"}"#;
         let out = filter_result(
             McpServerId(1),
             "search",
+            call_args,
             raw,
             &redactor,
             &mut receipts,
@@ -483,6 +498,10 @@ mod tests {
         assert_eq!(out.artifact_hash, sha256(raw));
         // The receipt binds to exactly the shown (redacted) summary (invariant 10).
         assert!(out.receipt.result_matches(out.summary.as_str().as_bytes()));
+        // The receipt binds the real call args, not just the tool name: a receipt
+        // minted for the same tool with different args must not match these args.
+        assert!(out.receipt.args_matches(call_args));
+        assert!(!out.receipt.args_matches(b"search"));
     }
 
     // --- code-mode stubs (P13.4, invariant 20) ---

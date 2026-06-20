@@ -91,6 +91,16 @@ impl ToolReceipt {
         sha256(result) == self.result_hash
     }
 
+    /// Whether `args` hashes to this receipt's `args_hash` — i.e. the result is
+    /// tied to a call made with exactly these (canonicalized) arguments
+    /// (`docs/receipts.md` §4). Two calls to the same tool with different args
+    /// yield distinguishable receipts, so a result cannot be re-attributed to a
+    /// different call's inputs.
+    #[must_use]
+    pub fn args_matches(&self, args: &[u8]) -> bool {
+        sha256(args) == self.args_hash
+    }
+
     /// Whether this receipt chains directly after `prev` (its `prev_receipt_hash`
     /// equals the hash of `prev`'s body).
     #[must_use]
