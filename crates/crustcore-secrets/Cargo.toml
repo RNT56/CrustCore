@@ -10,6 +10,17 @@ description = "Typed secret handles and non-exfiltratable secret material for Cr
 
 [dependencies]
 crustcore-types = { workspace = true }
-# NOTE: outside nano, native keychain/vault backends and `zeroize` may be added
-# here behind features (Phase 8). Nano stores only `secret://` handles and links
-# none of that. See docs/secrets.md.
+
+# Encrypted-file vault backend (P8-store), behind the `vault-file` feature ONLY —
+# so the nano build (which links this crate for the trust types + InMemoryStore)
+# pulls NO crypto crate. AES-256-GCM AEAD + scrypt KDF + OS RNG; all RustCrypto /
+# std-adjacent and well-maintained. `xtask forbidden-deps` asserts none of these
+# enter the nano dependency graph. (docs/secrets.md §6; CLAUDE.md §5.1.)
+aes-gcm = { version = "0.10", optional = true }
+scrypt = { version = "0.11", default-features = false, optional = true }
+getrandom = { version = "0.2", optional = true }
+
+[features]
+# Enables the encrypted-file vault `SecretStore` backend ([`store`]). Off by
+# default; the nano build never enables it, so nano links no crypto.
+vault-file = ["dep:aes-gcm", "dep:scrypt", "dep:getrandom"]

@@ -37,6 +37,11 @@ const FORBIDDEN_IN_NANO: &[&str] = &[
     "redb",
     "rmcp",
     "serde_json",
+    // Crypto/RNG belongs in feature-gated sidecar backends (the P8-store vault),
+    // never in nano — nano hashes with the vendored SHA-256 and reads /dev/urandom.
+    "aes-gcm",
+    "scrypt",
+    "getrandom",
 ];
 
 fn main() -> ExitCode {
@@ -80,7 +85,6 @@ fn print_help() {
          \x20 verify          fmt + clippy + test + nano build + size gate + forbidden-deps\n\
          \x20 fmt             cargo fmt --check\n\
          \x20 clippy          cargo clippy --workspace -- -D warnings\n\
-         \x20 clippy-live     clippy the feature-gated crustcore-net live transport\n\
          \x20 test            cargo test --workspace\n\
          \x20 nano-build      build crustcore-nano (profile nano)\n\
          \x20 size-check      build nano and enforce the size budget\n\
@@ -158,8 +162,9 @@ fn hex_lower(bytes: &[u8]) -> String {
 fn verify() -> Result<(), String> {
     step("fmt", fmt_check)?;
     step("clippy", clippy)?;
-    step("clippy-live", clippy_live)?;
+    step("clippy-features", clippy_features)?;
     step("test", test)?;
+    step("test-features", test_features)?;
     step("forbidden-deps", forbidden_deps)?;
     step("size-check", size_check)?;
     Ok(())
@@ -188,10 +193,11 @@ fn clippy() -> Result<(), String> {
     )
 }
 
-/// Clippy the **feature-gated** live HTTP transport (`crustcore-net --features live`).
-/// The default `--workspace` clippy does not enable per-crate features, so the live
-/// adapters' real-transport code would otherwise go unchecked (P7-live).
-fn clippy_live() -> Result<(), String> {
+/// Clippy the **feature-gated** code the default `--workspace` clippy does not see
+/// (it does not enable per-crate features): the live HTTP transport
+/// (`crustcore-net --features live`, P7-live) and the encrypted-file vault
+/// (`crustcore-secrets --features vault-file`, P8-store).
+fn clippy_features() -> Result<(), String> {
     run(
         "cargo",
         &[
@@ -204,6 +210,36 @@ fn clippy_live() -> Result<(), String> {
             "--",
             "-D",
             "warnings",
+        ],
+    )?;
+    run(
+        "cargo",
+        &[
+            "clippy",
+            "--package",
+            "crustcore-secrets",
+            "--features",
+            "vault-file",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    )
+}
+
+/// Run the tests behind cargo features the default `--workspace` test run does not
+/// enable. The vault's seal/open/tamper tests live behind `vault-file`; the net
+/// adapter tests run under `--workspace` already (only `UreqClient` is feature-gated).
+fn test_features() -> Result<(), String> {
+    run(
+        "cargo",
+        &[
+            "test",
+            "--package",
+            "crustcore-secrets",
+            "--features",
+            "vault-file",
         ],
     )
 }
