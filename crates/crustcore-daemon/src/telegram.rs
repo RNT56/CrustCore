@@ -773,7 +773,11 @@ impl core::fmt::Display for TgError {
 /// (invariants 2, 5; `docs/telegram.md`).
 pub trait TelegramApi {
     /// Long-poll for updates with `update_id >= offset` (Telegram's offset advances
-    /// past acknowledged updates). The returned updates are **untrusted data**.
+    /// past acknowledged updates). The returned updates are **untrusted data**, and
+    /// the live impl **must bound the batch** — Telegram's `getUpdates` takes a
+    /// `limit` (default/max 100), which the live transport sets so a single poll can
+    /// never return an unbounded `Vec` (invariant 11); the poller processes whatever
+    /// it returns.
     ///
     /// # Errors
     /// [`TgError`] on a transport/API failure.
