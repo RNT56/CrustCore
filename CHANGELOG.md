@@ -30,6 +30,61 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Phase 10 — GitHub integration (P10.1–P10.8).** The verified-patch → draft-PR →
+  CI-repair control plane (`docs/github.md`; invariants 1, 7, 8, 13, 14), split
+  between the backend type-gate and the daemon orchestration (both sidecar / dead-
+  code-eliminated in nano):
+  - **`crustcore-backend::integrate` (P10.5/P10.6):** `open_pr(&Approved<GitHubWriteCap>,
+    VerifiedPatch, head, base, now) -> PrIntent` — the **type-13 gate**: it takes a
+    `VerifiedPatch` **by value** (only the verifier mints one, so an
+    `UnverifiedPatch`/`BackendResult` cannot reach it) **and** an
+    `Approved<GitHubWriteCap>` (opening a PR needs a human approval — invariant 14),
+    confines the head branch to the cap's prefix, and emits a **draft** PR.
+    `format_pr_body` builds the body from the verifier's **evidence** (verifier
+    name, command evidence, receipt-backed pass time) — never `self_claimed_done`
+    (invariant 6).
+  - **`crustcore-daemon::github`:** auth-mode ranking (App > fine-grained PAT >
+    classic PAT, with the classic-PAT warning — P10.1/P10.2); `RepoRegistry`
+    (P10.3); the **credential-proxy push validation** (P10.4, the load-bearing "no
+    raw token in the sandbox" checkpoint) — `validate_push` denies **force-push**
+    (`+`/`--force`), **protected branches** (`main`/`master`), **out-of-prefix**
+    branches, **repo mismatch**, and **unexpected hosts**; the **merge gate**
+    (`decide_merge`) is ask-always — only a valid `Approved<GitHubWriteCap>`
+    authorizes a merge (a comment/model never can); the bounded CI-check →
+    **repair-task** loop (`repair_decision`, P10.7); and **untrusted comment
+    ingestion** (`ingest_comment`, P10.8) — a comment is tainted, redacted data that
+    confers no authority.
+  - **Deferred (`TODO(P10-net)`):** the REST/GraphQL adapter + installation-token
+    minting (in `crustcore-net`, authenticated by the Phase-8 credential proxy) —
+    needs network + secrets, not CI-testable.
+  - **Red-team (P10.8):** the new `issue_comment_says_ignore_policy` fixture — a PR
+    comment that says "merge now / ignore the failing test / set this secret"
+    confers no privileged action (the merge gate still requires `Approved<T>`) and
+    does not leak a secret it quotes (invariants 7, 13, 14, 2).
+  - **Tests:** the `open_pr` gate (draft + evidence body, expired approval, branch
+    outside prefix), auth ranking, repo registration, push validation (in-scope ok;
+    force/protected/out-of-prefix/repo-mismatch/host denied), merge gate, bounded
+    repair loop, untrusted comment ingestion.
+  - **Nano size impact: +0 KiB** (411.9 KiB, 51.5%) — the integrate gate is dead-
+    code-eliminated in nano (the `run` binary opens no PRs) and the daemon is a
+    sidecar (invariant 20).
+  - **Hardened per a 6-dimension adversarial review (a critical finding + others
+    fixed; 6 refuted/out-of-scope):**
+    - **(critical — refspec smuggling)** `validate_push` parsed the refspec as one
+      string and validated only the **last** colon-segment, so a multi-refspec push
+      (`crustcore/ok:crustcore/ok x:refs/heads/main`) smuggled a protected-branch or
+      force update past the credential proxy (invariants 8, 14; `docs/github.md`
+      §4.1). `PushRequest` is now a **structured descriptor** (explicit `force: bool`
+      + a `Vec` of individual refspecs); `validate_push` checks **every** ref
+      (per-ref `+` force marker, protected branch incl. `HEAD`, prefix) and rejects
+      a refspec with interior whitespace — fail-closed.
+    - force-flag detection broadened to any `--force…` spelling
+      (`--force-with-lease`/`--force-if-includes`) + `-f` via `is_force_flag`.
+    - the branch-prefix check is now **segment-boundary aware** (`branch_under_prefix`
+      in both `validate_push` and `open_pr`, so a prefix `crustcore/` can't match
+      `crustcore-evil/…`, with `.`/`..`/empty-prefix rejected).
+    - bounded ingested comment/CI-log text (`MAX_COMMENT_BYTES`).
+    Regression tests added for the multi-refspec/force/boundary cases.
 - **Phase 9 — Telegram runtime channel (P9.1–P9.7).** CrustCore's single default
   runtime human channel (invariants 5, 15, 16; `docs/telegram.md`), implemented as
   the **std-only `crustcore-daemon::telegram`** sidecar logic (not in nano):
@@ -500,6 +555,8 @@ agent/PR/role/size/invariant audit trail.
 | 2026-06-17 | P4 hardening | Fix the Linux-CI timeout-kill hang (procps-ng needs `kill -- -<pgid>`; also SIGKILL the leader via its `Child` handle) — root-caused and verified in a faithful `ubuntu:24.04` container. Address Phase-4 review findings: drop the pid-reuse-TOCTOU clean-exit group sweep; strip JVM/Go/zsh/pager/interpreter-lib exec env vars; reject `HOME`/`XDG_CONFIG_HOME` inside the worktree. | `claude/p4-sandbox` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (295.6 KiB, 37.0%) | Strengthens 9 (sandbox env), 12 (reliable process-tree kill); none weakened |
 | 2026-06-17 | P5.1–P5.6 | Implement the worktree + verify loop: `WorktreeManager` (disposable `git worktree` create/reuse/remove, hardened), `crustcore-backend::verify` (`VerifySpec`/`run_verify` rerun-in-sandbox → mint `VerifiedPatch`+receipt only on pass), seal `VerifiedPatch::from_verifier` crate-private + `complete_task` by value, wire `crustcore run -dir/-goal/-verify`; golden "fix failing test" + worktree lifecycle tests. **Hardened per a 7-dimension adversarial review (8 confirmed findings fixed):** worktree-add filter neutralization+restore (RCE), registered-only worktree reuse + 0700 base, executor-seam unit tests for the mint/Failed/Refused paths, worktree teardown on all `run` paths, `VerifierName` type, extracted+tested verify-spec/exit logic. CI now installs bubblewrap so the real sandbox path runs. Full sandbox path validated in a privileged `ubuntu:24.04` container. | `claude/p5-verify` (PR) | Maintainer agent (Architect/Implementer) | +99.9 KiB (395.5 KiB, 49.4%; runner/sandbox/verify now reachable via `run`) | Enforces 13 (verifier-owned completion, type-sealed), 9 (verify in sandbox), 10 (receipt over the real run), 7 (worktree-add RCE neutralized); none weakened |
 | 2026-06-17 | P6.1–P6.6 | Implement the external backend protocol: the `CodingBackend` contract + `ExternalCommandBackend`/`CodexBackend`/`ClaudeCodeBackend`; `WorkerInput` (type-pinned `secrets:none`/`network:deny`) and JSON contract; `run_external_worker` supervisor validation (sandboxed secret-free run, bounded transcript, `GuardManifest` out-of-root detection, worktree-confined diff extraction via new `git_status_all`, per-path confinement, sensitive-file classification) → `UnverifiedPatch` only; `CommandSpec.stdin` delivery through runner+bwrap; wire `crustcore run -backend/-worker-cmd` (produce → re-derive → confine → verify). Worker-contract tests + runner stdin tests; **un-ignore the `worker_write_outside_worktree_is_rejected` red-team fixture**; implement the `golden_add_small_feature` golden. Full sandboxed worker→verify→complete path validated in a privileged container. | `claude/p6-backend` (PR) | Maintainer agent (Architect/Implementer) | +16.4 KiB (411.9 KiB, 51.5%; worker module + CLI wiring) | Enforces 6 (workers are patch producers, not authorities), 7 (out-of-root/escape rejection), 1–3 + 9 (no-secret, deny-net, sandboxed worker), 13 (only the verifier completes); none weakened |
+| 2026-06-20 | P10.1–P10.8 | Implement GitHub integration: `crustcore-backend::integrate::open_pr` (the type-13 gate — `VerifiedPatch` by value + `Approved<GitHubWriteCap>` → draft `PrIntent`; `format_pr_body` from verifier evidence, not self-claims) and `crustcore-daemon::github` (auth-mode ranking + classic-PAT warning, `RepoRegistry`, the credential-proxy `validate_push` denying force-push/protected/out-of-prefix/repo-mismatch/host, the ask-always `decide_merge` gate, the bounded `repair_decision` loop, untrusted `ingest_comment`). Live REST/token-minting deferred to `TODO(P10-net)`. New red-team fixture `issue_comment_says_ignore_policy` (P10.8). 13 tests across the two crates. No contract files touched (reused VerifiedPatch + GitHubWriteCap + Approved). | `claude/p10-github` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (411.9 KiB, 51.5%; integrate DCE'd in nano, daemon is a sidecar) | Enforces 13 (only a VerifiedPatch opens a PR), 14 (PR/merge need Approved<T>), 1 (no token in sandbox — proxy injection), 7 (GitHub content + comments untrusted), 8 (writes through policy); none weakened |
+| 2026-06-20 | P10 hardening | Fix the critical refspec-smuggling finding (+ others) from a 6-dimension adversarial review (6 refuted): `validate_push` validated only the last colon-segment, so a multi-refspec push smuggled a protected-branch/force update past the credential proxy → restructured `PushRequest` (explicit `force` + per-ref `Vec`), validate EVERY ref, reject interior whitespace (fail-closed); broaden force-flag detection to all `--force…` spellings (`is_force_flag`); segment-boundary `branch_under_prefix` in both `validate_push` and `open_pr`; bound ingested comment text. Multi-refspec/force/boundary regression tests added. | `claude/p10-github` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (411.9 KiB, 51.5%) | Strengthens 8/14 (no smuggled destructive/protected push), 4.1 refspec-smuggling contract; none weakened |
 | 2026-06-20 | P9 hardening | Fix the 3 confirmed findings from a 6-dimension adversarial review (7 refuted/out-of-scope): correct `Deduper::accept` (value-based evicted floor instead of the oldest-*inserted* id, so an out-of-order replayed `update_id` can't be re-accepted — docs §5; the approval engine's single-use nonce already blocked double-*approval*); `clean_text` maps whitespace control chars to a space (no token-joining across newlines); soften an over-claiming rate-limit doc comment. Out-of-order replay regression test added. | `claude/p9-telegram` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (411.9 KiB, 51.5%) | Strengthens P9.7 replay/dedupe (docs/telegram.md §5); none weakened |
 | 2026-06-20 | P9.1–P9.7 | Implement the Telegram runtime channel logic in `crustcore-daemon::telegram` (std-only sidecar, not in nano): `ChatAllowlist` (empty=deny-all, explicit ids, opt-in wildcard; identity = chat id not username), `normalize` (typed `InboundEnvelope`, control-strip+bound, trusted host time) + `Deduper` (update_id high-water+window), typed `Command` set, `route` (queue vs `!`-steer → `UserMessageQueued`/`UserSteerReceived`), `ApprovalEngine` nonce approvals (operation-bound via op-hash, expiring, single-use → `Approved<ApprovedOperation>` only via `AuthorizedUser::approve`), `OutboundRenderer` (typed sources → redacted `ModelVisibleText`, no model-text path). Bot API HTTP polling/send deferred to `TODO(P9-net)`. 13 spoof/dedupe/approval/redaction tests. No contract files touched (reused existing kernel events + policy approval API). | `claude/p9-telegram` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (411.9 KiB, 51.5%; daemon is a sidecar) | Enforces 5 (supervisor-only channel; subagents can't reach it), 15 (single runtime channel), 16 (allowlist via setup, not DM-to-pair), 4 (only AuthorizedUser mints approvals), 2 (redacted outbound); none weakened |
 | 2026-06-17 | P8.1–P8.6 | Implement the secret broker + typed secrets: `SecretMaterial` (no Debug/Display/Clone/Serialize, no model-visible conversion, zeroize-on-drop; forbidden impls proven by compile-fail doctests), `SecretHandle`, `Redactor`/`ModelVisibleText`/`Tainted` (the taint boundary, S2–S10), `SecretBroker`/`SecretStore`/`InMemoryStore` + one-shot/expiring/borrowed `ApprovedSecretView` (P8.4), `CredentialProxy`→`HeaderInjection` (P8.6). Native keychain (P8.2) + encrypted vault (P8.3) deferred to `TODO(P8-store)` outside nano. Un-ignored the `secret_never_leaks_to_model` red-team fixture (full S1–S10 matrix). **Contract file touched:** `crates/crustcore-secrets/src/lib.rs` (this is the phase that implements it; flagged for review). | `claude/p8-secrets` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (411.9 KiB, 51.5%; broker dead-code-eliminated in nano) | Enforces 1 (no raw creds to LLM), 2 (no unredacted secret logs), 3 (SecretMaterial not Debug/Serialize/Clone/model-visible — compile-fail-proven); credential proxy unblocks P7-live; none weakened |

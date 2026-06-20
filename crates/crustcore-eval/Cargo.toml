@@ -19,3 +19,4 @@ crustcore-eventlog = { workspace = true }
 crustcore-receipts = { workspace = true }
 crustcore-worktree = { workspace = true }
 crustcore-sandbox = { workspace = true }
+crustcore-daemon = { workspace = true }

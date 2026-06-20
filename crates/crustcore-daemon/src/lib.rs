@@ -12,6 +12,7 @@
 //! (`TODO(P9-net)`), the GitHub loop, and supervision land in later phases.
 #![forbid(unsafe_code)]
 
+pub mod github;
 pub mod telegram;
 
 /// Surfaces the daemon supervises. Marker enum so the crate is real.

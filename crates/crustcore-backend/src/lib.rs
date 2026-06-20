@@ -13,6 +13,7 @@
 //! no code outside this crate can forge one (`docs/backend-contract.md`).
 #![forbid(unsafe_code)]
 
+pub mod integrate;
 pub mod verify;
 pub mod worker;
 
