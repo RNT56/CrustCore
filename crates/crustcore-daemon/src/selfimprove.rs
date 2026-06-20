@@ -255,19 +255,44 @@ pub const CONTRACT_FILES: &[&str] = &[
     "Cargo.lock",
 ];
 
-/// Whether `path` is a contract file. Matches the canonical [`CONTRACT_FILES`] paths,
-/// and additionally **any** `Cargo.toml`/`Cargo.lock` (a dependency manifest anywhere
-/// is dependency-policy-sensitive — `CLAUDE.md` §6.4 "no drive-by dependency
+/// Normalizes a changed-path string into a repo-relative, lowercase, single-slash
+/// form for robust gate matching. The gate's stated posture is to **err toward
+/// flagging** (a false positive only asks a human), so normalization is deliberately
+/// aggressive and matches the case-insensitive convention CrustCore already uses in
+/// its sibling path guards (`crustcore-worktree::tools` `.git` guard,
+/// `crustcore-sandbox` matching — "defense in depth"). It folds the variants an
+/// adversarial or non-canonical path source might use to slip a contract file past an
+/// exact match: backslash separators, repeated slashes, a leading `./` or `/`, a
+/// trailing slash, and case. (Lexical `..` is intentionally not resolved — the
+/// canonical caller is `git diff --name-only`, which never emits `..`/`//`.)
+fn normalize_contract_path(path: &str) -> String {
+    let mut p = path.trim().replace('\\', "/");
+    while p.contains("//") {
+        p = p.replace("//", "/");
+    }
+    // Strip any leading "./" segments, then any leading "/" (absolute → repo-relative).
+    while let Some(rest) = p.strip_prefix("./") {
+        p = rest.to_string();
+    }
+    let p = p.trim_start_matches('/').trim_end_matches('/');
+    p.to_ascii_lowercase()
+}
+
+/// Whether `path` is a contract file. Matches the canonical [`CONTRACT_FILES`] paths
+/// (after [`normalize_contract_path`], so `docs//policy.md`, `./docs/policy.md`,
+/// `/docs/policy.md`, `docs/policy.md/`, `docs\policy.md`, and `DOCS/POLICY.MD` all
+/// flag), and additionally **any** `Cargo.toml`/`Cargo.lock` (a dependency manifest
+/// anywhere is dependency-policy-sensitive — `CLAUDE.md` §6.4 "no drive-by dependency
 /// additions"). Erring toward flagging is correct: a flagged change only *requires a
 /// human*, it never weakens anything.
 #[must_use]
 pub fn is_contract_file(path: &str) -> bool {
-    let p = path.trim().trim_start_matches("./");
-    if CONTRACT_FILES.contains(&p) {
+    let p = normalize_contract_path(path);
+    if CONTRACT_FILES.iter().any(|c| c.eq_ignore_ascii_case(&p)) {
         return true;
     }
-    let base = p.rsplit('/').next().unwrap_or(p);
-    matches!(base, "Cargo.toml" | "Cargo.lock")
+    let base = p.rsplit('/').next().unwrap_or(&p);
+    matches!(base, "cargo.toml" | "cargo.lock")
 }
 
 /// The contract-file gate's decision for a set of changed paths.
@@ -296,7 +321,9 @@ pub fn contract_gate(changed_paths: &[&str]) -> GateDecision {
     let mut touched: Vec<String> = changed_paths
         .iter()
         .filter(|p| is_contract_file(p))
-        .map(|p| p.trim().trim_start_matches("./").to_string())
+        // Report the path as the caller gave it (trimmed) so the maintainer sees the
+        // actual diff path; matching itself is normalization-robust (is_contract_file).
+        .map(|p| p.trim().to_string())
         .collect();
     if touched.is_empty() {
         return GateDecision::AutoAdvanceAllowed;
@@ -480,6 +507,42 @@ mod tests {
         // A dependency manifest anywhere is dependency-policy-sensitive.
         assert!(is_contract_file("crates/crustcore-mcp/Cargo.toml"));
         assert!(is_contract_file("./Cargo.lock"));
+    }
+
+    #[test]
+    fn contract_gate_is_normalization_robust() {
+        // The gate errs toward flagging: path variants an adversarial / non-canonical
+        // source might use to dodge an exact match are all still flagged.
+        for variant in [
+            "docs//policy.md",    // repeated slash
+            "docs///policy.md",   // many slashes
+            ".//docs/policy.md",  // leading ./ + repeated slash
+            "/docs/policy.md",    // leading slash (absolute-ish)
+            "docs/policy.md/",    // trailing slash
+            "docs\\policy.md",    // backslash separator
+            "Docs/Policy.md",     // mixed case
+            "DOCS/POLICY.MD",     // upper case
+            "  docs/policy.md  ", // surrounding whitespace
+            "crates//crustcore-secrets/src/lib.rs",
+            "CRATES/CRUSTCORE-POLICY/SRC/DECISION.RS",
+            "crates/crustcore-mcp/cargo.toml", // lowercased manifest basename
+        ] {
+            assert!(
+                is_contract_file(variant),
+                "normalization-robust gate failed to flag {variant:?}"
+            );
+            assert!(
+                matches!(
+                    contract_gate(&[variant]),
+                    GateDecision::RequiresMaintainerApproval { .. }
+                ),
+                "contract_gate failed to flag {variant:?}"
+            );
+        }
+        // A genuinely different file that merely shares a basename is NOT a false
+        // positive (no suffix matching): vendored copies stay out of the gate.
+        assert!(!is_contract_file("vendor/CLAUDE.md"));
+        assert!(!is_contract_file("docs/policy.md.bak"));
     }
 
     // --- self-PR workflow (P15.4) — draft only, gate-blocked on contract files ---
