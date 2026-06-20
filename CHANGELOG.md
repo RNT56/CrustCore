@@ -30,6 +30,18 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **v0.2 P5-join — receipt ↔ event-log join (`verify_against_log`).** Closes the last
+  audit-join seam (the long-standing `TODO(P5)` in `crustcore-receipts`): a new
+  `crustcore_receipts::join` module cross-checks that every receipt's `event_seq`
+  resolves to a frame that exists, is a `ToolCallCompleted`, and carries the same
+  `task_id`/`job_id` — so a receipt is provably tied to a *logged* event, not merely
+  self-consistent (`NoFrameAtSeq`/`NotAToolCompletion`/`TaskMismatch`/`JobMismatch`).
+  To keep `crustcore-receipts` dependency-free (it links into nano), the join takes a
+  log-agnostic `FrameRef` per frame instead of depending on the event-log crate; the
+  caller extracts them from its `EventLog`. The `selftest` path exercises the join
+  end to end against real `EventLog` + `ReceiptChain` artifacts (now reports
+  `receipt↔log JOINED`). 6 unit tests; `docs/receipts.md` §8 updated. First v0.2
+  Wave-1 phase (see [`docs/roadmap-v0.2.md`](./docs/roadmap-v0.2.md)).
 - **Phase 16 — release hardening (P16.1–P16.7).** Production/audit tooling, all
   reversible and std-only (the irreversible, keyed steps — signing, the CI release
   workflow — are documented contracts, not wired with secrets):
@@ -742,6 +754,7 @@ agent/PR/role/size/invariant audit trail.
 | 2026-06-17 | P8 hardening | Fix the 7 confirmed findings from a 6-dimension adversarial review (7 refuted/out-of-scope): rewrite `Redactor::redact` as collect-spans→merge-overlaps→splice (fixes a real fragment-leak when two secrets share an edge substring + makes redaction a fixed point, RC-1/RC-2/ROB-1); make `Redactor` non-`Clone` + zeroize needles on drop (SC-1); make `Tainted<T>` non-`Clone` with a non-revealing `Debug` placeholder (LTS-1/CDF-1, S5); single-source the redaction marker (CDF-2). Regression tests added. | `claude/p8-secrets` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (411.9 KiB, 51.5%) | Strengthens 1/2 (no secret fragment crosses a boundary), 3 (taint carrier no longer Debug-leaks); none weakened |
 | 2026-06-17 | P7 hardening | Fix the 3 confirmed findings from a 7-dimension adversarial review (14 refuted/out-of-scope): (med) cap `NetHelper::probe`/`complete` reads from a misbehaving helper (`MAX_REGISTRY_MODELS`/`MAX_STREAM_BYTES`) so it cannot OOM/hang the caller; (low) enforce `MAX_LINE_BYTES` on the newline branch of `read_line_bounded`; (low) `xtask forbidden-deps` now also gates the `--features net` tree (no `crustcore-net`/HTTP-TLS linked). Regression tests added. | `claude/p7-net` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (411.9 KiB, 51.5%) | Strengthens 7 (bounded untrusted helper output), 20 (net-boundary now CI-gated); none weakened |
 | 2026-06-17 | P6 hardening | Fix the 5 confirmed findings from a 7-dimension adversarial review (7 refuted/out-of-scope): (high) move the runner stdin write to a dedicated thread so a non-draining worker can't hang `run()` past the timeout (invariants 11/12); (med) parse `git status -z` so quoted/space/non-ASCII paths reach confinement+classification verbatim; (med) new `git_worktree_diff` (intent-to-add + `diff HEAD`) so new-file content is in the diff and patch content-address; (med) stream `run_git` output into capped buffers (no unbounded-output OOM from a hostile worktree). Added regression tests for each. Full sandboxed path re-validated in a privileged container. | `claude/p6-backend` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (411.9 KiB, 51.5%) | Strengthens 11/12 (bounded/killable execution), 7 (verbatim-path confinement), 6 (faithful re-derived diff); none weakened |
+| 2026-06-20 | v0.2 P5-join | Implement the receipt↔event-log join, closing the `TODO(P5)` in crustcore-receipts: new `join` module — `verify_against_log(&[ToolReceipt], &[FrameRef]) -> JoinStatus` cross-checks every receipt's `event_seq` resolves to an existing `ToolCallCompleted` frame with matching task/job (`NoFrameAtSeq`/`NotAToolCompletion`/`TaskMismatch`/`JobMismatch`). Kept dependency-free (no eventlog dep) via a log-agnostic `FrameRef` the caller extracts — receipts stays nano-tiny. Wired end-to-end through `selftest` (now prints `receipt↔log JOINED`); resolved the `event_seq` TODO doc; updated `docs/receipts.md` §8. 6 unit tests; no contract files touched. First v0.2 Wave-1 phase. | `claude/p5-join` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (412.0 KiB, 51.5%; +32 B) | Strengthens 10 (a receipt is provably tied to a logged event, not just self-consistent); none weakened |
 
 ---
 

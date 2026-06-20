@@ -21,7 +21,8 @@ use crustcore_cli::{Command, RunArgs};
 use crustcore_eventlog::{ChainStatus, EventLog, FrameMeta};
 use crustcore_kernel::{Actor, Event, EventKind, Kernel, Visibility};
 use crustcore_policy::{PolicySnapshot, RiskProfile, SandboxExecCap};
-use crustcore_receipts::{MacKey, ReceiptChain};
+use crustcore_receipts::join::{verify_against_log, FrameRef};
+use crustcore_receipts::{MacKey, ReceiptChain, ReceiptParams};
 use crustcore_sandbox::SandboxProfile;
 use crustcore_types::hash::sha256;
 use crustcore_types::{EventSeq, JobId, ScopeId, TaskId, Timestamp, ToolCallId};
@@ -622,7 +623,7 @@ fn selftest() -> ExitCode {
     let mut kernel = Kernel::new(PolicySnapshot::new(RiskProfile::Supervised));
     let actions = kernel.step(Event::internal(EventKind::TaskCreated));
 
-    // Event-log pipeline: append a couple of frames and verify the chain.
+    // Event-log pipeline: append frames (incl. a completed tool call) and verify.
     let mut log = EventLog::new();
     log.append(
         &FrameMeta::new(1, EventKind::TaskCreated)
@@ -630,21 +631,55 @@ fn selftest() -> ExitCode {
             .visibility(Visibility::Internal),
         b"selftest",
     );
+    // A completed tool call at seq 2, owned by task/job 1 — what a receipt anchors to.
     log.append(
-        &FrameMeta::new(2, EventKind::TaskCompleted).actor(Actor::Kernel),
+        &FrameMeta::new(2, EventKind::ToolCallCompleted)
+            .actor(Actor::Kernel)
+            .task(TaskId(1))
+            .job(JobId(1)),
         b"ok",
+    );
+    log.append(
+        &FrameMeta::new(3, EventKind::TaskCompleted).actor(Actor::Kernel),
+        b"done",
     );
     let intact = log.verify().is_intact();
 
+    // Receipt ↔ event-log join (P5; invariant 10, `docs/receipts.md` §6): mint a
+    // receipt anchored to the tool-call frame and cross-verify it against the log,
+    // proving the audit join holds against real `EventLog` + `ReceiptChain` artifacts.
+    let mut receipts = ReceiptChain::new(MacKey::new([0x5a; 32]));
+    let receipt = receipts.mint(&ReceiptParams {
+        task_id: TaskId(1),
+        job_id: JobId(1),
+        tool_call_id: ToolCallId(1),
+        tool_name: b"run_command",
+        args: b"cargo test",
+        result: b"ok",
+        artifacts: &[],
+        event_seq: EventSeq(2),
+    });
+    let frames: Vec<FrameRef> = log
+        .iter()
+        .map(|d| FrameRef {
+            seq: d.frame.seq,
+            tool_completed: d.frame.kind == EventKind::ToolCallCompleted,
+            task_id: d.frame.task_id,
+            job_id: d.frame.job_id,
+        })
+        .collect();
+    let joined = verify_against_log(&[receipt], &frames).is_joined();
+
     println!(
         "crustcore selftest ok: kernel produced {} action(s), next_seq={}; \
-         event log {} frame(s), chain {}",
+         event log {} frame(s), chain {}; receipt↔log {}",
         actions.len(),
         kernel.next_seq().0,
         log.len(),
         if intact { "INTACT" } else { "BROKEN" },
+        if joined { "JOINED" } else { "UNJOINED" },
     );
-    if intact {
+    if intact && joined {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)

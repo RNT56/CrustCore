@@ -10,6 +10,8 @@
 //! hash and MAC are the vendored SHA-256 / HMAC-SHA-256 in `crustcore-types`.
 #![forbid(unsafe_code)]
 
+pub mod join;
+
 use crustcore_types::{hmac_sha256, sha256, ArtifactId, EventSeq, JobId, TaskId, ToolCallId};
 
 /// The genesis `prev_receipt_hash`: the first receipt chains from all-zeros.
@@ -71,10 +73,9 @@ pub struct ToolReceipt {
     /// Hashes of any artifacts produced (bounded).
     pub artifact_hashes: Vec<ArtifactId>,
     /// The event sequence this receipt corresponds to. It is MAC-bound (so it
-    /// cannot be altered), but this crate does not cross-check that the event log
-    /// actually has a matching `ToolCall*` frame at `event_seq` — that join is
-    /// added when the verify loop wires receipts to the log.
-    /// TODO(P5): `verify_against_log` cross-checking `event_seq` → event frame.
+    /// cannot be altered); [`join::verify_against_log`] cross-checks that the event
+    /// log actually has a matching `ToolCallCompleted` frame at `event_seq` with the
+    /// same task/job, closing the audit join (`docs/receipts.md` §6).
     pub event_seq: EventSeq,
     /// Hash of the previous receipt (chains receipts).
     pub prev_receipt_hash: [u8; 32],
