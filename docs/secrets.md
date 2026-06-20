@@ -254,6 +254,26 @@ Acceptance:
 - Tests fail on attempted secret leakage.
 ```
 
+**Status (P8-store — encrypted-file vault implemented).** The trust types
+(`SecretMaterial`/`SecretHandle`), the broker, the redactor/taint boundary, and the
+credential proxy are nano-linked and std-only. The **encrypted-file vault**
+`SecretStore` backend ([`crustcore_secrets::store`]) is implemented behind the
+**`vault-file`** cargo feature (P8.3): `seal_vault(path, passphrase, entries)`
+encrypts secrets to a single file — `magic | version | salt | nonce |
+AES-256-GCM(plaintext)`, with a **scrypt** (N=2¹⁵) passphrase-derived key — and
+`open_vault(path, passphrase)` decrypts them back into an [`InMemoryStore`] the broker
+reads. It **fails closed**: a wrong passphrase or any tampered byte fails AEAD
+decryption (`VaultError::Decrypt`) with no partial/plaintext leak; the on-disk bytes
+never contain a secret value; the decrypted blob and derived key are zeroed after use;
+the decoded length-prefixed contents are bounded and parsed panic-free. **Nano
+isolation (invariants 19/20):** the module and its crypto deps (`aes-gcm`, `scrypt`,
+`getrandom`) are gated behind `vault-file`, never enabled in the nano build, and the
+`xtask forbidden-deps` gate asserts no crypto crate enters the nano graph; the
+`xtask` verify gate clippy- and test-checks the feature explicitly. **What remains**
+(`TODO(P8-store)`): the **native OS keychain** backends (macOS Keychain / Linux Secret
+Service / Windows Credential Manager) — also feature-gated, never in nano — which
+load secrets from the OS store into the same in-memory `SecretStore` shape.
+
 ---
 
 ## 10. Testing requirements

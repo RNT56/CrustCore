@@ -20,13 +20,21 @@
 //!   **only** by the redactor — so the boundary is sealed by construction, not by
 //!   a filter that might be forgotten.
 //!
-//! Scope (Phase 8): the trust-critical types, the redactor/taint boundary, the
-//! broker request flow, and the credential-proxy pattern are implemented here,
-//! nano-linked and std-only. The native OS keychain (P8.2) and the encrypted-file
-//! vault (P8.3) are [`SecretStore`] backends that live **outside nano** (they pull
-//! platform/crypto code) and are `TODO(P8-store)`; [`InMemoryStore`] stands in and
-//! is what tests and the dev broker use. Nano stores only `secret://` handles.
+//! Scope (Phase 8 + P8-store): the trust-critical types, the redactor/taint
+//! boundary, the broker request flow, and the credential-proxy pattern are
+//! implemented here, nano-linked and std-only. The **encrypted-file vault**
+//! [`SecretStore`] backend ([`store`]) is implemented behind the **`vault-file`**
+//! feature (AES-256-GCM + scrypt) — it lives **outside nano** (the feature is never
+//! enabled in the nano build, so nano links no crypto; the `forbidden-deps` gate
+//! asserts it). [`InMemoryStore`] is the std-only dev/test backend and what an
+//! opened vault decrypts *into*. The native OS keychain backends (macOS Keychain /
+//! Linux Secret Service) remain `TODO(P8-store)`. Nano stores only `secret://`
+//! handles.
 #![forbid(unsafe_code)]
+
+/// Encrypted-file vault backend (`vault-file` feature; never in nano).
+#[cfg(feature = "vault-file")]
+pub mod store;
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
