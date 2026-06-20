@@ -12,6 +12,7 @@
 //! (`TODO(P9-net)`), the GitHub loop, and supervision land in later phases.
 #![forbid(unsafe_code)]
 
+pub mod advisor;
 pub mod github;
 pub mod supervisor;
 pub mod telegram;
