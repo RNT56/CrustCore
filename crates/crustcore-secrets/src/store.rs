@@ -81,6 +81,26 @@ pub struct VaultEntry {
     pub value: Vec<u8>,
 }
 
+/// A scratch buffer of secret-bearing bytes, **zeroed on drop** so it never lingers
+/// in freed memory on *any* return path — success or an early error. Uses the crate's
+/// `black_box`-fenced [`crate::scrub`], the same best-effort zeroization
+/// [`crate::SecretMaterial`] uses (a `zeroize`-backed version is the out-of-nano
+/// hardening; `docs/secrets.md` §2.1).
+struct Scrubbed(Vec<u8>);
+impl Drop for Scrubbed {
+    fn drop(&mut self) {
+        crate::scrub(&mut self.0);
+    }
+}
+
+/// The derived AEAD key, zeroed on drop on every path.
+struct ScrubbedKey([u8; 32]);
+impl Drop for ScrubbedKey {
+    fn drop(&mut self) {
+        crate::scrub(&mut self.0);
+    }
+}
+
 /// Derives the 32-byte AEAD key from `passphrase` + `salt` via scrypt.
 fn derive_key(passphrase: &[u8], salt: &[u8]) -> Result<[u8; 32], VaultError> {
     let params = scrypt::Params::new(SCRYPT_LOG_N, SCRYPT_R, SCRYPT_P, 32)
@@ -103,14 +123,22 @@ pub fn seal_vault(
     entries: &[VaultEntry],
 ) -> Result<(), VaultError> {
     // Encode the plaintext: count, then per entry (id, label, value), all bounded.
-    let mut plaintext = Vec::new();
-    plaintext.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    // `plaintext` and (below) `key` are Scrubbed/ScrubbedKey, so they are zeroed on
+    // EVERY return path — including the early `?` errors below — not just on success.
+    let mut plaintext = Scrubbed(Vec::new());
+    plaintext
+        .0
+        .extend_from_slice(&(entries.len() as u32).to_le_bytes());
     for e in entries {
-        plaintext.extend_from_slice(&e.id.0.to_le_bytes());
-        plaintext.extend_from_slice(&(e.label.len() as u16).to_le_bytes());
-        plaintext.extend_from_slice(e.label.as_bytes());
-        plaintext.extend_from_slice(&(e.value.len() as u32).to_le_bytes());
-        plaintext.extend_from_slice(&e.value);
+        plaintext.0.extend_from_slice(&e.id.0.to_le_bytes());
+        plaintext
+            .0
+            .extend_from_slice(&(e.label.len() as u16).to_le_bytes());
+        plaintext.0.extend_from_slice(e.label.as_bytes());
+        plaintext
+            .0
+            .extend_from_slice(&(e.value.len() as u32).to_le_bytes());
+        plaintext.0.extend_from_slice(&e.value);
     }
 
     let mut salt = [0u8; SALT_LEN];
@@ -118,14 +146,11 @@ pub fn seal_vault(
     getrandom::getrandom(&mut salt).map_err(|_| VaultError::Crypto)?;
     getrandom::getrandom(&mut nonce).map_err(|_| VaultError::Crypto)?;
 
-    let mut key = derive_key(passphrase, &salt)?;
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+    let key = ScrubbedKey(derive_key(passphrase, &salt)?);
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key.0));
     let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce), plaintext.as_ref())
+        .encrypt(Nonce::from_slice(&nonce), plaintext.0.as_ref())
         .map_err(|_| VaultError::Crypto)?;
-    // Scrub the plaintext + key; they must not linger in freed memory.
-    plaintext.iter_mut().for_each(|b| *b = 0);
-    key.iter_mut().for_each(|b| *b = 0);
 
     let mut out = Vec::with_capacity(HEADER_LEN + ciphertext.len());
     out.extend_from_slice(&VAULT_MAGIC);
@@ -157,16 +182,16 @@ pub fn open_vault(path: &Path, passphrase: &[u8]) -> Result<InMemoryStore, Vault
     let nonce = &bytes[5 + SALT_LEN..HEADER_LEN];
     let ciphertext = &bytes[HEADER_LEN..];
 
-    let mut key = derive_key(passphrase, salt)?;
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+    let key = ScrubbedKey(derive_key(passphrase, salt)?);
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key.0));
     // AEAD: a wrong key (passphrase) or any tamper makes this Err — fail closed.
-    let decrypt = cipher.decrypt(Nonce::from_slice(nonce), ciphertext);
-    key.iter_mut().for_each(|b| *b = 0);
-    let mut plaintext = decrypt.map_err(|_| VaultError::Decrypt)?;
-
-    let store = decode_entries(&plaintext);
-    plaintext.iter_mut().for_each(|b| *b = 0); // scrub the decrypted blob
-    store
+    // `key` + `plaintext` are scrubbed on drop on every path (success or decode error).
+    let plaintext = Scrubbed(
+        cipher
+            .decrypt(Nonce::from_slice(nonce), ciphertext)
+            .map_err(|_| VaultError::Decrypt)?,
+    );
+    decode_entries(&plaintext.0)
 }
 
 /// Decodes the length-prefixed plaintext into an [`InMemoryStore`], bounded and
