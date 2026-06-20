@@ -200,7 +200,11 @@ fn map_status(status: u16, body: &str) -> GitHubError {
         401 | 403 => GitHubError::Unauthorized,
         404 => GitHubError::NotFound,
         422 => {
-            // Extract GitHub's message without echoing arbitrary untrusted content.
+            // Carry only GitHub's bounded `message` field (e.g. "a PR already
+            // exists"), not the whole error body. It is still **untrusted** GitHub
+            // content (invariant 7) — this surfaces to the operator/daemon, which
+            // redacts it through the `Redactor` before any model visibility; it never
+            // contains CrustCore's own token (GitHub does not echo request headers).
             let msg = serde_json::from_str::<serde_json::Value>(body)
                 .ok()
                 .and_then(|v| v["message"].as_str().map(str::to_string))
