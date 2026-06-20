@@ -6,9 +6,13 @@
 //! kernel by feeding it events and executing the actions it emits
 //! (`docs/telegram.md`, `docs/github.md`, `docs/maintainer-agent.md`).
 //!
-//! Status: Phase 0 scaffold (std only). The supervised event loop lands in
-//! Phase 9/10 (`TODO(P9.*/P10.*)`).
+//! Status: the **Telegram runtime channel** logic ([`telegram`]) is implemented
+//! (Phase 9: allowlist, dedupe, normalization, commands, queue/steer, nonce
+//! approvals, typed redacted outbound). The Bot API HTTP long-polling/send
+//! (`TODO(P9-net)`), the GitHub loop, and supervision land in later phases.
 #![forbid(unsafe_code)]
+
+pub mod telegram;
 
 /// Surfaces the daemon supervises. Marker enum so the crate is real.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

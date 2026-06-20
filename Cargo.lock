@@ -50,6 +50,8 @@ version = "0.1.0"
 dependencies = [
  "crustcore-kernel",
  "crustcore-net",
+ "crustcore-policy",
+ "crustcore-secrets",
  "crustcore-types",
 ]
 
