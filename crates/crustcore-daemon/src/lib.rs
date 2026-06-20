@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 
 pub mod github;
+pub mod supervisor;
 pub mod telegram;
 
 /// Surfaces the daemon supervises. Marker enum so the crate is real.
