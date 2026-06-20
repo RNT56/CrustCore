@@ -120,16 +120,52 @@ impl RepoRegistry {
 // Git credential-proxy push validation (P10.4) — the policy checkpoint
 // ---------------------------------------------------------------------------
 
-/// A push the in-sandbox git wants to make, presented to the credential proxy.
+/// A push the in-sandbox git wants to make, presented to the credential proxy as a
+/// **structured descriptor** — never a raw, re-parseable string. The trusted
+/// credential-helper wrapper (`TODO(P10-net)`) parses git's argv once and fills
+/// this; the validator then checks **every** ref and the explicit force flag, so a
+/// `git push origin a:b c:main` can never smuggle an unvalidated second ref past
+/// the proxy (`docs/github.md` §4.1 "refspec smuggling"). A single string field was
+/// the original mistake: it let a multi-refspec line hide a protected/force update.
 #[derive(Debug, Clone)]
 pub struct PushRequest {
     /// The `origin` repo the worktree is configured for (`owner/name`).
     pub repo: String,
     /// The host the auth request is for.
     pub host: String,
-    /// The git refspec (e.g. `refs/heads/crustcore/x:refs/heads/crustcore/x`, or a
-    /// `+`-prefixed force update).
-    pub refspec: String,
+    /// Whether git asked for a force update (`--force`/`-f`/`--force-with-lease`/
+    /// `--force-if-includes`, parsed by the helper via [`is_force_flag`]). Denied by
+    /// default regardless of the refs.
+    pub force: bool,
+    /// Each individual `src:dst` refspec git wants to push (one entry per ref).
+    pub refspecs: Vec<String>,
+}
+
+impl PushRequest {
+    /// Builds a request from the helper-parsed components.
+    #[must_use]
+    pub fn new(
+        repo: impl Into<String>,
+        host: impl Into<String>,
+        force: bool,
+        refspecs: Vec<String>,
+    ) -> Self {
+        PushRequest {
+            repo: repo.into(),
+            host: host.into(),
+            force,
+            refspecs,
+        }
+    }
+}
+
+/// Whether a git CLI token is a force flag (any `--force…` spelling, or `-f`). The
+/// credential-helper wrapper uses this when parsing git's argv to set
+/// [`PushRequest::force`], so flag-spelling games (`--force-with-lease`,
+/// `--force-if-includes`) cannot evade the deny.
+#[must_use]
+pub fn is_force_flag(token: &str) -> bool {
+    token == "-f" || token.starts_with("--force")
 }
 
 /// Why the credential proxy denied a push (`docs/github.md` §4, §4.1). On any of
@@ -178,10 +214,11 @@ impl core::fmt::Display for PushDenied {
 const ALLOWED_HOSTS: &[&str] = &["github.com", "api.github.com"];
 
 /// Validates a push at the credential-proxy checkpoint against `cap`. This is what
-/// keeps tokens scoped: the repo must match the cap, the destination branch must be
-/// under the cap's prefix and not protected, a force update is denied, and an
-/// unexpected host is denied. Returns `Ok` only for an in-scope, non-destructive
-/// push (`docs/github.md` §4).
+/// keeps tokens scoped: the repo must match the cap, the host must be known, a force
+/// update is denied, and **every** refspec's destination must be under the cap's
+/// prefix and not protected. Returns `Ok` only when *all* refs are in-scope and
+/// non-destructive (`docs/github.md` §4) — fail-closed: any single bad ref denies
+/// the whole push.
 ///
 /// # Errors
 /// [`PushDenied`] for any out-of-scope, destructive, or off-host push.
@@ -195,29 +232,53 @@ pub fn validate_push(cap: &GitHubWriteCap, req: &PushRequest) -> Result<(), Push
             allowed: cap.repo.0.as_str().to_string(),
         });
     }
-    // Force update: a `+` anywhere a ref begins, or an explicit --force token.
-    if req.refspec.starts_with('+')
-        || req.refspec.contains(":+")
-        || req
-            .refspec
-            .split_whitespace()
-            .any(|t| t == "--force" || t == "-f")
-    {
+    // Force is the explicit flag the helper parsed (covers every `--force…`
+    // spelling). Deny-default; never approvable through this path (§3.1).
+    if req.force {
         return Err(PushDenied::ForcePush);
     }
-    // Destination ref is the part after the last ':' (or the whole spec).
-    let dst = req.refspec.rsplit(':').next().unwrap_or(&req.refspec);
-    let branch = dst
-        .trim()
-        .strip_prefix("refs/heads/")
-        .unwrap_or_else(|| dst.trim());
-    if branch == "main" || branch == "master" {
-        return Err(PushDenied::ProtectedBranch(branch.to_string()));
-    }
-    if !branch.starts_with(cap.branch_prefix.0.as_str()) {
-        return Err(PushDenied::BranchOutsidePrefix(branch.to_string()));
+    // Validate EVERY refspec; deny if any is destructive or out of scope.
+    for spec in &req.refspecs {
+        let spec = spec.trim();
+        // A single structured refspec must not itself carry whitespace (a second
+        // refspec) or a per-ref `+` force marker — both are smuggling attempts.
+        if spec.split_whitespace().count() > 1 {
+            return Err(PushDenied::ForcePush); // malformed multi-ref: fail closed
+        }
+        if let Some(rest) = spec.strip_prefix('+') {
+            // Leading `+` is the git per-ref force marker.
+            let _ = rest;
+            return Err(PushDenied::ForcePush);
+        }
+        // Destination ref is the part after the (single) ':' — or the whole spec for
+        // a bare ref. `rsplit` is fine now that each spec is a single refspec.
+        let dst = spec.rsplit(':').next().unwrap_or(spec);
+        let branch = dst.strip_prefix("refs/heads/").unwrap_or(dst);
+        if branch == "main" || branch == "master" || branch == "HEAD" {
+            return Err(PushDenied::ProtectedBranch(branch.to_string()));
+        }
+        if !branch_under_prefix(branch, cap.branch_prefix.0.as_str()) {
+            return Err(PushDenied::BranchOutsidePrefix(branch.to_string()));
+        }
     }
     Ok(())
+}
+
+/// Whether `branch` is under `prefix` at a **segment boundary** — so a prefix of
+/// `crustcore` does not match `crustcore-evil/x`, and a prefix with or without a
+/// trailing `/` behaves the same. Rejects `.`/`..` path-traversal segments and an
+/// empty prefix (fail closed). Shared shape with the backend's `open_pr` gate so the
+/// two checks cannot diverge (`docs/github.md` §4).
+#[must_use]
+pub fn branch_under_prefix(branch: &str, prefix: &str) -> bool {
+    if branch.split('/').any(|seg| seg == ".." || seg == ".") {
+        return false;
+    }
+    let prefix = prefix.trim_end_matches('/');
+    if prefix.is_empty() {
+        return false;
+    }
+    branch == prefix || branch.starts_with(&format!("{prefix}/"))
 }
 
 // ---------------------------------------------------------------------------
@@ -321,13 +382,18 @@ pub struct IngestedComment {
     pub author: BoundedText,
 }
 
-/// Ingests an untrusted comment: marks it tainted and produces a redacted view.
-/// **Confers no authority** — it is wrapped as data with the invariant-7 reminder.
+/// Cap on ingested comment/CI-log text (bounded everything; invariant 11).
+pub const MAX_COMMENT_BYTES: usize = 64 * 1024;
+
+/// Ingests an untrusted comment: bounds it, marks it tainted, and produces a
+/// redacted view. **Confers no authority** — it is wrapped as data with the
+/// invariant-7 reminder.
 #[must_use]
 pub fn ingest_comment(author: &str, raw: &str, redactor: &Redactor) -> IngestedComment {
+    let bounded = BoundedText::truncated(raw, MAX_COMMENT_BYTES);
     IngestedComment {
-        content: Tainted::new(raw.to_string()),
-        redacted: redactor.to_model_visible(raw),
+        content: Tainted::new(bounded.as_str().to_string()),
+        redacted: redactor.to_model_visible(bounded.as_str()),
         author: BoundedText::truncated(author, 256),
     }
 }
@@ -351,11 +417,16 @@ mod tests {
     }
 
     fn push(repo: &str, host: &str, refspec: &str) -> PushRequest {
-        PushRequest {
-            repo: repo.to_string(),
-            host: host.to_string(),
-            refspec: refspec.to_string(),
-        }
+        PushRequest::new(repo, host, false, vec![refspec.to_string()])
+    }
+
+    fn multi(repo: &str, host: &str, force: bool, refspecs: &[&str]) -> PushRequest {
+        PushRequest::new(
+            repo,
+            host,
+            force,
+            refspecs.iter().map(|s| s.to_string()).collect(),
+        )
     }
 
     // --- auth ranking (P10.1/P10.2) ---
@@ -403,36 +474,37 @@ mod tests {
 
     #[test]
     fn force_push_is_denied_by_default() {
-        // Leading `+` and embedded `:+` force forms, and --force.
+        // The explicit force flag (covers every --force… spelling via is_force_flag).
+        assert_eq!(
+            validate_push(
+                &cap(),
+                &PushRequest::new(
+                    "RNT56/CrustCore",
+                    "github.com",
+                    true,
+                    vec!["crustcore/x:crustcore/x".into()]
+                )
+            ),
+            Err(PushDenied::ForcePush)
+        );
+        // A per-ref leading `+` force marker.
         assert_eq!(
             validate_push(
                 &cap(),
                 &push(
                     "RNT56/CrustCore",
                     "github.com",
-                    "+refs/heads/crustcore/x:refs/heads/crustcore/x"
+                    "+crustcore/x:refs/heads/crustcore/x"
                 )
             ),
             Err(PushDenied::ForcePush)
         );
-        assert_eq!(
-            validate_push(
-                &cap(),
-                &push(
-                    "RNT56/CrustCore",
-                    "github.com",
-                    "refs/heads/crustcore/x:+refs/heads/crustcore/x"
-                )
-            ),
-            Err(PushDenied::ForcePush)
-        );
-        assert_eq!(
-            validate_push(
-                &cap(),
-                &push("RNT56/CrustCore", "github.com", "--force crustcore/x")
-            ),
-            Err(PushDenied::ForcePush)
-        );
+        // is_force_flag covers the lease/if-includes spellings the helper parses.
+        assert!(is_force_flag("--force"));
+        assert!(is_force_flag("--force-with-lease"));
+        assert!(is_force_flag("--force-if-includes"));
+        assert!(is_force_flag("-f"));
+        assert!(!is_force_flag("--foreground"));
     }
 
     #[test]
@@ -451,6 +523,91 @@ mod tests {
             ),
             Err(PushDenied::BranchOutsidePrefix(_))
         ));
+        // Segment-boundary: a prefix of "crustcore/" must not match "crustcore-evil".
+        assert!(matches!(
+            validate_push(
+                &cap(),
+                &push(
+                    "RNT56/CrustCore",
+                    "github.com",
+                    "x:refs/heads/crustcore-evil/y"
+                )
+            ),
+            Err(PushDenied::BranchOutsidePrefix(_))
+        ));
+    }
+
+    #[test]
+    fn multi_refspec_smuggling_is_denied() {
+        // Review pv-2/AS-1 (critical): a benign ref + a protected/force ref in one
+        // push must be denied — EVERY ref is validated, fail-closed.
+        // (a) second ref targets a protected branch.
+        assert_eq!(
+            validate_push(
+                &cap(),
+                &multi(
+                    "RNT56/CrustCore",
+                    "github.com",
+                    false,
+                    &["crustcore/ok:refs/heads/crustcore/ok", "x:refs/heads/main"]
+                )
+            ),
+            Err(PushDenied::ProtectedBranch("main".to_string()))
+        );
+        // (b) second ref is out of prefix.
+        assert!(matches!(
+            validate_push(
+                &cap(),
+                &multi(
+                    "RNT56/CrustCore",
+                    "github.com",
+                    false,
+                    &["crustcore/ok:crustcore/ok", "x:refs/heads/feature/evil"]
+                )
+            ),
+            Err(PushDenied::BranchOutsidePrefix(_))
+        ));
+        // (c) a per-ref `+` force marker on a later ref.
+        assert_eq!(
+            validate_push(
+                &cap(),
+                &multi(
+                    "RNT56/CrustCore",
+                    "github.com",
+                    false,
+                    &["crustcore/ok:crustcore/ok", "+crustcore/y:crustcore/y"]
+                )
+            ),
+            Err(PushDenied::ForcePush)
+        );
+        // (d) whitespace smuggled INTO a single refspec entry (a second ref hidden
+        // in one string) is rejected as malformed.
+        assert_eq!(
+            validate_push(
+                &cap(),
+                &multi(
+                    "RNT56/CrustCore",
+                    "github.com",
+                    false,
+                    &["crustcore/ok:crustcore/ok x:refs/heads/main"]
+                )
+            ),
+            Err(PushDenied::ForcePush)
+        );
+        // A genuine multi-ref push where ALL refs are in scope is allowed.
+        assert!(validate_push(
+            &cap(),
+            &multi(
+                "RNT56/CrustCore",
+                "github.com",
+                false,
+                &[
+                    "crustcore/a:crustcore/a",
+                    "crustcore/b:refs/heads/crustcore/b"
+                ]
+            )
+        )
+        .is_ok());
     }
 
     #[test]

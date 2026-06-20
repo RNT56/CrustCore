@@ -86,7 +86,7 @@ pub fn open_pr(
         return Err(IntegrateError::ApprovalExpired);
     }
     let cap = &approval.value;
-    if !head_branch.starts_with(cap.branch_prefix.0.as_str()) {
+    if !branch_under_prefix(head_branch, cap.branch_prefix.0.as_str()) {
         return Err(IntegrateError::BranchNotUnderPrefix(
             head_branch.to_string(),
         ));
@@ -101,6 +101,23 @@ pub fn open_pr(
         body,
         approval_id: approval.approval_id,
     })
+}
+
+/// Whether `branch` is under `prefix` at a **segment boundary** (so a prefix of
+/// `crustcore` does not match `crustcore-evil/x`), rejecting `.`/`..` traversal and
+/// an empty prefix (fail closed). Mirrors `crustcore_daemon::github::branch_under_prefix`
+/// — the credential proxy is the real push-time enforcement; this is the
+/// defense-in-depth check at PR-open time (`docs/github.md` §4).
+#[must_use]
+pub fn branch_under_prefix(branch: &str, prefix: &str) -> bool {
+    if branch.split('/').any(|seg| seg == ".." || seg == ".") {
+        return false;
+    }
+    let prefix = prefix.trim_end_matches('/');
+    if prefix.is_empty() {
+        return false;
+    }
+    branch == prefix || branch.starts_with(&format!("{prefix}/"))
 }
 
 /// Builds the PR body from the verifier's **evidence** — the verifier name, the
