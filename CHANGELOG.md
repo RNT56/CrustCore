@@ -30,6 +30,58 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Phase 8 — secret broker + typed secrets (P8.1–P8.6).** Secret leakage made
+  *unrepresentable* (invariants 1–3; `docs/secrets.md`). **Contract file**
+  `crates/crustcore-secrets/src/lib.rs` (serialized + reviewed):
+  - **Typed secrets (P8.1):** `SecretMaterial` holds raw bytes and implements
+    **none** of `Debug`/`Display`/`Clone`/`Serialize`, with **no** conversion to
+    model-visible text, and zeroizes on drop (dep-free, no-`unsafe`,
+    `black_box`-guarded against dead-store elision). Each forbidden impl is proven
+    by a **compile-fail doctest** (the gold-standard invariant-3 proof, no
+    `trybuild` dep) — so S1/S5 are *structural*, not runtime hopes. `SecretHandle`
+    (id + label) is the only secret-related thing the model sees.
+  - **Redactor / taint (P8.5):** `Redactor` scrubs registered secret values out of
+    any text (longest-match-first); `ModelVisibleText` can be built **only** by the
+    redactor (the model/log/Telegram/GitHub boundary is sealed by construction);
+    `Tainted<T>` declassifies only through the redactor.
+  - **Broker request flow (P8.4):** `SecretBroker` over a `SecretStore` mints a
+    one-shot, scoped, **expiring**, broker-borrowed `ApprovedSecretView` — the only
+    path bytes leave the broker; reuse/expiry are rejected.
+  - **Credential proxy (P8.6):** `CredentialProxy::bearer` consumes a view and
+    yields a non-model-visible `HeaderInjection` (trusted outbound code reads it;
+    logs/model see only the `[REDACTED:label]` form) — the pattern that lets the
+    net/GitHub sidecars authenticate without the key ever entering nano, the
+    sandbox, or model context (unblocks Phase 7's live providers).
+  - **Deferred (`TODO(P8-store)`):** the native OS keychain (P8.2) and encrypted
+    -file vault (P8.3) `SecretStore` backends live **outside nano** (platform/crypto
+    code) and aren't CI-testable cross-platform; the `SecretStore` trait +
+    `InMemoryStore` stand in. Nano stores only `secret://` handles.
+  - **Tests:** broker one-shot/expiry/missing-secret, handles-only, proxy
+    no-leak, the runtime **leak matrix S2–S10** through the redactor, overlapping
+    /empty-secret redaction, `ModelVisibleText`-only-via-redactor, plus the four
+    compile-fail doctests; **un-ignored the red-team fixture**
+    `secret_never_leaks_to_model` (S1–S10, including the sandbox env-strip for S4).
+  - **Nano size impact: +0 KiB** (411.9 KiB, 51.5%) — the broker is dead-code
+    -eliminated in nano (the binary references only handles), invariant 20.
+  - **Hardened per a 6-dimension adversarial review (7 confirmed findings fixed;
+    7 refuted/out-of-scope):**
+    - **(redactor correctness — real leak paths)** the per-needle sequential
+      `replace()` could leave a secret *fragment* when two distinct secrets shared
+      an edge substring (`TOKENONE99` + `99TOKENTWO`), and could re-scan/reintroduce
+      a secret via an emitted marker. Replaced with a **collect-all-spans →
+      merge-overlaps → splice-markers** pass over the *original* text: every byte of
+      any secret occurrence is covered, no fragment survives, and redaction is a
+      fixed point (markers are never re-scanned). `would_leak` is now the exact dual.
+    - **`Redactor` held un-zeroized, `Clone`-able plaintext copies** of every
+      secret → it is now **not `Clone`** and **zeroizes each needle on drop**
+      (shared `scrub` helper); callers take `&Redactor`.
+    - **`Tainted<T>` derived `Debug`/`Clone`**, reopening the secret-Debug leak
+      class (S5) → it is now **not `Clone`** and its `Debug` is a non-revealing
+      `Tainted(<redacted>)` placeholder; a `compile_fail` doctest pins no-`Clone`.
+    - the dead/mismatched `REDACTION_MARKER` constant → a single-source
+      `redaction_marker(label)` helper used everywhere.
+    Regression tests added for each (overlapping-edge no-fragment, fixed-point,
+    `Tainted` Debug-safe).
 - **Phase 7 — `crustcore-net` model-transport protocol + routing engine (P7.1–P7.7).**
   The sidecar architecture that lets nano call the model transport **without
   linking HTTP/TLS** (invariants 17, 11, 19, 20; `docs/model-routing.md`):
@@ -391,7 +443,9 @@ agent/PR/role/size/invariant audit trail.
 | 2026-06-17 | P4 hardening | Fix the Linux-CI timeout-kill hang (procps-ng needs `kill -- -<pgid>`; also SIGKILL the leader via its `Child` handle) — root-caused and verified in a faithful `ubuntu:24.04` container. Address Phase-4 review findings: drop the pid-reuse-TOCTOU clean-exit group sweep; strip JVM/Go/zsh/pager/interpreter-lib exec env vars; reject `HOME`/`XDG_CONFIG_HOME` inside the worktree. | `claude/p4-sandbox` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (295.6 KiB, 37.0%) | Strengthens 9 (sandbox env), 12 (reliable process-tree kill); none weakened |
 | 2026-06-17 | P5.1–P5.6 | Implement the worktree + verify loop: `WorktreeManager` (disposable `git worktree` create/reuse/remove, hardened), `crustcore-backend::verify` (`VerifySpec`/`run_verify` rerun-in-sandbox → mint `VerifiedPatch`+receipt only on pass), seal `VerifiedPatch::from_verifier` crate-private + `complete_task` by value, wire `crustcore run -dir/-goal/-verify`; golden "fix failing test" + worktree lifecycle tests. **Hardened per a 7-dimension adversarial review (8 confirmed findings fixed):** worktree-add filter neutralization+restore (RCE), registered-only worktree reuse + 0700 base, executor-seam unit tests for the mint/Failed/Refused paths, worktree teardown on all `run` paths, `VerifierName` type, extracted+tested verify-spec/exit logic. CI now installs bubblewrap so the real sandbox path runs. Full sandbox path validated in a privileged `ubuntu:24.04` container. | `claude/p5-verify` (PR) | Maintainer agent (Architect/Implementer) | +99.9 KiB (395.5 KiB, 49.4%; runner/sandbox/verify now reachable via `run`) | Enforces 13 (verifier-owned completion, type-sealed), 9 (verify in sandbox), 10 (receipt over the real run), 7 (worktree-add RCE neutralized); none weakened |
 | 2026-06-17 | P6.1–P6.6 | Implement the external backend protocol: the `CodingBackend` contract + `ExternalCommandBackend`/`CodexBackend`/`ClaudeCodeBackend`; `WorkerInput` (type-pinned `secrets:none`/`network:deny`) and JSON contract; `run_external_worker` supervisor validation (sandboxed secret-free run, bounded transcript, `GuardManifest` out-of-root detection, worktree-confined diff extraction via new `git_status_all`, per-path confinement, sensitive-file classification) → `UnverifiedPatch` only; `CommandSpec.stdin` delivery through runner+bwrap; wire `crustcore run -backend/-worker-cmd` (produce → re-derive → confine → verify). Worker-contract tests + runner stdin tests; **un-ignore the `worker_write_outside_worktree_is_rejected` red-team fixture**; implement the `golden_add_small_feature` golden. Full sandboxed worker→verify→complete path validated in a privileged container. | `claude/p6-backend` (PR) | Maintainer agent (Architect/Implementer) | +16.4 KiB (411.9 KiB, 51.5%; worker module + CLI wiring) | Enforces 6 (workers are patch producers, not authorities), 7 (out-of-root/escape rejection), 1–3 + 9 (no-secret, deny-net, sandboxed worker), 13 (only the verifier completes); none weakened |
+| 2026-06-17 | P8.1–P8.6 | Implement the secret broker + typed secrets: `SecretMaterial` (no Debug/Display/Clone/Serialize, no model-visible conversion, zeroize-on-drop; forbidden impls proven by compile-fail doctests), `SecretHandle`, `Redactor`/`ModelVisibleText`/`Tainted` (the taint boundary, S2–S10), `SecretBroker`/`SecretStore`/`InMemoryStore` + one-shot/expiring/borrowed `ApprovedSecretView` (P8.4), `CredentialProxy`→`HeaderInjection` (P8.6). Native keychain (P8.2) + encrypted vault (P8.3) deferred to `TODO(P8-store)` outside nano. Un-ignored the `secret_never_leaks_to_model` red-team fixture (full S1–S10 matrix). **Contract file touched:** `crates/crustcore-secrets/src/lib.rs` (this is the phase that implements it; flagged for review). | `claude/p8-secrets` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (411.9 KiB, 51.5%; broker dead-code-eliminated in nano) | Enforces 1 (no raw creds to LLM), 2 (no unredacted secret logs), 3 (SecretMaterial not Debug/Serialize/Clone/model-visible — compile-fail-proven); credential proxy unblocks P7-live; none weakened |
 | 2026-06-17 | P7.1–P7.7 | Implement the `crustcore-net` model-transport protocol + routing engine: new **std-only `crustcore-netproto`** (flat-JSON helper protocol + codec + `NetHelper`/`SpawnedHelper` client — the only transport code the caller links, no HTTP/TLS); `crustcore-net` engine (`Provider` trait, dynamic registry/probe, `select_candidates`/`apply_budget`/`run_reliable` = Router/Budget/Reliable meta-providers, streaming, `BudgetLedger`, `serve`); `MockProvider`/`default_mock_engine` + helper binary; `crustcore net probe\|complete` gated behind the `net` feature (links only netproto). Live HTTP adapters deferred to `TODO(P7-live)` (need the Phase 8 secret broker + network). Unit + protocol + end-to-end + real-subprocess integration tests. **Contract files touched:** `Cargo.toml`/`Cargo.lock` (add the `crustcore-netproto` workspace member; repoint the `net` feature). | `claude/p7-net` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (411.9 KiB, 51.5%; all net code cfg-gated/sidecar) | Enforces 17 (dynamic registry, no hard-coded models), 11 (budget ceiling + accounting), 19/20 (nano links no HTTP/TLS; net is a spawned helper); pin-by-construction for the no-secret-to-worker path (live providers gated on Phase 8); none weakened |
+| 2026-06-17 | P8 hardening | Fix the 7 confirmed findings from a 6-dimension adversarial review (7 refuted/out-of-scope): rewrite `Redactor::redact` as collect-spans→merge-overlaps→splice (fixes a real fragment-leak when two secrets share an edge substring + makes redaction a fixed point, RC-1/RC-2/ROB-1); make `Redactor` non-`Clone` + zeroize needles on drop (SC-1); make `Tainted<T>` non-`Clone` with a non-revealing `Debug` placeholder (LTS-1/CDF-1, S5); single-source the redaction marker (CDF-2). Regression tests added. | `claude/p8-secrets` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (411.9 KiB, 51.5%) | Strengthens 1/2 (no secret fragment crosses a boundary), 3 (taint carrier no longer Debug-leaks); none weakened |
 | 2026-06-17 | P7 hardening | Fix the 3 confirmed findings from a 7-dimension adversarial review (14 refuted/out-of-scope): (med) cap `NetHelper::probe`/`complete` reads from a misbehaving helper (`MAX_REGISTRY_MODELS`/`MAX_STREAM_BYTES`) so it cannot OOM/hang the caller; (low) enforce `MAX_LINE_BYTES` on the newline branch of `read_line_bounded`; (low) `xtask forbidden-deps` now also gates the `--features net` tree (no `crustcore-net`/HTTP-TLS linked). Regression tests added. | `claude/p7-net` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (411.9 KiB, 51.5%) | Strengthens 7 (bounded untrusted helper output), 20 (net-boundary now CI-gated); none weakened |
 | 2026-06-17 | P6 hardening | Fix the 5 confirmed findings from a 7-dimension adversarial review (7 refuted/out-of-scope): (high) move the runner stdin write to a dedicated thread so a non-draining worker can't hang `run()` past the timeout (invariants 11/12); (med) parse `git status -z` so quoted/space/non-ASCII paths reach confinement+classification verbatim; (med) new `git_worktree_diff` (intent-to-add + `diff HEAD`) so new-file content is in the diff and patch content-address; (med) stream `run_git` output into capped buffers (no unbounded-output OOM from a hostile worktree). Added regression tests for each. Full sandboxed path re-validated in a privileged container. | `claude/p6-backend` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (411.9 KiB, 51.5%) | Strengthens 11/12 (bounded/killable execution), 7 (verbatim-path confinement), 6 (faithful re-derived diff); none weakened |
 

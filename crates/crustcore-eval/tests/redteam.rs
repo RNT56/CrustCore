@@ -280,9 +280,115 @@ fn fabricated_tool_result_is_rejected() {
     assert!(!crustcore.verify(&[tampered]).is_intact());
 }
 
+/// Red-team (P8.5; `docs/security-model.md` §5 leak matrix S1–S10): a known
+/// sentinel secret is routed toward every forbidden boundary and asserted absent /
+/// redacted (invariants 1–3). The model sees only handles; raw bytes leave the
+/// broker only through a one-shot view / credential proxy; any outbound text is
+/// scrubbed by the redactor before it can cross a model/log/Telegram/GitHub/MCP
+/// boundary.
+///
+/// S1 (secret → model output) and S5 (secret → panic/`Debug`) are additionally
+/// proven **structurally** by the compile-fail doctests on
+/// `crustcore_secrets::SecretMaterial` (no `Debug`/`Display`/`Clone` and no
+/// `SecretMaterial -> ModelVisibleText`) — the leak path does not exist in the type
+/// system, not merely caught at runtime.
 #[test]
-#[ignore = "TODO(P8.5): secret never reaches model output / logs / telegram"]
-fn secret_never_leaks_to_model() {}
+fn secret_never_leaks_to_model() {
+    use crustcore_sandbox::{sanitize_env, SandboxProfile};
+    use crustcore_secrets::{
+        CredentialProxy, InMemoryStore, SecretAvailability, SecretBroker, ViewError,
+    };
+    use crustcore_types::{ApprovalId, SecretId, Timestamp};
+    use std::collections::BTreeMap;
+
+    const SENTINEL: &str = "sk-LEAKSENTINEL-9f3a";
+
+    let mut store = InMemoryStore::new();
+    store.insert(SecretId(1), "model-key", SENTINEL.as_bytes().to_vec());
+    let broker = SecretBroker::new(store);
+    let now = Timestamp::from_millis(1000);
+
+    // The model only ever sees handles + availability — never bytes.
+    let handles = broker.handles();
+    assert_eq!(handles.len(), 1);
+    assert!(
+        !format!("{handles:?}").contains("SENTINEL"),
+        "handle debug must not carry the secret"
+    );
+    assert_eq!(
+        broker.availability(SecretId(1)),
+        SecretAvailability::Available
+    );
+
+    // S2 stdout, S3 stderr, S6 tool error, S7 GitHub error, S8 Telegram draft,
+    // S9 external-worker transcript, S10 MCP result — each forbidden boundary's
+    // outbound text is scrubbed by the broker's redactor before crossing.
+    let r = broker.redactor();
+    for (label, text) in [
+        (
+            "S2 shell stdout",
+            format!("$ deploy --token {SENTINEL}\nok\n"),
+        ),
+        ("S3 shell stderr", format!("auth failed for {SENTINEL}")),
+        (
+            "S6 tool error",
+            format!("ToolError: bad credential {SENTINEL}"),
+        ),
+        (
+            "S7 github api error",
+            format!("403: token {SENTINEL} forbidden"),
+        ),
+        ("S8 telegram draft", format!("shipping with {SENTINEL}")),
+        (
+            "S9 worker transcript",
+            format!("ran: git push using {SENTINEL}"),
+        ),
+        ("S10 mcp result", format!("{{\"token\": \"{SENTINEL}\"}}")),
+    ] {
+        assert!(
+            r.would_leak(&text),
+            "{label}: fixture should contain the secret"
+        );
+        let safe = r.redact(&text);
+        assert!(
+            !safe.contains(SENTINEL),
+            "{label}: secret survived redaction: {safe}"
+        );
+        // The sealed model-visible form is likewise scrubbed (S1 at runtime).
+        assert!(
+            !r.to_model_visible(&text).as_str().contains(SENTINEL),
+            "{label}: model-visible text leaked the secret"
+        );
+    }
+
+    // S4 (env dump): a secret-bearing env var is stripped before sandbox entry, so
+    // a child / env dump never inherits it (invariant 2; docs/sandbox.md).
+    let mut env = BTreeMap::new();
+    env.insert("MODEL_API_KEY".to_string(), SENTINEL.to_string());
+    env.insert("PATH".to_string(), "/usr/bin:/bin".to_string());
+    let sanitized = sanitize_env(&env, &SandboxProfile::default_sandboxed(), None).unwrap();
+    assert!(
+        !sanitized.contains_key("MODEL_API_KEY"),
+        "a *_KEY env var must be stripped before the sandbox"
+    );
+    assert!(
+        !format!("{sanitized:?}").contains("SENTINEL"),
+        "sanitized env must not carry the secret"
+    );
+
+    // The only sanctioned byte path is the one-shot credential proxy, and even
+    // there the model/log only sees the redacted header — never the token.
+    let view = broker
+        .authorize(SecretId(1), ApprovalId(1), now, 5000)
+        .unwrap();
+    let injection = CredentialProxy::bearer(&view, now, "model-key").unwrap();
+    assert!(
+        !injection.redacted().contains("SENTINEL"),
+        "the proxy's loggable form must not carry the secret"
+    );
+    // One-shot: the view cannot be reused to exfiltrate again.
+    assert_eq!(view.expose(now), Err(ViewError::AlreadyConsumed));
+}
 
 /// Red-team (P6.6, R6): a malicious external worker writes **outside** its
 /// disposable worktree — the classic escape is appending an attacker key to
