@@ -21,3 +21,4 @@ crustcore-worktree = { workspace = true }
 crustcore-sandbox = { workspace = true }
 crustcore-daemon = { workspace = true }
 crustcore-mcp = { workspace = true }
+crustcore-index = { workspace = true }

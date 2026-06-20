@@ -10,6 +10,10 @@ description = "Optional repo memory / code intelligence for CrustCore."
 
 [dependencies]
 crustcore-types = { workspace = true }
-# TODO(P14): optional SQLite/redb store, repo summaries, symbol graph,
-# AST/tree-sitter/LSP, embeddings, failure/convention memory — all optional and
-# never linked into nano. Memory is retrieved context, never authority.
+crustcore-secrets = { workspace = true }
+# TODO(P14): the std-only retrieval/compaction core (repo map/capsule, grep
+# code-intel, memory store, redacted+bounded context selection) is implemented.
+# Still deferred (all optional, never linked into nano): the live
+# `git ls-files`/`git grep` invocation (`TODO(P14-exec)`), a persistent
+# SQLite/redb store (`TODO(P14-store)`), and AST/tree-sitter/LSP/embeddings
+# code-intel (`TODO(P14-intel)`). Memory is retrieved context, never authority.

@@ -62,6 +62,7 @@ dependencies = [
  "crustcore-backend",
  "crustcore-daemon",
  "crustcore-eventlog",
+ "crustcore-index",
  "crustcore-kernel",
  "crustcore-mcp",
  "crustcore-path",
@@ -106,6 +107,7 @@ dependencies = [
 name = "crustcore-index"
 version = "0.1.0"
 dependencies = [
+ "crustcore-secrets",
  "crustcore-types",
 ]
 
