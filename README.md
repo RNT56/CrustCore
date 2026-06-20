@@ -7,8 +7,8 @@
 **A sub-800 kB Rust verifier kernel that owns authorization, verification, and audit — so a patch ships because the tests passed, not because a model said so.**
 
 [![CI](https://github.com/RNT56/CrustCore/actions/workflows/ci.yml/badge.svg)](https://github.com/RNT56/CrustCore/actions/workflows/ci.yml)
-&nbsp;![nano size](https://img.shields.io/badge/nano-411.9_KiB_%2F_800_KiB-2ea44f)
-&nbsp;![tests](https://img.shields.io/badge/tests-267_passing-2ea44f)
+&nbsp;![nano size](https://img.shields.io/badge/nano-412.0_KiB_%2F_800_KiB-2ea44f)
+&nbsp;![tests](https://img.shields.io/badge/tests-297_passing-2ea44f)
 &nbsp;![invariants](https://img.shields.io/badge/invariants-20_enforced-1f6feb)
 &nbsp;![kernel](https://img.shields.io/badge/kernel-std--only_%C2%B7_no_async%2Fnet%2Fdb-8957e5)
 &nbsp;![rust](https://img.shields.io/badge/rust-1.85+-orange)
@@ -79,7 +79,7 @@ proof, not a vibe.
 
 **📦 Tiny by architecture, not by flag**
 
-The trusted binary is **411.9 KiB stripped** and *refuses* to link Tokio, TLS, a
+The trusted binary is **412.0 KiB stripped** and *refuses* to link Tokio, TLS, a
 database, an MCP SDK, or any provider SDK. A CI size gate fails the build if it
 creeps over 800 kB. Small enough to read end to end in an afternoon.
 
@@ -169,8 +169,8 @@ The entire roadmap (**Phases 0–16**) is implemented and merged, and the v0.1
 
 | | |
 | --- | --- |
-| **Nano binary** | **411.9 KiB** stripped — 51.5 % of the 800 kB budget (CI-gated) |
-| **Tests** | **267** green across the workspace — property tests, no-panic fuzzes, tamper tests, red-team fixtures, goldens |
+| **Nano binary** | **412.0 KiB** stripped — 51.5 % of the 800 kB budget (CI-gated) |
+| **Tests** | **297** green across the workspace — property tests, no-panic fuzzes, tamper tests, red-team fixtures, goldens |
 | **Trusted core** | kernel · hash-chained event log + receipts · symlink-safe path confinement · runner + sandbox · worktree verify loop · type-sealed `VerifiedPatch` |
 | **Capability packs** | model transport · secret broker · Telegram · GitHub · subagent supervisor · advisor · MCP gateway · repo memory · self-improvement — all as **std-only, fully-tested decision cores** |
 | **Red-team** | prompt-injection, path-escape, fake-tool-result, secret-leak, MCP-hidden-instruction, memory-as-authority, and silent-weakening fixtures all pass |
@@ -205,7 +205,7 @@ The entire roadmap (**Phases 0–16**) is implemented and merged, and the v0.1
 cargo xtask verify
 
 # 2. Build the flagship and print size vs. budget.
-cargo xtask size-check          # crustcore-nano: 411.9 KiB / 800 KiB (51.5%)
+cargo xtask size-check          # crustcore-nano: 412.0 KiB / 800 KiB (51.5%)
 
 # 3. Is this host ready to run verified tasks?
 cargo run -p crustcore --no-default-features --features nano -- doctor

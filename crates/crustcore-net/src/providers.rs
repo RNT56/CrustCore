@@ -315,6 +315,16 @@ impl Provider for AnthropicProvider {
             return Err(map_status_error(resp.status, &resp.body));
         }
 
+        // If the provider reported no output usage but text WAS produced — e.g. a
+        // stream truncated (network drop or `MAX_BODY_BYTES` cap) after some
+        // `content_block_delta`s but before the `message_delta` that carries output
+        // usage — estimate the output from the text so a produced completion is never
+        // recorded as zero cost (invariant 11). Mirrors the OpenAI missing-usage path.
+        let output_tokens = if output_tokens == 0 && !text.is_empty() {
+            est_tokens(&text)
+        } else {
+            output_tokens
+        };
         let usage = if input_tokens > 0 || output_tokens > 0 {
             Some(Usage {
                 input_tokens,
@@ -535,6 +545,37 @@ mod tests {
         assert_eq!(out.usage.input_tokens, 12);
         assert_eq!(out.usage.output_tokens, 3000);
         assert_eq!(out.usage.cost_micros, 36_000); // 12000/1k * 3000
+    }
+
+    #[test]
+    fn anthropic_truncated_stream_estimates_output_so_cost_is_not_zero() {
+        // A stream cut off after content deltas but BEFORE `message_delta` (the
+        // output-usage event): text was produced but no output usage arrived. The
+        // adapter must estimate the output, never charge zero for produced text.
+        let http = ReplayClient::new(vec![Canned::streaming(&[
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":7}}}"#,
+            r#"data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"some real output text"}}"#,
+            // ... stream truncated here: no message_delta with output_tokens.
+        ])]);
+        let p = AnthropicProvider::new(
+            "anthropic",
+            "https://api.anthropic.com",
+            Some("k".into()),
+            "2023-06-01",
+            vec![card("claude-x", 12_000)],
+            Rc::new(http),
+            creds(),
+        );
+        let out = p.complete("claude-x", &req("hi"), &mut |_| {}).unwrap();
+        assert_eq!(out.text, "some real output text");
+        assert!(
+            out.usage.output_tokens > 0,
+            "produced output must be estimated"
+        );
+        assert!(
+            out.usage.cost_micros > 0,
+            "produced output must not be billed as zero"
+        );
     }
 
     #[test]
