@@ -268,11 +268,25 @@ impl Engine {
         let candidates = apply_budget(candidates, req)?;
         let fin = run_reliable(&self.providers, candidates, req, sink)?;
         // Account on success (invariant 11).
-        self.ledger.requests += 1;
-        self.ledger.input_tokens += u64::from(fin.usage.input_tokens);
-        self.ledger.output_tokens += u64::from(fin.usage.output_tokens);
-        self.ledger.cost_micros += fin.usage.cost_micros;
-        self.ledger.fallbacks += fin.fallbacks.len() as u64;
+        // Saturating accumulation — monotonic counters never wrap (matching the
+        // kernel's convention for `next_approval`/event-seq/lease counters).
+        self.ledger.requests = self.ledger.requests.saturating_add(1);
+        self.ledger.input_tokens = self
+            .ledger
+            .input_tokens
+            .saturating_add(u64::from(fin.usage.input_tokens));
+        self.ledger.output_tokens = self
+            .ledger
+            .output_tokens
+            .saturating_add(u64::from(fin.usage.output_tokens));
+        self.ledger.cost_micros = self
+            .ledger
+            .cost_micros
+            .saturating_add(fin.usage.cost_micros);
+        self.ledger.fallbacks = self
+            .ledger
+            .fallbacks
+            .saturating_add(fin.fallbacks.len() as u64);
         Ok(fin)
     }
 
