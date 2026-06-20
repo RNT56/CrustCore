@@ -98,9 +98,10 @@ pub enum Recommendation {
     Stop,
 }
 
-/// The advisor's note — persisted as an `advisor note` event in the hash-chained
-/// log (auditable, replayable; `docs/advisor-executor.md` §3 step 4) and injected
-/// into the executor's context **as advice** (step 5). It is **advisory, not
+/// The advisor's note. The supervisor records it as an `advisor note` event in the
+/// hash-chained log (auditable, replayable; `docs/advisor-executor.md` §3 step 4 —
+/// that append is the supervisor's wiring, `TODO(P12-native)`) and injects it into
+/// the executor's context **as advice** (step 5). It is **advisory, not
 /// policy**: there is deliberately no method here that yields an `Approved<T>`, a
 /// capability, or any authorization — the executor must still pass the typed gates
 /// (`docs/advisor-executor.md` §4).
@@ -267,6 +268,7 @@ mod tests {
         assert!(AdvisorTrigger::SecurityRisk.is_high_risk());
         assert!(AdvisorTrigger::BeforeGitHubPush.is_high_risk());
         assert!(AdvisorTrigger::WorkflowModification.is_high_risk());
+        assert!(AdvisorTrigger::DependencyChange.is_high_risk()); // supply-chain risk (docs §2/§5)
         assert!(!AdvisorTrigger::TaskStart.is_high_risk());
         assert!(!AdvisorTrigger::LargePatch.is_high_risk());
     }
