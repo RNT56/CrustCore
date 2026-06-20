@@ -269,7 +269,7 @@ tests, or both, and catalogued in **[INVARIANTS.md](./INVARIANTS.md)**.
 | If you are… | Read |
 | --- | --- |
 | 🤖 An agent/subagent working on the project | **[CLAUDE.md](./CLAUDE.md)** — the single source of truth |
-| 🗺️ Understanding the full plan | [ROADMAP.md](./ROADMAP.md) |
+| 🗺️ Understanding the full plan | [ROADMAP.md](./ROADMAP.md) (v0.1) · [docs/roadmap-v0.2.md](./docs/roadmap-v0.2.md) (v0.2+: light up & expand) |
 | ⛓️ Wanting the rules that can never break | [INVARIANTS.md](./INVARIANTS.md) |
 | 🛡️ Reviewing security posture | [SECURITY.md](./SECURITY.md) · [THREAT_MODEL.md](./THREAT_MODEL.md) · [docs/security-model.md](./docs/security-model.md) |
 | 🤝 Contributing | [CONTRIBUTING.md](./CONTRIBUTING.md) |
