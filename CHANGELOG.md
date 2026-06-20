@@ -30,6 +30,49 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Phase 9 — Telegram runtime channel (P9.1–P9.7).** CrustCore's single default
+  runtime human channel (invariants 5, 15, 16; `docs/telegram.md`), implemented as
+  the **std-only `crustcore-daemon::telegram`** sidecar logic (not in nano):
+  - **Chat-ID allowlist (P9.2):** `ChatAllowlist` with the NullClaw fail-safe —
+    **empty = deny-all** (a leaked bot token is inert without a bound chat),
+    explicit ids, and an explicit-opt-in `*` wildcard. Identity is the allowlisted
+    **chat id**, never the untrusted claimed username; only an allowlisted chat maps
+    to an `AuthorizedUser` (invariant 4).
+  - **Inbound normalization + dedupe (P9.3/P9.7):** `normalize` turns a decoded
+    `RawUpdate` into a typed, allowlist-checked, control-stripped, length-bounded
+    `InboundEnvelope` using the **trusted host receive time**; `Deduper` drops
+    replayed `update_id`s (high-water + bounded window) so a retry never
+    double-applies an `/approve` or double-queues a steer.
+  - **Typed commands (P9.4):** the full `Command` set (`/status`, `/approve`,
+    `/kill`, …) parsed as typed verbs — never free text to a model; unknown/malformed
+    commands become `Command::Unknown` (a typed error reply).
+  - **Queue/steer (P9.5):** `route` sends a plain message to a queued turn
+    (`UserMessageQueued`) and a `!`-prefixed message to a steer
+    (`UserSteerReceived`) — a steer is advisory to reasoning and grants no
+    capabilities.
+  - **Nonce approvals (P9.6):** `ApprovalEngine` mints an `ApprovalNonce` bound to a
+    **hash of the exact operation** with an **expiry**; `resolve` enforces
+    allowlisted chat + matching nonce + not-expired + op-hash match + **single-use**,
+    and on approve mints an operation-bound, expiring `Approved<ApprovedOperation>`
+    via `AuthorizedUser::approve` (the only path — invariant 4). Approving op A never
+    authorizes op B; a stray id is surfaced (`RiskDetected`), not ignored.
+  - **Model does not speak Telegram (P9 §8):** `OutboundRenderer` builds messages
+    from **typed sources** (status/approval/verifier/logs) and always through the
+    Phase-8 `Redactor` → `ModelVisibleText`; there is deliberately **no**
+    `send(text: String)` for arbitrary model text, closing the prompt-injection
+    exfiltration path and keeping the redactor in the loop (invariants 2, 5, 15).
+  - **Deferred (`TODO(P9-net)`):** the Telegram Bot API HTTP long-polling +
+    `sendMessage` (in `crustcore-net`, authenticated by the Phase-8 credential
+    proxy) — needs network + a token, not CI-testable. The logic above works on
+    decoded `RawUpdate`s so it is deterministic and fully tested.
+  - **Tests (P9.7):** empty-allowlist-denies-all, only-bound-chat-controls,
+    spoofed-username-rejected, command parsing, control-strip/bound, queue-vs-steer,
+    update-id dedupe (incl. replay), op-binding (approve A ≠ authorize B),
+    single-use + expiry, non-allowlisted-button dropped, stray-id signal,
+    callback-nonce round-trip, and typed+redacted outbound (a secret in `/logs` is
+    redacted before the draft).
+  - **Nano size impact: +0 KiB** (411.9 KiB, 51.5%) — `crustcore-daemon` is a
+    sidecar behind the `daemon` feature; nano links none of it (invariant 20).
 - **Phase 8 — secret broker + typed secrets (P8.1–P8.6).** Secret leakage made
   *unrepresentable* (invariants 1–3; `docs/secrets.md`). **Contract file**
   `crates/crustcore-secrets/src/lib.rs` (serialized + reviewed):
@@ -443,6 +486,7 @@ agent/PR/role/size/invariant audit trail.
 | 2026-06-17 | P4 hardening | Fix the Linux-CI timeout-kill hang (procps-ng needs `kill -- -<pgid>`; also SIGKILL the leader via its `Child` handle) — root-caused and verified in a faithful `ubuntu:24.04` container. Address Phase-4 review findings: drop the pid-reuse-TOCTOU clean-exit group sweep; strip JVM/Go/zsh/pager/interpreter-lib exec env vars; reject `HOME`/`XDG_CONFIG_HOME` inside the worktree. | `claude/p4-sandbox` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (295.6 KiB, 37.0%) | Strengthens 9 (sandbox env), 12 (reliable process-tree kill); none weakened |
 | 2026-06-17 | P5.1–P5.6 | Implement the worktree + verify loop: `WorktreeManager` (disposable `git worktree` create/reuse/remove, hardened), `crustcore-backend::verify` (`VerifySpec`/`run_verify` rerun-in-sandbox → mint `VerifiedPatch`+receipt only on pass), seal `VerifiedPatch::from_verifier` crate-private + `complete_task` by value, wire `crustcore run -dir/-goal/-verify`; golden "fix failing test" + worktree lifecycle tests. **Hardened per a 7-dimension adversarial review (8 confirmed findings fixed):** worktree-add filter neutralization+restore (RCE), registered-only worktree reuse + 0700 base, executor-seam unit tests for the mint/Failed/Refused paths, worktree teardown on all `run` paths, `VerifierName` type, extracted+tested verify-spec/exit logic. CI now installs bubblewrap so the real sandbox path runs. Full sandbox path validated in a privileged `ubuntu:24.04` container. | `claude/p5-verify` (PR) | Maintainer agent (Architect/Implementer) | +99.9 KiB (395.5 KiB, 49.4%; runner/sandbox/verify now reachable via `run`) | Enforces 13 (verifier-owned completion, type-sealed), 9 (verify in sandbox), 10 (receipt over the real run), 7 (worktree-add RCE neutralized); none weakened |
 | 2026-06-17 | P6.1–P6.6 | Implement the external backend protocol: the `CodingBackend` contract + `ExternalCommandBackend`/`CodexBackend`/`ClaudeCodeBackend`; `WorkerInput` (type-pinned `secrets:none`/`network:deny`) and JSON contract; `run_external_worker` supervisor validation (sandboxed secret-free run, bounded transcript, `GuardManifest` out-of-root detection, worktree-confined diff extraction via new `git_status_all`, per-path confinement, sensitive-file classification) → `UnverifiedPatch` only; `CommandSpec.stdin` delivery through runner+bwrap; wire `crustcore run -backend/-worker-cmd` (produce → re-derive → confine → verify). Worker-contract tests + runner stdin tests; **un-ignore the `worker_write_outside_worktree_is_rejected` red-team fixture**; implement the `golden_add_small_feature` golden. Full sandboxed worker→verify→complete path validated in a privileged container. | `claude/p6-backend` (PR) | Maintainer agent (Architect/Implementer) | +16.4 KiB (411.9 KiB, 51.5%; worker module + CLI wiring) | Enforces 6 (workers are patch producers, not authorities), 7 (out-of-root/escape rejection), 1–3 + 9 (no-secret, deny-net, sandboxed worker), 13 (only the verifier completes); none weakened |
+| 2026-06-20 | P9.1–P9.7 | Implement the Telegram runtime channel logic in `crustcore-daemon::telegram` (std-only sidecar, not in nano): `ChatAllowlist` (empty=deny-all, explicit ids, opt-in wildcard; identity = chat id not username), `normalize` (typed `InboundEnvelope`, control-strip+bound, trusted host time) + `Deduper` (update_id high-water+window), typed `Command` set, `route` (queue vs `!`-steer → `UserMessageQueued`/`UserSteerReceived`), `ApprovalEngine` nonce approvals (operation-bound via op-hash, expiring, single-use → `Approved<ApprovedOperation>` only via `AuthorizedUser::approve`), `OutboundRenderer` (typed sources → redacted `ModelVisibleText`, no model-text path). Bot API HTTP polling/send deferred to `TODO(P9-net)`. 13 spoof/dedupe/approval/redaction tests. No contract files touched (reused existing kernel events + policy approval API). | `claude/p9-telegram` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (411.9 KiB, 51.5%; daemon is a sidecar) | Enforces 5 (supervisor-only channel; subagents can't reach it), 15 (single runtime channel), 16 (allowlist via setup, not DM-to-pair), 4 (only AuthorizedUser mints approvals), 2 (redacted outbound); none weakened |
 | 2026-06-17 | P8.1–P8.6 | Implement the secret broker + typed secrets: `SecretMaterial` (no Debug/Display/Clone/Serialize, no model-visible conversion, zeroize-on-drop; forbidden impls proven by compile-fail doctests), `SecretHandle`, `Redactor`/`ModelVisibleText`/`Tainted` (the taint boundary, S2–S10), `SecretBroker`/`SecretStore`/`InMemoryStore` + one-shot/expiring/borrowed `ApprovedSecretView` (P8.4), `CredentialProxy`→`HeaderInjection` (P8.6). Native keychain (P8.2) + encrypted vault (P8.3) deferred to `TODO(P8-store)` outside nano. Un-ignored the `secret_never_leaks_to_model` red-team fixture (full S1–S10 matrix). **Contract file touched:** `crates/crustcore-secrets/src/lib.rs` (this is the phase that implements it; flagged for review). | `claude/p8-secrets` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (411.9 KiB, 51.5%; broker dead-code-eliminated in nano) | Enforces 1 (no raw creds to LLM), 2 (no unredacted secret logs), 3 (SecretMaterial not Debug/Serialize/Clone/model-visible — compile-fail-proven); credential proxy unblocks P7-live; none weakened |
 | 2026-06-17 | P7.1–P7.7 | Implement the `crustcore-net` model-transport protocol + routing engine: new **std-only `crustcore-netproto`** (flat-JSON helper protocol + codec + `NetHelper`/`SpawnedHelper` client — the only transport code the caller links, no HTTP/TLS); `crustcore-net` engine (`Provider` trait, dynamic registry/probe, `select_candidates`/`apply_budget`/`run_reliable` = Router/Budget/Reliable meta-providers, streaming, `BudgetLedger`, `serve`); `MockProvider`/`default_mock_engine` + helper binary; `crustcore net probe\|complete` gated behind the `net` feature (links only netproto). Live HTTP adapters deferred to `TODO(P7-live)` (need the Phase 8 secret broker + network). Unit + protocol + end-to-end + real-subprocess integration tests. **Contract files touched:** `Cargo.toml`/`Cargo.lock` (add the `crustcore-netproto` workspace member; repoint the `net` feature). | `claude/p7-net` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (411.9 KiB, 51.5%; all net code cfg-gated/sidecar) | Enforces 17 (dynamic registry, no hard-coded models), 11 (budget ceiling + accounting), 19/20 (nano links no HTTP/TLS; net is a spawned helper); pin-by-construction for the no-secret-to-worker path (live providers gated on Phase 8); none weakened |
 | 2026-06-17 | P8 hardening | Fix the 7 confirmed findings from a 6-dimension adversarial review (7 refuted/out-of-scope): rewrite `Redactor::redact` as collect-spans→merge-overlaps→splice (fixes a real fragment-leak when two secrets share an edge substring + makes redaction a fixed point, RC-1/RC-2/ROB-1); make `Redactor` non-`Clone` + zeroize needles on drop (SC-1); make `Tainted<T>` non-`Clone` with a non-revealing `Debug` placeholder (LTS-1/CDF-1, S5); single-source the redaction marker (CDF-2). Regression tests added. | `claude/p8-secrets` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (411.9 KiB, 51.5%) | Strengthens 1/2 (no secret fragment crosses a boundary), 3 (taint carrier no longer Debug-leaks); none weakened |
