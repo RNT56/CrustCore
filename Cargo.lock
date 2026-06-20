@@ -60,6 +60,7 @@ name = "crustcore-eval"
 version = "0.1.0"
 dependencies = [
  "crustcore-backend",
+ "crustcore-daemon",
  "crustcore-eventlog",
  "crustcore-kernel",
  "crustcore-path",
