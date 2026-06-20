@@ -351,6 +351,22 @@ Approvals expire and are operation-bound.      -> §6
 Model does not send arbitrary Telegram text.   -> §8
 ```
 
+**Status (Phase 9 core + P9-net runtime loop).** The trust core (allowlist,
+normalize, dedupe, typed commands, queue/steer routing, nonce-bound approvals, the
+redacted `OutboundRenderer`) is implemented and tested. The **runtime loop** is now
+implemented (P9-net): a `TelegramApi` trait + `TelegramPoller` whose `poll_once`
+long-polls (advancing the offset past every fetched update so Telegram never
+re-delivers), drops replays via the `Deduper`, enforces the allowlist + normalizes,
+and routes survivors to `RuntimeEvent`s the supervisor dispatches — counting
+not-allowlisted updates as a spoof signal. `send_message` accepts **only**
+`ModelVisibleText` (constructible solely via the `Redactor`), so the channel can emit
+nothing but redacted, rendered output and the model never gains a direct outward
+channel (criterion "model does not send arbitrary Telegram text" — now structural).
+Fully CI-tested with a mock transport (offset/dedupe/allowlist/route + redacted-only
+send). **What remains** (`TODO(P9-net-live)`, never CI): the live Bot API HTTP
+(`getUpdates`/`sendMessage` over the spawned `crustcore-net` helper, the bot token in
+the URL path injected by the credential proxy) + a real-token `#[ignore]`d test.
+
 ### 10.1 Testing notes
 
 - **Allowlist:** empty allowlist denies all; non-allowlisted chat/button dropped
