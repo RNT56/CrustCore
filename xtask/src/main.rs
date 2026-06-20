@@ -50,6 +50,7 @@ fn main() -> ExitCode {
         "test" => test(),
         "nano-build" => nano_build().map(|_| ()),
         "size-check" => size_check(),
+        "release" => release(),
         "forbidden-deps" => forbidden_deps(),
         "help" | "--help" | "-h" => {
             print_help();
@@ -82,8 +83,73 @@ fn print_help() {
          \x20 test            cargo test --workspace\n\
          \x20 nano-build      build crustcore-nano (profile nano)\n\
          \x20 size-check      build nano and enforce the size budget\n\
+         \x20 release         build nano, enforce size, emit SHA256SUMS + manifest\n\
          \x20 forbidden-deps  fail if a banned crate is linked into nano\n"
     );
+}
+
+/// Builds a release artifact set for the nano binary (Phase 16, P16.1/P16.2): build
+/// under the nano profile, enforce the size budget, then emit a content checksum
+/// (`SHA256SUMS`) and a human-readable `release-manifest.txt` next to the binary.
+/// "Reproducible enough for audit": the manifest records exactly what was built and
+/// its SHA-256, so a downstream signer (minisign/cosign over `SHA256SUMS` — see
+/// `docs/releasing.md`) and any auditor can verify the bytes. Signing itself is a
+/// keyed, irreversible step done out-of-band, never wired into this offline runner.
+fn release() -> Result<(), String> {
+    let bin = nano_build()?;
+    size_check()?;
+
+    let bytes = std::fs::read(&bin).map_err(|e| format!("cannot read {}: {e}", bin.display()))?;
+    let digest = crustcore_types::hash::sha256(&bytes);
+    let hex = hex_lower(&digest);
+    let size = bytes.len();
+    let name = bin
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "crustcore".to_string());
+    let dir = bin
+        .parent()
+        .ok_or_else(|| "nano binary has no parent dir".to_string())?;
+
+    // SHA256SUMS in the conventional `<hex>  <name>` format (sha256sum -c friendly).
+    let sums = format!("{hex}  {name}\n");
+    let sums_path = dir.join("SHA256SUMS");
+    std::fs::write(&sums_path, &sums)
+        .map_err(|e| format!("cannot write {}: {e}", sums_path.display()))?;
+
+    let pkg_version = env!("CARGO_PKG_VERSION");
+    let manifest = format!(
+        "crustcore release manifest\n\
+         version:     {pkg_version}\n\
+         artifact:    {name}\n\
+         profile:     nano (--no-default-features --features nano)\n\
+         size_bytes:  {size}\n\
+         size_kib:    {:.1}\n\
+         budget_pct:  {:.1}\n\
+         sha256:      {hex}\n",
+        size as f64 / 1024.0,
+        (size as f64 / NANO_BUDGET_BYTES as f64) * 100.0,
+    );
+    let manifest_path = dir.join("release-manifest.txt");
+    std::fs::write(&manifest_path, &manifest)
+        .map_err(|e| format!("cannot write {}: {e}", manifest_path.display()))?;
+
+    println!("\n{manifest}");
+    println!("  wrote {}", sums_path.display());
+    println!("  wrote {}", manifest_path.display());
+    println!("  next: sign SHA256SUMS out-of-band (minisign/cosign) — see docs/releasing.md");
+    Ok(())
+}
+
+/// Lowercase hex encoding of a byte slice (no external dep).
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    s
 }
 
 /// The full verification gate (CLAUDE.md §9.1). Steps run in increasing cost

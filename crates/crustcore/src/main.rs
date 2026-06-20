@@ -54,12 +54,110 @@ fn main() -> ExitCode {
         Command::Run => run_task(&args[1..]),
         Command::Inspect => inspect(args.get(1).map(String::as_str)),
         Command::Export => export(args.get(1).map(String::as_str)),
+        Command::Doctor => doctor(),
         Command::Unknown(cmd) => {
             eprintln!("crustcore: unknown command '{cmd}'\n");
             print!("{}", crustcore_cli::help_text());
             ExitCode::from(2)
         }
     }
+}
+
+/// `crustcore doctor` — check environment readiness (Phase 16, P16.3): is `git`
+/// available, is a sandbox backend present (without one, execution-capable tasks are
+/// **refused** — invariant 9, there is no unsandboxed degrade path), and is a state
+/// directory writable? Prints a per-check report and exits 0 only when nothing
+/// failed. This is an admin/setup command (invariant 16), not a runtime channel.
+fn doctor() -> ExitCode {
+    use crustcore_cli::{CheckStatus, DoctorCheck, DoctorReport};
+    use crustcore_sandbox::BubblewrapBackend;
+
+    let mut report = DoctorReport::new();
+
+    // git — required to create/manage disposable worktrees.
+    report.push(match which("git") {
+        Some(p) => DoctorCheck::new("git", CheckStatus::Ok, format!("found at {p}")),
+        None => DoctorCheck::new(
+            "git",
+            CheckStatus::Fail,
+            "not found on PATH (required for disposable worktrees)",
+        ),
+    });
+
+    // sandbox backend — without one, verified execution is refused on this host.
+    report.push(match BubblewrapBackend::detect() {
+        Some(_) => DoctorCheck::new(
+            "sandbox",
+            CheckStatus::Ok,
+            "bubblewrap backend available (deny-all egress)",
+        ),
+        None => DoctorCheck::new(
+            "sandbox",
+            CheckStatus::Fail,
+            "no sandbox backend (install bubblewrap); execution-capable tasks will be refused",
+        ),
+    });
+
+    // state dir — a writable scratch directory for worktrees/logs.
+    let state = std::env::var_os("CRUSTCORE_STATE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    report.push(match probe_writable(&state) {
+        Ok(()) => DoctorCheck::new(
+            "state-dir",
+            CheckStatus::Ok,
+            format!("writable: {}", state.display()),
+        ),
+        Err(e) => DoctorCheck::new(
+            "state-dir",
+            CheckStatus::Fail,
+            format!("not writable ({}): {e}", state.display()),
+        ),
+    });
+
+    print!("{}", report.render());
+    ExitCode::from(report.exit_code())
+}
+
+/// Finds an executable named `name` on `PATH` (a tiny `which`), returning its full
+/// path. Used by `doctor` only — not a sandboxed-execution path.
+fn which(name: &str) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if is_executable_file(&candidate) {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+/// Whether `p` is a regular file with an executable bit (Unix) / exists (other).
+fn is_executable_file(p: &std::path::Path) -> bool {
+    let Ok(meta) = std::fs::metadata(p) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// Probes that `dir` exists (or can be created) and accepts a write, then cleans up.
+fn probe_writable(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let probe = dir.join(format!(".crustcore-doctor-{}", std::process::id()));
+    std::fs::write(&probe, b"ok")?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
 }
 
 /// `crustcore run -dir <repo> -goal <text> -verify <command>` — create a

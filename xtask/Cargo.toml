@@ -9,3 +9,6 @@ description = "CrustCore workspace task runner (verify, size-check, forbidden-de
 
 [dependencies]
 # std only — the task runner must work in a minimal/offline environment.
+# crustcore-types is itself std-only (vendored SHA-256, no external deps), so the
+# release command can checksum the nano binary without pulling any crypto crate.
+crustcore-types = { workspace = true }

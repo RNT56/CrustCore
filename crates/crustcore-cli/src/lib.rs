@@ -25,6 +25,8 @@ pub enum Command {
     Inspect,
     /// Export the event log as JSONL. Phase 2.
     Export,
+    /// Check environment readiness (git, sandbox backend, state dir). Phase 16.
+    Doctor,
     /// An unrecognized command (carry the token for the error message).
     Unknown(String),
 }
@@ -48,6 +50,7 @@ where
             "run" => Command::Run,
             "inspect" => Command::Inspect,
             "export" => Command::Export,
+            "doctor" => Command::Doctor,
             other => Command::Unknown(other.to_string()),
         },
     }
@@ -105,6 +108,113 @@ pub fn parse_run(args: &[String]) -> Result<RunArgs, String> {
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// `crustcore doctor` — environment readiness (Phase 16, P16.3)
+// ---------------------------------------------------------------------------
+
+/// The status of one readiness check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckStatus {
+    /// The check passed.
+    Ok,
+    /// A non-blocking concern (degraded, but not a hard stop).
+    Warn,
+    /// A blocking problem — the host is not ready to run verified tasks.
+    Fail,
+}
+
+impl CheckStatus {
+    /// A short, stable glyph for the status line.
+    #[must_use]
+    pub fn glyph(self) -> &'static str {
+        match self {
+            CheckStatus::Ok => "ok  ",
+            CheckStatus::Warn => "warn",
+            CheckStatus::Fail => "FAIL",
+        }
+    }
+}
+
+/// One environment readiness check (name + status + a human-readable detail).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorCheck {
+    /// The thing checked (e.g. `git`, `sandbox`, `state-dir`).
+    pub name: &'static str,
+    /// The outcome.
+    pub status: CheckStatus,
+    /// A one-line, bounded explanation.
+    pub detail: String,
+}
+
+impl DoctorCheck {
+    /// Convenience constructor.
+    #[must_use]
+    pub fn new(name: &'static str, status: CheckStatus, detail: impl Into<String>) -> Self {
+        DoctorCheck {
+            name,
+            status,
+            detail: detail.into(),
+        }
+    }
+}
+
+/// The result of `crustcore doctor`: a list of checks, a rendered report, and a
+/// readiness verdict. Pure data + pure rendering so the decision is testable; the
+/// nano binary supplies the actual probes (git on `PATH`, sandbox backend, a
+/// writable state dir).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DoctorReport {
+    /// The checks performed, in display order.
+    pub checks: Vec<DoctorCheck>,
+}
+
+impl DoctorReport {
+    /// An empty report.
+    #[must_use]
+    pub fn new() -> Self {
+        DoctorReport { checks: Vec::new() }
+    }
+
+    /// Adds a check.
+    pub fn push(&mut self, check: DoctorCheck) {
+        self.checks.push(check);
+    }
+
+    /// Whether the host is ready to run verified tasks — true iff **no** check
+    /// failed. `Warn`s do not block (they are degradations, not stops).
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        !self.checks.iter().any(|c| c.status == CheckStatus::Fail)
+    }
+
+    /// The process exit code: 0 when ready, 1 otherwise (admin-tool convention).
+    #[must_use]
+    pub fn exit_code(&self) -> u8 {
+        u8::from(!self.is_ready())
+    }
+
+    /// Renders the human-readable report (one line per check + a verdict line).
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut out = format!("crustcore {VERSION} — environment readiness\n\n");
+        for c in &self.checks {
+            out.push_str(&format!(
+                "  [{}] {:<10} {}\n",
+                c.status.glyph(),
+                c.name,
+                c.detail
+            ));
+        }
+        out.push('\n');
+        if self.is_ready() {
+            out.push_str("ready: this host can run verified tasks.\n");
+        } else {
+            out.push_str("NOT ready: fix the FAIL items above before running tasks.\n");
+        }
+        out
+    }
+}
+
 /// The help text shown by `crustcore --help`.
 #[must_use]
 pub fn help_text() -> String {
@@ -118,6 +228,7 @@ pub fn help_text() -> String {
          \x20   run            Run a verified coding task in a disposable worktree\n\
          \x20   inspect <log>  Verify the event-log hash chain and print a task summary\n\
          \x20   export  <log>  Export the event log as JSONL\n\
+         \x20   doctor         Check environment readiness (git, sandbox, state dir)\n\
          \x20   version        Print version\n\
          \x20   help           Print this help\n\
          \n\
@@ -152,6 +263,8 @@ mod tests {
     fn routes_subcommands() {
         assert_eq!(parse(["run"]), Command::Run);
         assert_eq!(parse(["inspect"]), Command::Inspect);
+        assert_eq!(parse(["export"]), Command::Export);
+        assert_eq!(parse(["doctor"]), Command::Doctor);
         assert_eq!(parse(["nope"]), Command::Unknown("nope".to_string()));
     }
 
@@ -194,5 +307,41 @@ mod tests {
         assert_eq!(a.worker_cmd.as_deref(), Some("/bin/sh -c true"));
         // Backend flags are optional (Phase-5 behavior when omitted).
         assert_eq!(parse_run(&s(&["-dir", "."])).unwrap().backend, None);
+    }
+
+    #[test]
+    fn doctor_report_readiness_and_exit_code() {
+        // All Ok (plus a Warn) → ready, exit 0.
+        let mut r = DoctorReport::new();
+        r.push(DoctorCheck::new(
+            "git",
+            CheckStatus::Ok,
+            "git found on PATH",
+        ));
+        r.push(DoctorCheck::new(
+            "sandbox",
+            CheckStatus::Warn,
+            "bubblewrap missing; install for sandboxed execution",
+        ));
+        assert!(r.is_ready());
+        assert_eq!(r.exit_code(), 0);
+        assert!(r
+            .render()
+            .contains("ready: this host can run verified tasks."));
+
+        // Any Fail → not ready, exit 1.
+        r.push(DoctorCheck::new(
+            "state-dir",
+            CheckStatus::Fail,
+            "state dir not writable",
+        ));
+        assert!(!r.is_ready());
+        assert_eq!(r.exit_code(), 1);
+        assert!(r.render().contains("NOT ready"));
+        // Every check appears in the rendered report.
+        let rendered = r.render();
+        for name in ["git", "sandbox", "state-dir"] {
+            assert!(rendered.contains(name), "report missing check {name}");
+        }
     }
 }
