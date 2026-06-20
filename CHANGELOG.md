@@ -30,6 +30,25 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **v0.2 P7-live — live model providers (OpenAI/OpenRouter/local + Anthropic).** The
+  keystone Wave-1 phase: real credentialed HTTP `Provider` adapters in the spawned
+  `crustcore-net` helper, dropped into the already-tested routing engine **unchanged**
+  (`docs/model-routing.md`). A new `transport::HttpClient` boundary makes the adapters'
+  parse/map/stream/error logic **fully CI-testable with a canned `ReplayClient`** (no
+  network); the real socket (`UreqClient`, `ureq`+rustls) is gated behind the **`live`**
+  cargo feature so the default build, CI, and the spawned mock helper link **no HTTP/TLS
+  stack** — a new `xtask forbidden-deps` check + `xtask clippy-live` enforce it.
+  `OpenAiProvider` (OpenAI/OpenRouter/local) and `AnthropicProvider` stream SSE,
+  concatenate text, parse usage + compute cost, and map 429/5xx→`Unavailable`,
+  context-overflow→`Capability`; a failing request emits **zero** chunks (no
+  partial-output leak on fallback). Credentials resolve per call via a
+  `credsource::CredentialSource` (broker-backed in the live helper) and never reach the
+  model, a log, or the sandbox env (invariants 1–3) — a redacting `AuthHeader` `Debug`
+  + a **secret-leak red-team fixture** prove a sentinel key cannot surface in output or
+  a routed error. `config::parse_providers` reads a handle-only JSON config; `helper
+  --providers <file>` (live) builds a `live_engine`. Live network behind the `#[ignore]`d
+  `live_smoke` test only. **Deps admitted to the sidecar only** (`serde_json`, `ureq`):
+  nano unchanged at 412.0 KiB, forbidden-deps green. 26 unit + 2 integration tests.
 - **v0.2 P5-join — receipt ↔ event-log join (`verify_against_log`).** Closes the last
   audit-join seam (the long-standing `TODO(P5)` in `crustcore-receipts`): a new
   `crustcore_receipts::join` module cross-checks that every receipt's `event_seq`
@@ -755,6 +774,7 @@ agent/PR/role/size/invariant audit trail.
 | 2026-06-17 | P7 hardening | Fix the 3 confirmed findings from a 7-dimension adversarial review (14 refuted/out-of-scope): (med) cap `NetHelper::probe`/`complete` reads from a misbehaving helper (`MAX_REGISTRY_MODELS`/`MAX_STREAM_BYTES`) so it cannot OOM/hang the caller; (low) enforce `MAX_LINE_BYTES` on the newline branch of `read_line_bounded`; (low) `xtask forbidden-deps` now also gates the `--features net` tree (no `crustcore-net`/HTTP-TLS linked). Regression tests added. | `claude/p7-net` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (411.9 KiB, 51.5%) | Strengthens 7 (bounded untrusted helper output), 20 (net-boundary now CI-gated); none weakened |
 | 2026-06-17 | P6 hardening | Fix the 5 confirmed findings from a 7-dimension adversarial review (7 refuted/out-of-scope): (high) move the runner stdin write to a dedicated thread so a non-draining worker can't hang `run()` past the timeout (invariants 11/12); (med) parse `git status -z` so quoted/space/non-ASCII paths reach confinement+classification verbatim; (med) new `git_worktree_diff` (intent-to-add + `diff HEAD`) so new-file content is in the diff and patch content-address; (med) stream `run_git` output into capped buffers (no unbounded-output OOM from a hostile worktree). Added regression tests for each. Full sandboxed path re-validated in a privileged container. | `claude/p6-backend` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (411.9 KiB, 51.5%) | Strengthens 11/12 (bounded/killable execution), 7 (verbatim-path confinement), 6 (faithful re-derived diff); none weakened |
 | 2026-06-20 | v0.2 P5-join | Implement the receipt↔event-log join, closing the `TODO(P5)` in crustcore-receipts: new `join` module — `verify_against_log(&[ToolReceipt], &[FrameRef]) -> JoinStatus` cross-checks every receipt's `event_seq` resolves to an existing `ToolCallCompleted` frame with matching task/job (`NoFrameAtSeq`/`NotAToolCompletion`/`TaskMismatch`/`JobMismatch`). Kept dependency-free (no eventlog dep) via a log-agnostic `FrameRef` the caller extracts — receipts stays nano-tiny. Wired end-to-end through `selftest` (now prints `receipt↔log JOINED`); resolved the `event_seq` TODO doc; updated `docs/receipts.md` §8. 6 unit tests; no contract files touched. First v0.2 Wave-1 phase. | `claude/p5-join` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB (412.0 KiB, 51.5%; +32 B) | Strengthens 10 (a receipt is provably tied to a logged event, not just self-consistent); none weakened |
+| 2026-06-20 | v0.2 P7-live | Implement live model providers in the spawned `crustcore-net` helper: `transport::HttpClient` boundary + `ReplayClient` (CI) + `UreqClient` (`live` feature only); `OpenAiProvider` (OpenAI/OpenRouter/local) + `AnthropicProvider` over it (SSE streaming, usage+cost, 429/5xx→Unavailable, ctx→Capability, success-path-only emission, no-panic on bad SSE); `credsource::CredentialSource`/`StaticCredentials` (per-call header, redacting `AuthHeader` Debug); `config::parse_providers` (handle-only JSON); `live_engine` + `helper --providers`. Engine unchanged (pure drop-in). Maintainer-approved dep admission (user: "proceed — admit the deps"): `serde_json` (sidecar, non-optional) + `ureq` (optional, `live`); **new forbidden-deps check + `xtask clippy-live`** assert the default crustcore-net build links no HTTP/TLS and nano is untouched. Secret-leak red-team fixture (sentinel key never in output/errors) + engine-level cross-adapter fallback over real adapters. Live network behind `#[ignore]`d `live_smoke` only. 26 unit + 2 integration tests; `docs/model-routing.md` §7 updated. No §7.3 contract files touched (Cargo.lock gains the maintainer-approved external deps; crates/crustcore-net/Cargo.toml is not a contract file). | `claude/p7-live` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB nano (412.0 KiB, 51.5%; sidecar-only; HTTP/TLS feature-gated) | Enforces 1–3 (no key to model/log/sandbox — per-call resolution, redacting Debug, leak red-team), 17 (config-driven dynamic registry), 11 (bounded responses, success-only emission), 19/20 (HTTP/TLS confined to the `live`-gated sidecar, nano clean); none weakened |
 
 ---
 

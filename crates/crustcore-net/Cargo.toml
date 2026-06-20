@@ -11,14 +11,26 @@ description = "Network/provider sidecar for CrustCore (model transport, Telegram
 [dependencies]
 crustcore-types = { workspace = true }
 crustcore-netproto = { workspace = true }
-# TODO(P7-live, gated on the Phase 8 secret broker): add tokio, a minimal HTTP
-# client, rustls/platform TLS, and the concrete OpenAI/Anthropic/OpenRouter/local
-# wire adapters here — behind this crate only, never leaking into nano
-# (CLAUDE.md §5.1). The routing engine (registry/probe, Reliable/Router/Budget
-# meta-providers, streaming, accounting) is implemented now over a Provider trait
-# with deterministic mock providers; live providers need credentials from the
-# secret broker (Phase 8) and real network (unavailable in CI), so they are added
-# once that exists. The caller links `crustcore-netproto` (std-only), not this.
+# JSON shaping/parsing for the live provider adapters. A normal (non-optional) dep:
+# the adapters' parse/map/stream logic is exercised in CI with a canned ReplayClient
+# (no network), so serde_json must always be available. This is a *sidecar* crate
+# (3–8 MB tier) the nano binary never links — it spawns this helper over the std-only
+# `crustcore-netproto` protocol — so serde_json never enters the nano graph
+# (CLAUDE.md §5.1; enforced by `xtask forbidden-deps`, which checks nano + the
+# `crustcore --features net` tree, neither of which depends on this crate).
+serde_json = "1"
+
+# The real HTTP/TLS transport (`UreqClient`) for live providers, behind the `live`
+# feature ONLY — so the default build (workspace + CI + the default mock helper)
+# links no HTTP/TLS stack. `ureq` is a small, blocking, rustls-backed client matching
+# the sync `Provider::complete` contract (no async runtime). `forbidden-deps` asserts
+# the default crustcore-net build links no ureq/rustls.
+ureq = { version = "2", optional = true }
+
+[features]
+# Enables the real network transport (`UreqClient`) + the `live_engine` builder. Off
+# by default; CI runs the adapter tests with a ReplayClient, not this.
+live = ["dep:ureq"]
 
 # The sidecar helper binary nano spawns and talks to over the local protocol.
 [[bin]]

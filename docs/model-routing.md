@@ -206,17 +206,26 @@ Provider failures fallback safely.                   -> §4 (ReliableProvider)
 Model registry is dynamic.                            -> §1.1
 ```
 
-**Status (Phase 7 implemented).** The protocol (`crustcore-netproto`, std-only),
-the routing engine (`crustcore-net`: dynamic registry/probe, Router/Budget/Reliable
-meta-providers, streaming, budget accounting), the helper binary, and the
-spawn-based caller are implemented and tested over **deterministic mock providers**
-— satisfying all three acceptance criteria without a live call. The concrete
-OpenAI/Anthropic/OpenRouter/local **wire adapters and the Tokio/HTTP/TLS transport
-are deferred** (`TODO(P7-live)`): a live provider needs credentials from the
-**secret broker (Phase 8)** — a worker/provider never receives a raw key
-(invariant 1) — and real network, which CI cannot exercise. The engine is
-transport-agnostic, so a live `Provider` impl drops in without touching the
-router/registry/budget logic.
+**Status (Phase 7 + P7-live implemented).** The protocol (`crustcore-netproto`,
+std-only), the routing engine (`crustcore-net`: dynamic registry/probe,
+Router/Budget/Reliable meta-providers, streaming, budget accounting), the helper
+binary, and the spawn-based caller are implemented and tested. The concrete
+**live wire adapters** — OpenAI/OpenRouter/local (`OpenAiProvider`) and Anthropic
+(`AnthropicProvider`) — are now implemented over an [`HttpClient`] transport
+boundary (`crustcore-net::transport`). Their parse / map / stream / error logic is
+**fully tested in CI with a canned `ReplayClient`** (no network): streaming
+concatenation, usage parsing, status→`ProviderError` mapping, success-path-only chunk
+emission, no-panic on malformed SSE, and an engine-level cross-adapter fallback over
+*real* adapters. The real HTTP/TLS socket (`UreqClient`, `ureq` + rustls) is gated
+behind the **`live`** cargo feature so the default build — workspace, CI, and the
+spawned mock helper — links no HTTP/TLS stack (asserted by `xtask forbidden-deps`).
+Credentials are resolved per call via a `CredentialSource` (broker-backed in the live
+helper) and never reach the model, a log, or the sandbox env (invariants 1–3); a
+secret-leak red-team fixture proves a sentinel key cannot surface in the completion
+text or a routed error even when the provider echoes it. The engine is unchanged — a
+live `Provider` is a pure drop-in. **What remains live-gated** (real network + a real
+key, never in CI): the `#[ignore]`d `live_smoke` integration test, run out-of-band
+against a real endpoint with a `live`-built helper.
 
 ### 7.1 Testing notes
 

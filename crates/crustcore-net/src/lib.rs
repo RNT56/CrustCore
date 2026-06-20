@@ -18,13 +18,23 @@
 //! - **budget accounting** ([`BudgetLedger`], P7.7),
 //! - the [`serve`] loop the helper binary runs.
 //!
-//! What is deferred (`TODO(P7-live)`): the concrete OpenAI/Anthropic/OpenRouter/
-//! local **wire adapters** + the Tokio/HTTP/TLS transport. They need credentials
-//! from the **secret broker (Phase 8)** — a worker/provider never gets a raw key
-//! (invariant 1) — and real network (unavailable in CI). The architecture above is
-//! transport-agnostic, so a live `Provider` impl drops in without touching the
-//! router/registry/budget logic. Until then a [`MockProvider`] stands in.
+//! Live providers (P7-live): the concrete OpenAI/OpenRouter/local + Anthropic wire
+//! adapters ([`providers`]) are implemented over an [`HttpClient`](transport::HttpClient)
+//! transport boundary. Their parse/map/stream logic is **fully tested in CI** with a
+//! canned [`ReplayClient`](transport::ReplayClient) — no network; the real HTTP/TLS
+//! socket (`UreqClient`) is gated behind the **`live`** cargo feature so the default
+//! build (and the workspace/CI build) links no HTTP stack, and the helper defaults to
+//! [`default_mock_engine`]. Credentials are resolved per call via a
+//! [`CredentialSource`](credsource::CredentialSource) (broker-backed in the live
+//! helper) and never reach the model, a log, or the sandbox env (invariants 1–3). The
+//! adapters are drop-ins: they implement the same [`Provider`] trait the router,
+//! registry, and budget logic already route over, unchanged.
 #![forbid(unsafe_code)]
+
+pub mod config;
+pub mod credsource;
+pub mod providers;
+pub mod transport;
 
 use std::io::{BufRead, Write};
 
@@ -606,6 +616,22 @@ pub fn default_mock_engine() -> Engine {
             MockBehavior::Echo,
         )),
     ])
+}
+
+/// Builds a **live** [`Engine`] from a provider config + credential source using the
+/// real `UreqClient` HTTP transport (`live` feature). It returns the *same* `Engine`
+/// type the mock path uses — the live providers are pure drop-ins, so the
+/// router/registry/budget logic is reused unchanged. The credential source is
+/// broker-backed in the helper; the key never reaches the model or the sandbox env.
+#[cfg(feature = "live")]
+#[must_use]
+pub fn live_engine(
+    configs: &[config::ProviderConfig],
+    creds: std::rc::Rc<dyn credsource::CredentialSource>,
+) -> Engine {
+    let http: std::rc::Rc<dyn transport::HttpClient> =
+        std::rc::Rc::new(transport::UreqClient::new());
+    Engine::new(providers::build_providers(configs, http, creds))
 }
 
 #[cfg(test)]
