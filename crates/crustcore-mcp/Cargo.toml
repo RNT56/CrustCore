@@ -10,6 +10,11 @@ description = "MCP gateway/client/server and code-mode support for CrustCore."
 
 [dependencies]
 crustcore-types = { workspace = true }
-# TODO(P13): add `rmcp` or a custom MCP implementation here (per feature). It
-# must never leak into nano (CLAUDE.md §5.1). A tiny hand-rolled stdio JSON-RPC
-# MCP-lite client for nano (no SDK) is a separate, later option.
+crustcore-secrets = { workspace = true }
+crustcore-receipts = { workspace = true }
+# TODO(P13-net): add `rmcp` or a custom MCP JSON-RPC client + the live stdio/HTTP
+# transports here (per feature) — never leaking into nano (CLAUDE.md §5.1). The
+# Phase-13 registry, gateway policy check, result redaction, receipting, and
+# code-mode stub descriptors are std-only and implemented now; the live transport
+# + sandboxed stub execution reuse the Phase-4 sandbox and need network, so they
+# are deferred.
