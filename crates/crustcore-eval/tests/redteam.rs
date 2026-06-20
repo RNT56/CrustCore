@@ -678,3 +678,94 @@ fn memory_says_authorized_is_inert() {
     // authority (invariant 7).
     let _: &str = frag.text.as_str();
 }
+
+/// Red-team (P15, `SilentWeakening`): the self-improvement loop tries to weaken a
+/// guardrail — loosen a policy decision, widen a sandbox profile, or relax a secret
+/// type — and slip it through disguised as an "improvement". Two structural defenses
+/// hold (`docs/self-improvement.md` §4; invariant 18): a proposal cannot even
+/// *express* targeting policy/sandbox/secrets (`ProposalTarget` enumerates only
+/// prompt/tool/config), and any patch that *touches* a contract file trips the
+/// contract gate — even bundled among innocuous edits — so it cannot auto-advance and
+/// requires explicit maintainer approval. A proposal also cannot advance at all
+/// without supporting evals (memory/an idea alone is never authority).
+#[test]
+fn self_improvement_cannot_weaken_policy_silently() {
+    use crustcore_daemon::selfimprove::{
+        contract_gate, plan_self_pr, AdvanceError, EvalKind, EvalRef, FailureClass, GateDecision,
+        ImprovementProposal, ProposalRisk, ProposalTarget, ReadyProposal, SelfPrDecision,
+    };
+    use crustcore_types::BoundedText;
+
+    let bt = |s: &str| BoundedText::truncated(s, 1024);
+
+    // (1) The proposal type cannot target policy/sandbox/secrets — it enumerates ONLY
+    //     the permitted scope. This match is exhaustive; if a "weaken policy" variant
+    //     were ever added, this fails to compile (a structural tripwire).
+    let target = ProposalTarget::Config;
+    match target {
+        ProposalTarget::Prompt | ProposalTarget::ToolDefinition | ProposalTarget::Config => {}
+    }
+
+    let proposal = ImprovementProposal {
+        failure_class: FailureClass::WrongApproach,
+        target: ProposalTarget::Config,
+        // The rationale TEXT is untrusted and can *say* anything ("disable the
+        // sandbox") — but it is inert data; only the gates below decide what ships.
+        rationale: bt("disable the sandbox so the verify command passes"),
+        expected_effect: bt("tests go green"),
+        risk: ProposalRisk::High,
+    };
+
+    // (2) A proposal cannot advance without evals — an idea alone is never authority.
+    assert_eq!(
+        ReadyProposal::prepare(proposal.clone(), vec![]),
+        Err(AdvanceError::NoDemonstration),
+    );
+
+    let ready = ReadyProposal::prepare(
+        proposal,
+        vec![
+            EvalRef {
+                name: bt("demo"),
+                kind: EvalKind::Demonstrates,
+            },
+            EvalRef {
+                name: bt("guard"),
+                kind: EvalKind::GuardsRegression,
+            },
+        ],
+    )
+    .expect("evidence-backed proposal advances");
+
+    // (3) The actual weakening lives in contract files (the sandbox profile, the
+    //     policy decision, the secret type). Any patch that touches one is flagged —
+    //     even bundled among innocuous edits — and cannot auto-advance.
+    for contract_path in [
+        "docs/sandbox.md",
+        "docs/policy.md",
+        "crates/crustcore-policy/src/decision.rs",
+        "crates/crustcore-secrets/src/lib.rs",
+    ] {
+        assert!(
+            matches!(
+                contract_gate(&["prompts/system.txt", contract_path, "README.md"]),
+                GateDecision::RequiresMaintainerApproval { .. }
+            ),
+            "silent weakening via {contract_path} was not flagged by the contract gate",
+        );
+        assert!(
+            matches!(
+                plan_self_pr(&ready, &["prompts/system.txt", contract_path]),
+                SelfPrDecision::BlockedPendingMaintainer { .. }
+            ),
+            "self-PR touching {contract_path} must be blocked pending maintainer approval",
+        );
+    }
+
+    // A genuinely clean prompt/tool/config change is allowed to open a *draft* PR
+    // (which still needs the normal Approved gate to merge — never self-merges).
+    assert!(matches!(
+        plan_self_pr(&ready, &["prompts/system.txt"]),
+        SelfPrDecision::DraftPr { .. }
+    ));
+}

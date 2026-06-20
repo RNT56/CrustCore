@@ -14,6 +14,7 @@
 
 pub mod advisor;
 pub mod github;
+pub mod selfimprove;
 pub mod supervisor;
 pub mod telegram;
 

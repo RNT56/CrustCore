@@ -1,0 +1,517 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Safe self-improvement (`ROADMAP.md` §18 Phase 15; `docs/self-improvement.md`).
+//! CrustCore improves itself the way any repo is improved: it **proposes changes as
+//! PRs**, gated by **evals** and a **contract-file gate**, and a **human maintainer
+//! merges**. There is no path from "the agent learned something" to a change in the
+//! running kernel's policy/sandbox/secret behavior (invariant 18).
+//!
+//! This module is the std-only core of that loop:
+//! - [`classify`] — the failure classifier (P15.1): name the real cause.
+//! - [`ImprovementProposal`] — the typed proposal artifact (P15.2). Its
+//!   [`ProposalTarget`] can express **only** prompt/tool/config changes; there is by
+//!   construction **no** variant that targets policy, sandbox, or secrets — those
+//!   live in contract files and can only change through the gate below.
+//! - [`ReadyProposal`] — eval/regression gating (P15.3): a proposal **cannot
+//!   advance** without both a demonstration and a regression guard. `ReadyProposal`
+//!   is type-sealed (like `VerifiedPatch`): the only way to mint one is
+//!   [`ReadyProposal::prepare`], which refuses evidence-free proposals.
+//! - [`plan_self_pr`] — the self-PR workflow (P15.4): a self-PR is **not
+//!   privileged** — it is a draft PR that still needs the normal `VerifiedPatch` +
+//!   `Approved` gate to merge (invariants 13/14; never self-merges).
+//! - [`contract_gate`] — the contract-file gate (P15.5): a self-PR touching **any**
+//!   contract file is flagged `RequiresMaintainerApproval` and cannot auto-advance,
+//!   catching the *silent-weakening* attack (`docs/self-improvement.md` §4).
+//!
+//! **No live mutation, by construction:** every function here returns an inert
+//! *artifact* or *decision* (data). Nothing takes `&mut` of a running policy,
+//! sandbox, or secret store — the module has no power to change the kernel; it can
+//! only emit proposals a human must merge.
+//!
+//! **Memory is never authority** (`docs/self-improvement.md` §2): the classifier may
+//! draw on failure memory, but a memory entry alone mints nothing — it only seeds a
+//! proposal that must still pass [`ReadyProposal::prepare`] and the gate.
+
+use crustcore_types::BoundedText;
+
+// ---------------------------------------------------------------------------
+// Failure classifier (P15.1)
+// ---------------------------------------------------------------------------
+
+/// A named failure cause — so an improvement targets a real category rather than a
+/// one-off (`docs/self-improvement.md` §3.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureClass {
+    /// The approach was wrong (re-plan, don't patch the symptom).
+    WrongApproach,
+    /// The verifier is nondeterministic (a flaky test, not a real regression).
+    FlakyVerifier,
+    /// The model lacked context it needed (retrieval/capsule gap).
+    MissingContext,
+    /// The prompt was ambiguous or deficient.
+    PromptDeficiency,
+    /// A needed tool was missing or awkward (tool gap/ergonomics).
+    ToolGap,
+    /// A recurring error class seen across runs.
+    RecurringError,
+    /// Not enough signal to classify (the safe default — proposes nothing specific).
+    Unclassified,
+}
+
+/// The observed, untrusted signal a failure produced. It is *prior observation*
+/// (invariant 7; `docs/self-improvement.md` §2), not authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FailureSignal {
+    /// The verifier command failed (non-zero exit).
+    pub verifier_failed: bool,
+    /// The same input produced different verifier outcomes (nondeterminism).
+    pub nondeterministic: bool,
+    /// How many times this same failure recurred.
+    pub repetitions: u32,
+    /// The model signaled it lacked needed context.
+    pub context_missing: bool,
+    /// A required tool was unavailable.
+    pub tool_unavailable: bool,
+    /// The prompt was flagged ambiguous/insufficient.
+    pub prompt_ambiguous: bool,
+}
+
+/// Classifies a failure signal into a named cause. Deterministic; specific causes
+/// take precedence over generic ones, and an unhelpful signal stays `Unclassified`
+/// (never invents a cause). A flaky verifier is recognized **before** "wrong
+/// approach" so a nondeterministic test is not mistaken for a real regression.
+#[must_use]
+pub fn classify(signal: &FailureSignal) -> FailureClass {
+    if signal.nondeterministic {
+        return FailureClass::FlakyVerifier;
+    }
+    if signal.tool_unavailable {
+        return FailureClass::ToolGap;
+    }
+    if signal.context_missing {
+        return FailureClass::MissingContext;
+    }
+    if signal.prompt_ambiguous {
+        return FailureClass::PromptDeficiency;
+    }
+    if signal.repetitions >= 2 {
+        return FailureClass::RecurringError;
+    }
+    if signal.verifier_failed {
+        return FailureClass::WrongApproach;
+    }
+    FailureClass::Unclassified
+}
+
+// ---------------------------------------------------------------------------
+// Improvement proposal artifact (P15.2)
+// ---------------------------------------------------------------------------
+
+/// What an improvement may target. **By construction this enumerates only the
+/// permitted scope** (`docs/self-improvement.md` §3.2, Phase 15 acceptance: "propose
+/// prompt/tool/config improvements"): there is deliberately **no** variant for
+/// policy, sandbox, or secrets. Those are contract-file concerns and can change only
+/// through the [`contract_gate`] with explicit maintainer approval — a proposal
+/// cannot even *express* "weaken the sandbox".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProposalTarget {
+    /// A prompt improvement.
+    Prompt,
+    /// A tool definition / tool-ergonomics change.
+    ToolDefinition,
+    /// A non-contract config / default change.
+    Config,
+}
+
+/// The proposer's risk estimate (advisory metadata).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProposalRisk {
+    /// Low risk.
+    Low,
+    /// Medium risk.
+    Medium,
+    /// High risk.
+    High,
+}
+
+/// A typed improvement proposal (`docs/self-improvement.md` §3.2) — not a free-text
+/// suggestion: what to change, the failure class it addresses, the expected effect,
+/// and the risk. It is inert data; it grants nothing on its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImprovementProposal {
+    /// The failure class this addresses.
+    pub failure_class: FailureClass,
+    /// What it targets (constrained to the permitted scope).
+    pub target: ProposalTarget,
+    /// Why — bounded rationale.
+    pub rationale: BoundedText,
+    /// The expected effect — bounded.
+    pub expected_effect: BoundedText,
+    /// The proposer's risk estimate.
+    pub risk: ProposalRisk,
+}
+
+// ---------------------------------------------------------------------------
+// Eval / regression gating (P15.3) — a proposal cannot advance without evidence
+// ---------------------------------------------------------------------------
+
+/// What an attached eval proves (`docs/self-improvement.md` §3.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvalKind {
+    /// Demonstrates the improvement helps.
+    Demonstrates,
+    /// Guards against regression (proves it breaks nothing existing).
+    GuardsRegression,
+}
+
+/// A reference to an eval/regression backing a proposal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalRef {
+    /// The eval's name/id (in the eval suite).
+    pub name: BoundedText,
+    /// What it proves.
+    pub kind: EvalKind,
+}
+
+/// Why a proposal could not advance to a [`ReadyProposal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvanceError {
+    /// No eval demonstrates the improvement helps (P15.3).
+    NoDemonstration,
+    /// No eval guards against regression (P15.3).
+    NoRegressionGuard,
+}
+
+/// A proposal that has cleared the evidence bar — **type-sealed**. The only way to
+/// obtain one is [`ReadyProposal::prepare`], which refuses an evidence-free proposal
+/// (`docs/self-improvement.md` §3.3, §7.1 "evals required"). A `ReadyProposal` is the
+/// self-improvement analogue of `VerifiedPatch`: evidence, not a model's say-so, is
+/// what lets a proposal advance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadyProposal {
+    // Private fields: cannot be constructed outside this module except via `prepare`.
+    proposal: ImprovementProposal,
+    evidence: Vec<EvalRef>,
+}
+
+impl ReadyProposal {
+    /// Advances a proposal to ready **iff** it carries both a demonstration and a
+    /// regression guard. A proposal without supporting evals does not advance — the
+    /// same evidence discipline the verifier applies to any change.
+    ///
+    /// # Errors
+    /// [`AdvanceError::NoDemonstration`] / [`AdvanceError::NoRegressionGuard`] if the
+    /// corresponding eval kind is absent.
+    pub fn prepare(
+        proposal: ImprovementProposal,
+        evidence: Vec<EvalRef>,
+    ) -> Result<ReadyProposal, AdvanceError> {
+        if !evidence.iter().any(|e| e.kind == EvalKind::Demonstrates) {
+            return Err(AdvanceError::NoDemonstration);
+        }
+        if !evidence
+            .iter()
+            .any(|e| e.kind == EvalKind::GuardsRegression)
+        {
+            return Err(AdvanceError::NoRegressionGuard);
+        }
+        Ok(ReadyProposal { proposal, evidence })
+    }
+
+    /// The underlying proposal.
+    #[must_use]
+    pub fn proposal(&self) -> &ImprovementProposal {
+        &self.proposal
+    }
+
+    /// The backing evals.
+    #[must_use]
+    pub fn evidence(&self) -> &[EvalRef] {
+        &self.evidence
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Contract-file gate (P15.5) — invariant 18 / docs/self-improvement.md §4
+// ---------------------------------------------------------------------------
+
+/// The contract files (`CLAUDE.md` §7.3, `docs/self-improvement.md` §4). A change to
+/// any of these is the trust boundary — it can only ship with explicit maintainer
+/// approval and serialized review, never auto-advanced by the improvement loop.
+pub const CONTRACT_FILES: &[&str] = &[
+    "CLAUDE.md",
+    "AGENTS.md",
+    "INVARIANTS.md",
+    "THREAT_MODEL.md",
+    "SECURITY.md",
+    "docs/policy.md",
+    "docs/secrets.md",
+    "docs/sandbox.md",
+    "docs/backend-contract.md",
+    "crates/crustcore-kernel/src/event.rs",
+    "crates/crustcore-kernel/src/action.rs",
+    "crates/crustcore-policy/src/decision.rs",
+    "crates/crustcore-secrets/src/lib.rs",
+    "Cargo.toml",
+    "Cargo.lock",
+];
+
+/// Whether `path` is a contract file. Matches the canonical [`CONTRACT_FILES`] paths,
+/// and additionally **any** `Cargo.toml`/`Cargo.lock` (a dependency manifest anywhere
+/// is dependency-policy-sensitive — `CLAUDE.md` §6.4 "no drive-by dependency
+/// additions"). Erring toward flagging is correct: a flagged change only *requires a
+/// human*, it never weakens anything.
+#[must_use]
+pub fn is_contract_file(path: &str) -> bool {
+    let p = path.trim().trim_start_matches("./");
+    if CONTRACT_FILES.contains(&p) {
+        return true;
+    }
+    let base = p.rsplit('/').next().unwrap_or(p);
+    matches!(base, "Cargo.toml" | "Cargo.lock")
+}
+
+/// The contract-file gate's decision for a set of changed paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateDecision {
+    /// No contract file touched — the improvement loop may auto-advance to a *draft*
+    /// PR (which still needs the normal `Approved` gate to merge).
+    AutoAdvanceAllowed,
+    /// One or more contract files were touched — **blocked from auto-advance**; an
+    /// explicit maintainer approval is required, and the contract change must be
+    /// serialized into its own task (it may not be bundled here).
+    RequiresMaintainerApproval {
+        /// The contract files that were touched (sorted, deduped).
+        touched: Vec<String>,
+    },
+}
+
+/// Runs the contract-file gate over a self-PR's changed paths. If **any** path is a
+/// contract file — even bundled among unrelated changes — the gate returns
+/// [`GateDecision::RequiresMaintainerApproval`]; the loop cannot slip a contract
+/// change through by mixing it with prompt/tool/config edits. This is what catches
+/// *silent weakening* (`docs/self-improvement.md` §4): loosening a policy decision,
+/// widening a sandbox profile, or relaxing a secret type all touch a contract file.
+#[must_use]
+pub fn contract_gate(changed_paths: &[&str]) -> GateDecision {
+    let mut touched: Vec<String> = changed_paths
+        .iter()
+        .filter(|p| is_contract_file(p))
+        .map(|p| p.trim().trim_start_matches("./").to_string())
+        .collect();
+    if touched.is_empty() {
+        return GateDecision::AutoAdvanceAllowed;
+    }
+    touched.sort();
+    touched.dedup();
+    GateDecision::RequiresMaintainerApproval { touched }
+}
+
+// ---------------------------------------------------------------------------
+// Self-PR workflow (P15.4)
+// ---------------------------------------------------------------------------
+
+/// The outcome of planning a self-PR for a [`ReadyProposal`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelfPrDecision {
+    /// May open a **draft** PR for human review. It is not privileged: it still needs
+    /// a `VerifiedPatch` + `Approved` to merge (invariants 13/14) and never
+    /// self-merges. Carries the proposal's risk for the reviewer.
+    DraftPr {
+        /// The proposal's risk estimate (advisory).
+        risk: ProposalRisk,
+    },
+    /// Blocked: the change touches contract files and needs explicit maintainer
+    /// approval before it can advance at all.
+    BlockedPendingMaintainer {
+        /// The contract files touched.
+        touched: Vec<String>,
+    },
+}
+
+/// Plans a self-PR: requires an evidence-backed [`ReadyProposal`] (so an
+/// unsubstantiated idea can never reach here), runs the [`contract_gate`] over the
+/// patch's changed paths, and yields either a draft PR (human-reviewed, never
+/// auto-merged) or a maintainer-approval block. This function only ever returns a
+/// *decision* — it performs no side effect and mutates no kernel state (invariant
+/// 18).
+#[must_use]
+pub fn plan_self_pr(ready: &ReadyProposal, changed_paths: &[&str]) -> SelfPrDecision {
+    match contract_gate(changed_paths) {
+        GateDecision::RequiresMaintainerApproval { touched } => {
+            SelfPrDecision::BlockedPendingMaintainer { touched }
+        }
+        GateDecision::AutoAdvanceAllowed => SelfPrDecision::DraftPr {
+            risk: ready.proposal().risk,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bt(s: &str) -> BoundedText {
+        BoundedText::truncated(s, 4096)
+    }
+
+    fn proposal(target: ProposalTarget) -> ImprovementProposal {
+        ImprovementProposal {
+            failure_class: FailureClass::PromptDeficiency,
+            target,
+            rationale: bt("the task prompt omitted the verify command"),
+            expected_effect: bt("fewer missing-context failures"),
+            risk: ProposalRisk::Low,
+        }
+    }
+
+    // --- failure classifier (P15.1) ---
+
+    #[test]
+    fn classify_is_deterministic_and_precise() {
+        // Flaky is recognized before "wrong approach": a nondeterministic verifier is
+        // not a real regression.
+        let flaky = FailureSignal {
+            verifier_failed: true,
+            nondeterministic: true,
+            ..Default::default()
+        };
+        assert_eq!(classify(&flaky), FailureClass::FlakyVerifier);
+
+        assert_eq!(
+            classify(&FailureSignal {
+                tool_unavailable: true,
+                ..Default::default()
+            }),
+            FailureClass::ToolGap
+        );
+        assert_eq!(
+            classify(&FailureSignal {
+                context_missing: true,
+                ..Default::default()
+            }),
+            FailureClass::MissingContext
+        );
+        assert_eq!(
+            classify(&FailureSignal {
+                repetitions: 3,
+                ..Default::default()
+            }),
+            FailureClass::RecurringError
+        );
+        assert_eq!(
+            classify(&FailureSignal {
+                verifier_failed: true,
+                ..Default::default()
+            }),
+            FailureClass::WrongApproach
+        );
+        // No useful signal → Unclassified (never invents a cause).
+        assert_eq!(
+            classify(&FailureSignal::default()),
+            FailureClass::Unclassified
+        );
+    }
+
+    // --- eval gating (P15.3) — a proposal cannot advance without evidence ---
+
+    #[test]
+    fn proposal_needs_demonstration_and_regression_guard() {
+        let demo = EvalRef {
+            name: bt("prompt_includes_verify_cmd"),
+            kind: EvalKind::Demonstrates,
+        };
+        let guard = EvalRef {
+            name: bt("existing_tasks_unaffected"),
+            kind: EvalKind::GuardsRegression,
+        };
+        // No evidence at all → cannot advance.
+        assert_eq!(
+            ReadyProposal::prepare(proposal(ProposalTarget::Prompt), vec![]),
+            Err(AdvanceError::NoDemonstration)
+        );
+        // Only a demonstration, no regression guard → cannot advance.
+        assert_eq!(
+            ReadyProposal::prepare(proposal(ProposalTarget::Prompt), vec![demo.clone()]),
+            Err(AdvanceError::NoRegressionGuard)
+        );
+        // Only a regression guard, no demonstration → cannot advance.
+        assert_eq!(
+            ReadyProposal::prepare(proposal(ProposalTarget::Prompt), vec![guard.clone()]),
+            Err(AdvanceError::NoDemonstration)
+        );
+        // Both → advances.
+        let ready =
+            ReadyProposal::prepare(proposal(ProposalTarget::Prompt), vec![demo, guard]).unwrap();
+        assert_eq!(ready.proposal().target, ProposalTarget::Prompt);
+        assert_eq!(ready.evidence().len(), 2);
+    }
+
+    // --- contract-file gate (P15.5) — invariant 18 ---
+
+    #[test]
+    fn contract_gate_flags_contract_files_even_when_bundled() {
+        // A pure prompt/tool/config change auto-advances (to a draft PR).
+        assert_eq!(
+            contract_gate(&["prompts/system.txt", "crates/crustcore-net/src/lib.rs"]),
+            GateDecision::AutoAdvanceAllowed
+        );
+        // Touching a policy/sandbox/secret contract file is flagged...
+        assert!(matches!(
+            contract_gate(&["docs/policy.md"]),
+            GateDecision::RequiresMaintainerApproval { .. }
+        ));
+        assert!(matches!(
+            contract_gate(&["crates/crustcore-secrets/src/lib.rs"]),
+            GateDecision::RequiresMaintainerApproval { .. }
+        ));
+        // ...and is *still* flagged when bundled among innocuous edits (no slipping a
+        // silent weakening through by mixing it in).
+        let bundled = contract_gate(&[
+            "prompts/system.txt",
+            "crates/crustcore-policy/src/decision.rs",
+            "README.md",
+        ]);
+        match bundled {
+            GateDecision::RequiresMaintainerApproval { touched } => {
+                assert_eq!(touched, vec!["crates/crustcore-policy/src/decision.rs"]);
+            }
+            GateDecision::AutoAdvanceAllowed => panic!("bundled contract change not flagged"),
+        }
+        // A dependency manifest anywhere is dependency-policy-sensitive.
+        assert!(is_contract_file("crates/crustcore-mcp/Cargo.toml"));
+        assert!(is_contract_file("./Cargo.lock"));
+    }
+
+    // --- self-PR workflow (P15.4) — draft only, gate-blocked on contract files ---
+
+    #[test]
+    fn self_pr_is_draft_for_clean_change_and_blocked_on_contract_files() {
+        let ready = ReadyProposal::prepare(
+            proposal(ProposalTarget::ToolDefinition),
+            vec![
+                EvalRef {
+                    name: bt("demo"),
+                    kind: EvalKind::Demonstrates,
+                },
+                EvalRef {
+                    name: bt("guard"),
+                    kind: EvalKind::GuardsRegression,
+                },
+            ],
+        )
+        .unwrap();
+
+        // A clean change → a draft PR (still needs Approved to merge — never auto).
+        assert_eq!(
+            plan_self_pr(&ready, &["tools/grep.json"]),
+            SelfPrDecision::DraftPr {
+                risk: ProposalRisk::Low
+            }
+        );
+        // A change touching a contract file → blocked pending maintainer approval.
+        assert!(matches!(
+            plan_self_pr(&ready, &["tools/grep.json", "docs/sandbox.md"]),
+            SelfPrDecision::BlockedPendingMaintainer { .. }
+        ));
+    }
+}
