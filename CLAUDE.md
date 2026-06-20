@@ -9,28 +9,43 @@
 **Project:** CrustCore — a sub-800kB Rust coding-agent *verifier kernel* with
 optional capability packs.
 **Repository:** https://github.com/RNT56/CrustCore
-**Status:** Phase 5 — kernel + audit log + confined tools + sandboxed execution +
-worktree verify loop (green `cargo xtask verify`). The trusted `Kernel::step`
-state machine is real (task/job transitions, typed budgets, approval
+**Status:** v0.1 — **Phases 0–16 complete and merged** (green `cargo xtask verify`;
+nano **411.9 KiB**, 51.5% of the 800 kB budget; **267** workspace tests; the v0.1
+[definition of done](./ROADMAP.md) §22, all 12 criteria, is met). The trusted
+`Kernel::step` state machine is real (task/job transitions, typed budgets, approval
 request/resolution; sync, deterministic, no async/net/db, no wall clock). The
-append-only hash-chained **event log** (`crustcore inspect`/`export`,
-tamper-evident) and **tool receipts** (a CrustCore-keyed MAC chain, invariant 10)
-are implemented (vendored dependency-free SHA-256/HMAC). **Path confinement**
-(`crustcore-path`, symlink-safe) + capability-gated file tools and hardened git
-wrappers (`crustcore-worktree::tools`) confine all file/git access. The **runner**
-(`crustcore-runner`: bounded capture, timeout, process-tree kill) and **sandbox**
-(`crustcore-sandbox`: env sanitizer, path-list validator, Linux bubblewrap backend
-v1 with deny-all egress, refuse-if-no-backend) gate arbitrary execution (invariant
-9). The **worktree verify loop** (`crustcore-worktree::WorktreeManager` +
-`crustcore-backend::verify`) creates a disposable worktree, reruns the verify
-command in the sandbox, and mints a **`VerifiedPatch`** (with a receipt) only on a
-zero exit — `VerifiedPatch` is type-sealed so a task can complete *only* from
-verifier evidence (invariant 13); `crustcore run -dir/-goal/-verify` drives it.
-Backed by exhaustive property tests, no-panic fuzzes, a microbench, tamper tests,
-real-fs symlink + sandbox red-team fixtures, and the golden "fix failing test".
-The remaining heavy crates are still documented skeletons with `TODO(Pn)` markers.
-**Authoritative roadmap:** [`ROADMAP.md`](./ROADMAP.md) (the maintainer handoff draft — the
-substance of everything below derives from it).
+append-only hash-chained **event log** (`crustcore inspect`/`export`, tamper-evident,
+versioned frame format) and **tool receipts** (a CrustCore-keyed MAC chain binding
+the redacted args + result, invariant 10) are implemented (vendored dependency-free
+SHA-256/HMAC). **Path confinement** (`crustcore-path`, symlink-safe) + capability-gated
+file tools and hardened git wrappers (`crustcore-worktree::tools`) confine all
+file/git access. The **runner** (`crustcore-runner`: bounded capture, timeout,
+process-tree kill) and **sandbox** (`crustcore-sandbox`: env sanitizer, path-list
+validator, Linux bubblewrap backend v1 with deny-all egress, refuse-if-no-backend)
+gate arbitrary execution (invariant 9). The **worktree verify loop**
+(`crustcore-worktree::WorktreeManager` + `crustcore-backend::verify`) creates a
+disposable worktree, reruns the verify command in the sandbox, and mints a
+**`VerifiedPatch`** (with a receipt) only on a zero exit — `VerifiedPatch` is
+type-sealed so a task can complete *only* from verifier evidence (invariant 13);
+`crustcore run -dir/-goal/-verify`, `crustcore doctor`, and `cargo xtask release`
+(size-gated, checksummed) drive the harness. **Every capability pack is built as a
+std-only, fully-tested decision core, never linked into nano:** model transport
+(`crustcore-net`/`-netproto`, a *spawned* helper), the secret broker + redactor/taint
+boundary (`crustcore-secrets`, a contract crate), Telegram (`-daemon::telegram`),
+GitHub PR/credential-proxy (`-backend::integrate` + `-daemon::github`), subagent
+supervisor + advisor (`-daemon::supervisor`/`::advisor`), the MCP gateway
+(`crustcore-mcp`), repo memory/code-intel (`crustcore-index`), and the PR/eval-gated
+self-improvement loop with its contract-file gate (`-daemon::selfimprove`). Backed by
+exhaustive property tests, no-panic fuzzes, a microbench, tamper + format-migration
+tests, real-fs symlink + sandbox red-team fixtures, the full red-team scenario set,
+and the golden "fix failing test" / "add small feature" tasks. **What remains is the
+live I/O behind clearly marked `TODO(Pn-…)` seams** — real HTTP providers
+(`P7-live`), the Bot API loop (`P9-net`), the GitHub REST flow (`P10-net`), native
+keychains (`P8-store`), the MCP JSON-RPC transport (`P13-net`), subagent execution
+(`P11-exec`), and tree-sitter/persistent memory (`P14-*`) — none of which is
+CI-testable without network/secrets; each drops into an already-verified, transport-
+agnostic core. **Authoritative roadmap:** [`ROADMAP.md`](./ROADMAP.md) (the maintainer
+handoff draft — the substance of everything below derives from it).
 
 ---
 
