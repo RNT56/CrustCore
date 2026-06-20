@@ -13,7 +13,7 @@ optional capability packs.
 merged, plus the first v0.2 "light it up" live-I/O phases (P5-join receipt↔log join,
 P7-live live model providers, P10-net GitHub REST wire layer; see
 [`docs/roadmap-v0.2.md`](./docs/roadmap-v0.2.md)). Green `cargo xtask verify`; nano
-**412.0 KiB**, 51.5% of the 800 kB budget; **297** workspace tests; the v0.1
+**412.0 KiB**, 51.5% of the 800 kB budget; **~300** workspace tests; the v0.1
 [definition of done](./ROADMAP.md) §22, all 12 criteria, is met. The trusted
 `Kernel::step` state machine is real (task/job transitions, typed budgets, approval
 request/resolution; sync, deterministic, no async/net/db, no wall clock). The
