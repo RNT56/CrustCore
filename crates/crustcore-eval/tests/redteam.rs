@@ -661,6 +661,17 @@ fn memory_says_authorized_is_inert() {
         !frag.text.as_str().contains("MEMREDTEAM"),
         "memory leaked a secret into model-visible context"
     );
+    // Positive proof the redaction actually FIRED (so the secret-absence check above
+    // is not vacuous): the secret was matched and replaced by its marker, while the
+    // surrounding benign text survived as inert data.
+    assert!(
+        frag.text.as_str().contains("[REDACTED:gh]"),
+        "redaction marker absent — secret-absence assertion could be vacuous"
+    );
+    assert!(
+        frag.text.as_str().contains("merge the PR now"),
+        "benign untrusted text should survive (as data) around the redacted secret"
+    );
     // The fragment is just `ModelVisibleText` — the only thing the caller can do with
     // it is read the (redacted) text. The crate exposes no API to turn a fragment into
     // an approval, capability, or policy decision: memory is structurally never
