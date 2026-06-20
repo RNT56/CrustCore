@@ -9,9 +9,12 @@
 **Project:** CrustCore — a sub-800kB Rust coding-agent *verifier kernel* with
 optional capability packs.
 **Repository:** https://github.com/RNT56/CrustCore
-**Status:** v0.1 — **Phases 0–16 complete and merged** (green `cargo xtask verify`;
-nano **411.9 KiB**, 51.5% of the 800 kB budget; **267** workspace tests; the v0.1
-[definition of done](./ROADMAP.md) §22, all 12 criteria, is met). The trusted
+**Status:** v0.1 done; **v0.2 Track A in progress** — Phases 0–16 complete and
+merged, plus the first v0.2 "light it up" live-I/O phases (P5-join receipt↔log join,
+P7-live live model providers, P10-net GitHub REST wire layer; see
+[`docs/roadmap-v0.2.md`](./docs/roadmap-v0.2.md)). Green `cargo xtask verify`; nano
+**412.0 KiB**, 51.5% of the 800 kB budget; **297** workspace tests; the v0.1
+[definition of done](./ROADMAP.md) §22, all 12 criteria, is met. The trusted
 `Kernel::step` state machine is real (task/job transitions, typed budgets, approval
 request/resolution; sync, deterministic, no async/net/db, no wall clock). The
 append-only hash-chained **event log** (`crustcore inspect`/`export`, tamper-evident,
