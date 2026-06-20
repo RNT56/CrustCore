@@ -8,7 +8,7 @@
 
 [![CI](https://github.com/RNT56/CrustCore/actions/workflows/ci.yml/badge.svg)](https://github.com/RNT56/CrustCore/actions/workflows/ci.yml)
 &nbsp;![nano size](https://img.shields.io/badge/nano-412.0_KiB_%2F_800_KiB-2ea44f)
-&nbsp;![tests](https://img.shields.io/badge/tests-297_passing-2ea44f)
+&nbsp;![tests](https://img.shields.io/badge/tests-298_passing-2ea44f)
 &nbsp;![invariants](https://img.shields.io/badge/invariants-20_enforced-1f6feb)
 &nbsp;![kernel](https://img.shields.io/badge/kernel-std--only_%C2%B7_no_async%2Fnet%2Fdb-8957e5)
 &nbsp;![rust](https://img.shields.io/badge/rust-1.85+-orange)
@@ -170,7 +170,7 @@ The entire roadmap (**Phases 0–16**) is implemented and merged, and the v0.1
 | | |
 | --- | --- |
 | **Nano binary** | **412.0 KiB** stripped — 51.5 % of the 800 kB budget (CI-gated) |
-| **Tests** | **297** green across the workspace — property tests, no-panic fuzzes, tamper tests, red-team fixtures, goldens |
+| **Tests** | **~300** green across the workspace — property tests, no-panic fuzzes, tamper tests, red-team fixtures, goldens |
 | **Trusted core** | kernel · hash-chained event log + receipts · symlink-safe path confinement · runner + sandbox · worktree verify loop · type-sealed `VerifiedPatch` |
 | **Capability packs** | model transport · secret broker · Telegram · GitHub · subagent supervisor · advisor · MCP gateway · repo memory · self-improvement — all as **std-only, fully-tested decision cores** |
 | **Red-team** | prompt-injection, path-escape, fake-tool-result, secret-leak, MCP-hidden-instruction, memory-as-authority, and silent-weakening fixtures all pass |
