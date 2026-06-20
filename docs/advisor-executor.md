@@ -146,8 +146,9 @@ Advisor consultations cost tokens and latency, so they are budgeted (invariant
   every step" loop, especially around the *repeated failure* trigger, which could
   otherwise recurse.
 - When the budget is tight, low-value advisor triggers may be skipped while
-  high-risk ones (security risk, GitHub push, workflow mod) are preserved — the
-  consultation is prioritized toward the riskiest steps.
+  high-risk ones (security risk, GitHub push, workflow modification, dependency
+  change) are preserved — the consultation is prioritized toward the riskiest
+  steps. These match the gated/irreversible operations called out in §2.
 
 ---
 
