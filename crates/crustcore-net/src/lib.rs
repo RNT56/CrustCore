@@ -33,6 +33,7 @@
 
 pub mod config;
 pub mod credsource;
+pub mod github;
 pub mod providers;
 pub mod transport;
 

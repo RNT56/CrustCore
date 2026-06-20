@@ -86,6 +86,19 @@ pub trait HttpClient {
     /// # Errors
     /// [`TransportError`] on a transport failure.
     fn get(&self, url: &str, headers: &[(String, String)]) -> Result<HttpResponse, TransportError>;
+
+    /// POST `body` to `url`, returning the **full** (bounded) response body for any
+    /// status — for non-streaming JSON APIs (e.g. GitHub REST). Unlike
+    /// [`HttpClient::post_lines`] it never streams; the response is the whole body.
+    ///
+    /// # Errors
+    /// [`TransportError`] on a transport failure.
+    fn post_json(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<HttpResponse, TransportError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +198,19 @@ impl HttpClient for ReplayClient {
         &self,
         _url: &str,
         _headers: &[(String, String)],
+    ) -> Result<HttpResponse, TransportError> {
+        let canned = self.next()?;
+        Ok(HttpResponse {
+            status: canned.status,
+            body: bound(&canned.body),
+        })
+    }
+
+    fn post_json(
+        &self,
+        _url: &str,
+        _headers: &[(String, String)],
+        _body: &[u8],
     ) -> Result<HttpResponse, TransportError> {
         let canned = self.next()?;
         Ok(HttpResponse {
@@ -314,6 +340,36 @@ impl HttpClient for UreqClient {
             req = req.set(k, v);
         }
         match req.call() {
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.into_string().unwrap_or_default();
+                Ok(HttpResponse {
+                    status,
+                    body: bound(&body),
+                })
+            }
+            Err(ureq::Error::Status(status, resp)) => {
+                let body = resp.into_string().unwrap_or_default();
+                Ok(HttpResponse {
+                    status,
+                    body: bound(&body),
+                })
+            }
+            Err(ureq::Error::Transport(t)) => Err(TransportError::Connect(t.to_string())),
+        }
+    }
+
+    fn post_json(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> Result<HttpResponse, TransportError> {
+        let mut req = self.agent.post(url);
+        for (k, v) in headers {
+            req = req.set(k, v);
+        }
+        match req.send_bytes(body) {
             Ok(resp) => {
                 let status = resp.status();
                 let body = resp.into_string().unwrap_or_default();

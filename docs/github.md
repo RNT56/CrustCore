@@ -297,6 +297,24 @@ Cannot force-push by default.            -> §3.1, §4
 CI failure can create a repair task.     -> §7
 ```
 
+**Status (Phase 10 decision cores + P10-net wire layer).** The *decisions* are
+implemented and tested: `crustcore-backend::integrate::open_pr` (the type-13 gate —
+only a `VerifiedPatch` + `Approved<GitHubWriteCap>` yields a draft `PrIntent`;
+`format_pr_body` from verifier evidence), and `crustcore-daemon::github`
+(`validate_push` multi-refspec denials, ask-always `decide_merge`, bounded
+`repair_decision`, untrusted `ingest_comment`). The **live REST execution** of those
+decisions is now in `crustcore-net::github` (P10-net): a `GitHubApi` trait + a
+`RestGitHub` client over the shared `HttpClient` transport — `create_pull` (draft),
+`check_state` (distilled from check-runs), `create_comment` — whose build/parse/error
+logic is **CI-tested with a canned `ReplayClient`** (no network); the real socket is
+the `live`-gated `UreqClient`. It takes **primitive** inputs (the daemon maps a
+`PrIntent` onto a `CreatePrRequest`), keeping the sidecar dependency-light; a GitHub
+response is **untrusted data** (only the fields we need are read, a non-2xx never
+fabricates a success), and the token is resolved per call via the credential proxy and
+never appears in output or a routed error. **What remains** (`live`-gated, never CI):
+the daemon driving the helper over the protocol to open a *real* PR end-to-end (which
+un-defers the `golden_issue_to_pr_flow` golden) + the `#[ignore]`d `gh_live` test.
+
 ### 9.1 Testing notes
 
 - **Auth:** App installation-token minting works and tokens expire; fine-grained
