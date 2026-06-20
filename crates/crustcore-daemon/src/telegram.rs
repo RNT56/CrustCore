@@ -25,8 +25,8 @@ use crustcore_types::{ApprovalId, BoundedText, Timestamp};
 /// Cap on normalized inbound text (bounded everything; invariant 11).
 pub const MAX_INBOUND_TEXT: usize = 8 * 1024;
 
-/// How many recent `update_id`s the deduper remembers below the high-water mark
-/// (bounded; out-of-order retries within this window are still caught).
+/// How many recent `update_id`s the deduper retains (bounded). Anything older than
+/// the largest value evicted from this window is assumed already processed.
 pub const DEDUPE_WINDOW: usize = 4096;
 
 // ---------------------------------------------------------------------------
@@ -279,8 +279,10 @@ pub struct InboundEnvelope {
 /// kernel event).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RejectReason {
-    /// The source chat is not allowlisted (spoof / unknown chat) — counted and
-    /// (rate-limited) surfaced as `RiskDetected`, per `docs/telegram.md` §4.
+    /// The source chat is not allowlisted (spoof / unknown chat). The daemon loop
+    /// counts these and (rate-limited) surfaces them as `RiskDetected`
+    /// (`docs/telegram.md` §4); the per-chat counter/token-bucket lives with the
+    /// polling loop wiring (`TODO(P9-net)`), not in this pure normalization step.
     NotAllowlisted,
     /// A replayed `update_id` (dedupe).
     Duplicate,
@@ -355,14 +357,17 @@ pub fn normalize(
     })
 }
 
-/// Trims and strips control characters (except none are kept) from inbound text.
+/// Normalizes inbound text: whitespace control chars (newline/tab/…) become a
+/// single space so tokens are not silently joined across line breaks, other
+/// control chars are stripped, runs of whitespace are collapsed, and the result is
+/// trimmed.
 fn clean_text(text: &str) -> String {
-    text.trim()
+    let spaced: String = text
         .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
         .filter(|c| !c.is_control())
-        .collect::<String>()
-        .trim()
-        .to_string()
+        .collect();
+    spaced.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn parse_hash_hex(hex: &str) -> Option<[u8; 32]> {
@@ -382,13 +387,31 @@ fn parse_hash_hex(hex: &str) -> Option<[u8; 32]> {
 
 /// Deduplicates updates by `update_id`. Telegram long-polling can redeliver on
 /// retry; a replay must not double-apply an `/approve` or double-queue a steer
-/// (Phase 9 acceptance, P9.7). Tracks a high-water mark plus a bounded window of
-/// recently-seen ids so out-of-order retries within the window are caught too.
-#[derive(Debug, Default)]
+/// (Phase 9 acceptance, P9.7; `docs/telegram.md` §5).
+///
+/// `seen` is the authoritative set of the most-recent [`DEDUPE_WINDOW`] accepted
+/// ids (bounded). When an id is evicted from `seen`, the **floor** is raised to the
+/// largest *value* ever evicted: any later id at or below the floor that is not in
+/// `seen` is assumed already processed. The floor is value-based (not the
+/// oldest-*inserted* id), so a replay that arrived out of order and was then evicted
+/// is still dropped — the earlier arrival-order floor mis-handled that case.
+#[derive(Debug)]
 pub struct Deduper {
-    high_water: Option<i64>,
+    /// Largest `update_id` value ever evicted from `seen` (the assume-processed
+    /// floor). `i64::MIN` until the window first overflows.
+    floor: i64,
     window: VecDeque<i64>,
     seen: BTreeSet<i64>,
+}
+
+impl Default for Deduper {
+    fn default() -> Self {
+        Deduper {
+            floor: i64::MIN,
+            window: VecDeque::new(),
+            seen: BTreeSet::new(),
+        }
+    }
 }
 
 impl Deduper {
@@ -401,28 +424,22 @@ impl Deduper {
     /// Records `update_id` and returns `true` if it is new (should be processed),
     /// `false` if it is a duplicate (drop it).
     pub fn accept(&mut self, update_id: i64) -> bool {
+        // In the window → definitely a duplicate.
         if self.seen.contains(&update_id) {
             return false;
         }
-        if let Some(hw) = self.high_water {
-            // At or below the window's oldest id and not in `seen` → treat as new
-            // only if above the evicted floor; ids far below are assumed processed.
-            if update_id <= hw
-                && self
-                    .window
-                    .front()
-                    .is_some_and(|&oldest| update_id < oldest)
-            {
-                // Older than anything we still remember: assume already processed.
-                return false;
-            }
+        // At/below the largest evicted value and not retained → already processed.
+        if update_id <= self.floor {
+            return false;
         }
-        self.high_water = Some(self.high_water.map_or(update_id, |hw| hw.max(update_id)));
+        // New: record it, and evict the oldest-by-arrival id if over capacity,
+        // raising the floor to the largest evicted value.
         self.window.push_back(update_id);
         self.seen.insert(update_id);
         while self.window.len() > DEDUPE_WINDOW {
-            if let Some(old) = self.window.pop_front() {
-                self.seen.remove(&old);
+            if let Some(evicted) = self.window.pop_front() {
+                self.seen.remove(&evicted);
+                self.floor = self.floor.max(evicted);
             }
         }
         true
@@ -791,7 +808,8 @@ mod tests {
     fn normalize_strips_control_chars_and_bounds() {
         let allow = ChatAllowlist::of(&[1]);
         let env = normalize(&msg(1, 1, "  hello\u{0007}\nworld  "), &allow, ts(5)).unwrap();
-        assert_eq!(env.normalized_text.as_str(), "helloworld");
+        // Control char stripped; the newline becomes a space (tokens not joined).
+        assert_eq!(env.normalized_text.as_str(), "hello world");
         assert_eq!(env.received_at, ts(5)); // trusted host time
         assert!(matches!(env.kind, EnvelopeKind::Text));
         assert!(!env.steer_flag);
@@ -832,6 +850,27 @@ mod tests {
         // An out-of-order retry within the window is also caught.
         assert!(d.accept(105));
         assert!(!d.accept(105));
+    }
+
+    #[test]
+    fn replay_of_an_evicted_out_of_order_id_is_still_dropped() {
+        // Review dedupe-normalize-1: a high-valued id that arrived early, then was
+        // evicted by a flood of later ids, must NOT be re-accepted on replay. (The
+        // old arrival-order floor mis-handled this; the value floor fixes it.)
+        let mut d = Deduper::new();
+        assert!(d.accept(10));
+        assert!(d.accept(500)); // out-of-order arrival, evicted by the flood below
+                                // Flood with ids strictly above 500 so none collides with / re-accepts it;
+                                // this pushes 500 out of the window and raises the floor past it.
+        for id in 1000..=(1000 + DEDUPE_WINDOW as i64) {
+            assert!(d.accept(id));
+        }
+        assert!(
+            !d.accept(500),
+            "a replayed, since-evicted out-of-order update_id must be dropped"
+        );
+        // A genuinely-new higher id is still accepted.
+        assert!(d.accept(2_000_000));
     }
 
     // --- nonce approvals: operation-bound, expiring, single-use (P9.6, §6) ---
