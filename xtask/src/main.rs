@@ -80,6 +80,7 @@ fn print_help() {
          \x20 verify          fmt + clippy + test + nano build + size gate + forbidden-deps\n\
          \x20 fmt             cargo fmt --check\n\
          \x20 clippy          cargo clippy --workspace -- -D warnings\n\
+         \x20 clippy-live     clippy the feature-gated crustcore-net live transport\n\
          \x20 test            cargo test --workspace\n\
          \x20 nano-build      build crustcore-nano (profile nano)\n\
          \x20 size-check      build nano and enforce the size budget\n\
@@ -157,6 +158,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 fn verify() -> Result<(), String> {
     step("fmt", fmt_check)?;
     step("clippy", clippy)?;
+    step("clippy-live", clippy_live)?;
     step("test", test)?;
     step("forbidden-deps", forbidden_deps)?;
     step("size-check", size_check)?;
@@ -178,6 +180,26 @@ fn clippy() -> Result<(), String> {
         &[
             "clippy",
             "--workspace",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    )
+}
+
+/// Clippy the **feature-gated** live HTTP transport (`crustcore-net --features live`).
+/// The default `--workspace` clippy does not enable per-crate features, so the live
+/// adapters' real-transport code would otherwise go unchecked (P7-live).
+fn clippy_live() -> Result<(), String> {
+    run(
+        "cargo",
+        &[
+            "clippy",
+            "--package",
+            "crustcore-net",
+            "--features",
+            "live",
             "--all-targets",
             "--",
             "-D",
@@ -277,7 +299,60 @@ fn forbidden_deps() -> Result<(), String> {
         ));
     }
     println!("  net build links the std-only protocol only (no crustcore-net / HTTP/TLS)");
+
+    // 3. The DEFAULT `crustcore-net` helper build (no `live` feature) links no HTTP/TLS
+    //    stack — the network transport is gated behind `live` only, so the spawned mock
+    //    helper, the workspace build, and CI stay HTTP-free (P7-live, CLAUDE.md §5.1).
+    let net_helper = package_tree_crate_names("crustcore-net")?;
+    const HTTP_TLS: &[&str] = &[
+        "ureq",
+        "rustls",
+        "ring",
+        "tokio",
+        "hyper",
+        "reqwest",
+        "native-tls",
+    ];
+    let helper_found: Vec<&str> = HTTP_TLS
+        .iter()
+        .copied()
+        .filter(|b| net_helper.iter().any(|n| n == b))
+        .collect();
+    if !helper_found.is_empty() {
+        return Err(format!(
+            "the DEFAULT crustcore-net build links an HTTP/TLS stack: {}. The live transport must be behind the `live` feature only (P7-live).",
+            helper_found.join(", ")
+        ));
+    }
+    println!("  default crustcore-net helper links no HTTP/TLS (live transport is feature-gated)");
     Ok(())
+}
+
+/// Crate names in a package's default (no-default-features) dependency tree.
+fn package_tree_crate_names(package: &str) -> Result<Vec<String>, String> {
+    let out = Command::new("cargo")
+        .args([
+            "tree",
+            "--package",
+            package,
+            "--no-default-features",
+            "--edges",
+            "normal",
+            "--prefix",
+            "none",
+        ])
+        .current_dir(workspace_root())
+        .output()
+        .map_err(|e| format!("failed to run `cargo tree`: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("`cargo tree -p {package}` failed:\n{stderr}"));
+    }
+    let tree = String::from_utf8_lossy(&out.stdout);
+    Ok(tree
+        .lines()
+        .filter_map(|l| l.split_whitespace().next().map(str::to_string))
+        .collect())
 }
 
 /// Returns the set of crate names in the `crustcore` dependency tree built with
