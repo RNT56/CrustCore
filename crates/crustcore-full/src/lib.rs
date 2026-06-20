@@ -6,8 +6,9 @@
 //! belongs to `crustcore-nano` (`docs/nano-size-budget.md`). Nothing linked here
 //! may ever leak back into nano (invariants 19/20).
 //!
-//! Status: Phase 0 scaffold. Re-exports the crate facades so downstream code has
-//! a single entry point; the composed runtime is assembled as the tiers mature.
+//! Status: implemented. Re-exports every tier crate's facade (kernel through
+//! index) behind one entry point; the heavy tiers stay feature-gated upstream so
+//! nano never links them.
 #![forbid(unsafe_code)]
 
 pub use crustcore_backend as backend;

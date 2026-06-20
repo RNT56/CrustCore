@@ -7,9 +7,9 @@
 //! [`docs/architecture.md`](../../../docs/architecture.md) and the data model in
 //! `ROADMAP.md` §7.
 //!
-//! Status: Phase 0 scaffold. The types here are real and stable enough to build
-//! on; behavior (transition rules, encoding) is implemented in later phases and
-//! marked with `TODO(Pn)`.
+//! Status: implemented and stable. These primitive types back the kernel and
+//! every adapter; downstream crates encode their behavior (transition rules,
+//! framing, redaction) on top of them.
 #![forbid(unsafe_code)]
 
 pub mod budget;
