@@ -203,6 +203,16 @@ Receipts and the event log are two interlocking chains:
 - `crustcore inspect` verifies *both* chains: the event-log `frame_hash`/`prev_hash`
   chain ([`event-log.md` §4](./event-log.md)) **and** the receipt MAC/`prev_receipt_hash`
   chain (§6). A break in either is reported.
+- **The receipt↔log join** ([`crustcore_receipts::join::verify_against_log`])
+  closes the last seam: it cross-checks that every receipt's `event_seq` resolves
+  to a frame that exists, is a `ToolCallCompleted`, and carries the same `task_id`
+  and `job_id`. So a receipt is provably tied to a *logged* event, not merely
+  self-consistent — a forged receipt pointing at a missing seq, a non-tool frame,
+  or another task's frame is detected (`NoFrameAtSeq` / `NotAToolCompletion` /
+  `TaskMismatch` / `JobMismatch`). To keep `crustcore-receipts` tiny (it links into
+  nano), the join takes a log-agnostic `FrameRef` per frame rather than depending
+  on the event-log crate; the caller — which holds the `EventLog` — extracts them.
+  The `selftest` path exercises the join end to end against real artifacts.
 - `ToolReceipt` is also the proof object embedded in a `VerifiedPatch`
   ([`backend-contract.md`](./backend-contract.md), [`ROADMAP.md` §7.5](../ROADMAP.md)):
   the verifier's clean-sandbox run produces a receipt that ties the passing
