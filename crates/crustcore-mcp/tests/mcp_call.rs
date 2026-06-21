@@ -14,6 +14,7 @@ use crustcore_mcp::{
 };
 use crustcore_receipts::{MacKey, ReceiptChain};
 use crustcore_secrets::Redactor;
+use crustcore_types::hash::sha256;
 use crustcore_types::{BoundedText, EventSeq, JobId, RepoRef, TaskId, ToolCallId};
 
 const REPO: &str = "RNT56/CrustCore";
@@ -77,10 +78,8 @@ fn call<'a>(
 #[test]
 fn allowed_tool_calls_and_redacts_receipts() {
     let reg = registry(None);
-    let mock = MockMcp::new().on(
-        "tools/call",
-        serde_json::json!({"content":[{"type":"text","text":"found 3 results"}]}),
-    );
+    let response = serde_json::json!({"content":[{"type":"text","text":"found 3 results"}]});
+    let mock = MockMcp::new().on("tools/call", response.clone());
     let redactor = Redactor::new();
     let mut receipts = ReceiptChain::new(MacKey::new([0x42; 32]));
     let args = serde_json::json!({"query":"needle"});
@@ -101,6 +100,57 @@ fn allowed_tool_calls_and_redacts_receipts() {
             // The receipt binds the shown (redacted) bytes AND the real call args.
             assert!(r.receipt.result_matches(r.summary.as_str().as_bytes()));
             assert!(r.receipt.args_matches(&serde_json::to_vec(&args).unwrap()));
+            // The artifact handle commits to the FULL canonical response.
+            assert_eq!(
+                r.artifact_hash,
+                sha256(&serde_json::to_vec(&response).unwrap())
+            );
+        }
+        other => panic!("expected Done, got {other:?}"),
+    }
+}
+
+/// The artifact handle must content-address the **whole** server response, not just a
+/// `content[].text` projection — so a result that also carries `isError` /
+/// `structuredContent` is committed to in full (the receipt's audit anchor), and those
+/// extra fields are still redacted before the model sees them.
+#[test]
+fn artifact_handle_commits_to_full_response_not_just_text() {
+    let reg = registry(None);
+    let mut redactor = Redactor::new();
+    redactor.register("side", b"sk-SIDECHANNEL");
+    // A response that smuggles a secret in a non-text field and flags an error.
+    let response = serde_json::json!({
+        "content": [{"type": "text", "text": "ok"}],
+        "isError": true,
+        "structuredContent": {"token": "sk-SIDECHANNEL"}
+    });
+    let mock = MockMcp::new().on("tools/call", response.clone());
+    let mut receipts = ReceiptChain::new(MacKey::new([0x42; 32]));
+    let args = serde_json::json!({});
+
+    let out = call_tool(
+        &reg,
+        &call("search", &args, None),
+        &mock,
+        &redactor,
+        &mut receipts,
+        &ids(),
+    )
+    .unwrap();
+    match out {
+        CallOutcome::Done(r) => {
+            // Artifact = sha256 of the complete canonical response (not the text part).
+            assert_eq!(
+                r.artifact_hash,
+                sha256(&serde_json::to_vec(&response).unwrap())
+            );
+            // The smuggled secret never reaches the model, even from a non-text field.
+            assert!(!r.summary.as_str().contains("SIDECHANNEL"));
+            assert!(r.summary.as_str().contains("[REDACTED:side]"));
+            // The whole result is shown (redacted), incl. the error flag — not dropped.
+            assert!(r.summary.as_str().contains("isError"));
+            assert!(r.receipt.result_matches(r.summary.as_str().as_bytes()));
         }
         other => panic!("expected Done, got {other:?}"),
     }

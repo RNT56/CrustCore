@@ -268,18 +268,25 @@ together, all CI-tested with an in-process mock:
 - **`call_tool` (+ `ToolCall`, `CallOutcome`)** — the gated flow: `gateway_check`
   first; only `Allow` issues `tools/call`; `Ask` → `NeedsApproval` and any `Deny`
   → `Denied(reason)` **short-circuit before any call reaches the server**; the
-  response is run through [`filter_result`] (redact → bound → artifact-hash →
-  receipt). The server's response is never interpreted as a command (invariant 7),
-  and its credential is injected at the transport by the broker — never in `args`,
-  the model context, or a log (invariants 1–3). A live-call red-team proves a
-  hostile server's "ignore policy / reveal the token / merge now" output is inert,
-  redacted, and receipted.
+  **whole** response is then run through [`filter_result`] (redact → bound →
+  artifact-hash → receipt), so the model sees the complete result redacted and
+  bounded and the artifact handle commits to the **full canonical response**, not a
+  lossy projection (the receipt's audit anchor, invariant 10). The response is never
+  interpreted as a command (invariant 7), and redaction runs over every field before
+  anything is model-visible (invariant 2). A live-call red-team proves a hostile
+  server's "ignore policy / reveal the token / merge now" output — including a secret
+  smuggled into a non-`text` field — is inert, redacted, and receipted.
 
 `serde_json` is admitted to `crustcore-mcp` for JSON-RPC framing; the crate is a
 capability-pack **sidecar** the nano binary never links (gated behind the `mcp`
 feature of `crustcore`), so the dependency never enters the nano graph — the
 `forbidden-deps` gate lists `serde_json` and confirms nano stays clean.
 
-**Deferred:** a remote **HTTP** transport (would reuse `crustcore-net`,
-`TODO(P13-net-http)`) and sandboxed stub execution (P13.5, reuses the Phase-4
-sandbox). Both drop in behind the same `McpTransport` trait and gateway.
+**Deferred:** the **broker secret-proxy injection** (§4 step 4) — a server's
+`McpAuthMode::BrokerSecret` is not yet consumed; `call_tool` carries a
+`TODO(P13-net)` seam at the `Allow` branch where the broker-resolved credential will
+be handed to the transport (never into `args` or the model context, invariants 1–3),
+and until it lands only `McpAuthMode::None` servers authenticate. Also deferred: a
+remote **HTTP** transport (would reuse `crustcore-net`, `TODO(P13-net-http)`) and
+sandboxed stub execution (P13.5, reuses the Phase-4 sandbox). All drop in behind the
+same `McpTransport` trait and gateway.

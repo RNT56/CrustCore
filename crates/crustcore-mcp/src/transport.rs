@@ -16,9 +16,16 @@
 
 use crustcore_types::hash::sha256;
 
-/// Cap on a single framed JSON-RPC message read from a server (bounded — a hostile
-/// server cannot force an unbounded allocation; invariant 11, §6.5).
+/// Cap on a single framed JSON-RPC message **body** read from a server (bounded — a
+/// hostile server cannot force an unbounded allocation; invariant 11, §6.5).
 pub const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Cap on the **header** section of a framed message (the `Content-Length` line plus
+/// the terminating blank line). Headers are tiny in practice; bounding them stops a
+/// hostile server from forcing an unbounded allocation via one enormous header line or
+/// an endless stream of header lines *before* the body cap could ever apply (invariant
+/// 11, §6.5).
+const MAX_HEADER_BYTES: usize = 8 * 1024;
 
 /// Why an MCP transport call failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,9 +195,11 @@ impl McpTransport for MockMcp {
 
 /// A local MCP server over stdio: spawns the server process and speaks
 /// Content-Length-framed JSON-RPC over its stdin/stdout (the MCP stdio transport).
-/// std-only (`process` + serde_json), but exercising it needs a real server binary,
-/// so it is covered by an `#[ignore]`d integration test, not CI. Reads are bounded by
-/// [`MAX_MESSAGE_BYTES`].
+/// std-only (`process` + serde_json). The framing read is bounded against a hostile
+/// server — the header section by [`MAX_HEADER_BYTES`] and the body by
+/// [`MAX_MESSAGE_BYTES`] — and lives in [`read_framed_message`], which is pure over any
+/// [`std::io::BufRead`] and therefore exercised in CI with an in-memory reader; the
+/// full subprocess round-trip is covered by an `#[ignore]`d integration test.
 pub struct StdioMcp {
     child: std::cell::RefCell<std::process::Child>,
     stdin: std::cell::RefCell<std::process::ChildStdin>,
@@ -230,35 +239,60 @@ impl StdioMcp {
     }
 
     fn read_framed(&self) -> Result<serde_json::Value, McpError> {
-        use std::io::{BufRead, Read};
-        let mut stdout = self.stdout.borrow_mut();
-        let mut content_len: Option<usize> = None;
-        loop {
-            let mut line = String::new();
-            let n = stdout
-                .read_line(&mut line)
-                .map_err(|e| McpError::Transport(e.to_string()))?;
-            if n == 0 {
-                return Err(McpError::Transport("server closed the connection".into()));
-            }
-            let trimmed = line.trim_end_matches(['\r', '\n']);
-            if trimmed.is_empty() {
-                break; // end of headers
-            }
-            if let Some(v) = trimmed.strip_prefix("Content-Length:") {
-                content_len = v.trim().parse::<usize>().ok();
-            }
-        }
-        let len = content_len.ok_or_else(|| McpError::BadResponse("no Content-Length".into()))?;
-        if len > MAX_MESSAGE_BYTES {
-            return Err(McpError::BadResponse("message exceeds size cap".into()));
-        }
-        let mut buf = vec![0u8; len];
-        stdout
-            .read_exact(&mut buf)
-            .map_err(|e| McpError::Transport(e.to_string()))?;
-        serde_json::from_slice(&buf).map_err(|e| McpError::BadResponse(e.to_string()))
+        read_framed_message(&mut *self.stdout.borrow_mut())
     }
+}
+
+/// Reads one Content-Length-framed JSON-RPC message from `reader`, **bounded** against a
+/// hostile or buggy server (invariant 11, §6.5): the header section is capped at
+/// [`MAX_HEADER_BYTES`] — so neither one enormous header line nor an endless stream of
+/// header lines can force an unbounded allocation — and the body at [`MAX_MESSAGE_BYTES`],
+/// checked before the buffer is allocated. Pure over any [`std::io::BufRead`], so it is
+/// exercised directly in CI with an in-memory reader (no subprocess).
+///
+/// # Errors
+/// [`McpError::Transport`] if the stream closes early; [`McpError::BadResponse`] if the
+/// headers/body exceed their caps, the `Content-Length` is absent, or the body is not
+/// valid JSON.
+fn read_framed_message<R: std::io::BufRead>(reader: &mut R) -> Result<serde_json::Value, McpError> {
+    use std::io::{BufRead, Read};
+    let mut content_len: Option<usize> = None;
+    let mut header_total: usize = 0;
+    loop {
+        if header_total >= MAX_HEADER_BYTES {
+            return Err(McpError::BadResponse("headers exceed size cap".into()));
+        }
+        // `take` bounds this single line to the remaining header budget, so even a line
+        // with no newline cannot grow `line` past the cap; the running total then bounds
+        // the number of lines. Either way the header section is bounded.
+        let remaining = MAX_HEADER_BYTES - header_total;
+        let mut line = Vec::new();
+        let n = (&mut *reader)
+            .take(remaining as u64)
+            .read_until(b'\n', &mut line)
+            .map_err(|e| McpError::Transport(e.to_string()))?;
+        if n == 0 {
+            return Err(McpError::Transport("server closed the connection".into()));
+        }
+        header_total += n;
+        let text = String::from_utf8_lossy(&line);
+        let trimmed = text.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            break; // end of headers
+        }
+        if let Some(v) = trimmed.strip_prefix("Content-Length:") {
+            content_len = v.trim().parse::<usize>().ok();
+        }
+    }
+    let len = content_len.ok_or_else(|| McpError::BadResponse("no Content-Length".into()))?;
+    if len > MAX_MESSAGE_BYTES {
+        return Err(McpError::BadResponse("message exceeds size cap".into()));
+    }
+    let mut buf = vec![0u8; len];
+    reader
+        .read_exact(&mut buf)
+        .map_err(|e| McpError::Transport(e.to_string()))?;
+    serde_json::from_slice(&buf).map_err(|e| McpError::BadResponse(e.to_string()))
 }
 
 impl Drop for StdioMcp {
@@ -387,5 +421,87 @@ mod tests {
         assert_eq!(result, serde_json::json!({"pong": true}));
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    // --- Framing bounds: exercised in CI over an in-memory reader, no subprocess. ---
+
+    fn framed(body: &[u8]) -> Vec<u8> {
+        let mut f = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+        f.extend_from_slice(body);
+        f
+    }
+
+    #[test]
+    fn read_framed_message_round_trips_a_valid_frame() {
+        let frame = framed(br#"{"jsonrpc":"2.0","id":1,"result":{"pong":true}}"#);
+        let mut r: &[u8] = &frame;
+        let v = read_framed_message(&mut r).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"pong":true}})
+        );
+    }
+
+    #[test]
+    fn read_framed_message_bounds_one_giant_header_line() {
+        // A single header line far larger than the cap, with no newline anywhere.
+        let frame = vec![b'X'; MAX_HEADER_BYTES + 1000];
+        let mut r: &[u8] = &frame;
+        assert!(matches!(
+            read_framed_message(&mut r).unwrap_err(),
+            McpError::BadResponse(_)
+        ));
+    }
+
+    #[test]
+    fn read_framed_message_bounds_endless_header_lines() {
+        // A flood of short, newline-terminated, non-blank lines that never terminate
+        // the header section — bounded by the running total, not the per-line cap.
+        let mut frame = Vec::new();
+        for _ in 0..4000 {
+            frame.extend_from_slice(b"h\r\n");
+        }
+        let mut r: &[u8] = &frame;
+        assert!(matches!(
+            read_framed_message(&mut r).unwrap_err(),
+            McpError::BadResponse(_)
+        ));
+    }
+
+    #[test]
+    fn read_framed_message_rejects_an_oversized_body() {
+        let frame = format!("Content-Length: {}\r\n\r\n", MAX_MESSAGE_BYTES + 1).into_bytes();
+        let mut r: &[u8] = &frame;
+        assert!(matches!(
+            read_framed_message(&mut r).unwrap_err(),
+            McpError::BadResponse(_)
+        ));
+    }
+
+    #[test]
+    fn read_framed_message_requires_content_length() {
+        let mut r: &[u8] = b"\r\n"; // immediate blank line, no Content-Length
+        assert!(matches!(
+            read_framed_message(&mut r).unwrap_err(),
+            McpError::BadResponse(_)
+        ));
+    }
+
+    #[test]
+    fn read_framed_message_errors_on_truncated_body_or_closed_stream() {
+        // Declares 100 bytes, only 4 present → early EOF, not a panic.
+        let mut frame = b"Content-Length: 100\r\n\r\n".to_vec();
+        frame.extend_from_slice(b"abcd");
+        let mut r: &[u8] = &frame;
+        assert!(matches!(
+            read_framed_message(&mut r).unwrap_err(),
+            McpError::Transport(_)
+        ));
+        // A closed/empty stream is a transport error, not a hang or panic.
+        let mut empty: &[u8] = b"";
+        assert!(matches!(
+            read_framed_message(&mut empty).unwrap_err(),
+            McpError::Transport(_)
+        ));
     }
 }

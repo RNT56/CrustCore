@@ -356,9 +356,20 @@ pub struct ToolCall<'a> {
 /// self-description), and only on `Allow` issue the JSON-RPC `tools/call`, then turn
 /// the (untrusted) response into a redacted, bounded, receipted [`McpResult`] via
 /// [`filter_result`]. `Ask` and `Deny` short-circuit **before** any call is made — a
-/// denied or approval-needing tool never reaches the server. The response is never
-/// interpreted as a command (invariant 7); the server's credential is injected at the
-/// transport by the broker, never in `args` or the model context (invariants 1–3).
+/// denied or approval-needing tool never reaches the server.
+///
+/// The model is shown the **whole** response — redacted, then bounded — and the
+/// artifact handle commits to the **full canonical response**, never a lossy
+/// projection, so the receipt's artifact anchors exactly what the (untrusted) server
+/// returned (invariant 10). The response is never interpreted as a command (invariant
+/// 7); redaction runs over every field before anything is model-visible (invariant 2).
+///
+/// **Credential handling (`TODO(P13-net)`):** a server's `McpAuthMode::BrokerSecret`
+/// is **not yet consumed** — the broker secret-proxy injection (`docs/mcp.md` §4 step
+/// 4) is the deferred seam marked in the body; until it lands, only `McpAuthMode::None`
+/// servers authenticate. By construction the credential will be injected at the
+/// transport, never in `args`, the model context, or a log (invariants 1–3): the args
+/// and the redacted summary that flow through here carry no credential.
 ///
 /// # Errors
 /// [`transport::McpError`] if an *authorized* call fails at the transport/RPC layer.
@@ -381,43 +392,30 @@ pub fn call_tool(
         GatewayDecision::Ask => return Ok(CallOutcome::NeedsApproval),
         GatewayDecision::Allow => {}
     }
+    // TODO(P13-net): resolve the server's `McpAuthMode::BrokerSecret` via the broker and
+    // hand the resolved credential to the transport here — never into `args` or the
+    // model context (invariants 1–3). Until that seam lands, only `McpAuthMode::None`
+    // servers authenticate.
     let raw = transport.call(
         "tools/call",
         serde_json::json!({ "name": call.tool, "arguments": call.args.clone() }),
     )?;
-    let output = extract_content_text(&raw);
+    // Hash + show the FULL canonical response (not a lossy text projection): the model
+    // sees the complete result redacted then bounded, and the artifact handle commits to
+    // the whole untrusted response — `filter_result`'s artifact hash is then honestly the
+    // full output it documents.
+    let raw_bytes = serde_json::to_vec(&raw).unwrap_or_default();
     let args_bytes = serde_json::to_vec(call.args).unwrap_or_default();
     let result = filter_result(
         call.server,
         call.tool,
         &args_bytes,
-        &output,
+        &raw_bytes,
         redactor,
         receipts,
         ids,
     );
     Ok(CallOutcome::Done(Box::new(result)))
-}
-
-/// Extracts the model-relevant bytes from a `tools/call` result: the concatenated
-/// `content[].text` parts (what an MCP tool returns), else the whole result
-/// serialized. Whatever is returned is redacted + bounded by [`filter_result`].
-fn extract_content_text(result: &serde_json::Value) -> Vec<u8> {
-    if let Some(items) = result.get("content").and_then(|c| c.as_array()) {
-        let mut out = String::new();
-        for item in items {
-            if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
-                if !out.is_empty() {
-                    out.push('\n');
-                }
-                out.push_str(t);
-            }
-        }
-        if !out.is_empty() {
-            return out.into_bytes();
-        }
-    }
-    serde_json::to_vec(result).unwrap_or_default()
 }
 
 /// A small helper to bound a [`ModelVisibleText`] to a byte cap (the redactor
