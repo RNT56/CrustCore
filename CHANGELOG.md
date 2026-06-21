@@ -45,7 +45,13 @@ agent/PR/role/size/invariant audit trail.
   never-authority** (invariants 2, 7, 11): a red-team proves a hostile doc the embedder
   ranks as the nearest neighbor is still inert, redacted (a secret in it is gone), bounded
   data — semantic ranking changes only *which* observation is surfaced, never its
-  (non-)authority. 5 new tests (cosine, embedder similarity, NN ranking + k-bound,
+  (non-)authority. **Adversarial review: 2 findings, 1 confirmed and fixed** (`cosine`
+  could return `NaN` for huge-magnitude f32 vectors via squared-norm overflow, violating
+  its `[-1,1]`-or-`0.0` contract — only reachable via the deferred live embedder, but
+  fixed by accumulating norms in `f64` + coercing any non-finite result to `0.0`); the
+  refuted finding (a `nearest` test asserting a count that rested on an incidental FNV-1a
+  bucket collision) was hardened to assert the load-bearing ranking + k-bound instead. 5
+  new tests (cosine incl. large vectors, embedder similarity, NN ranking + k-bound,
   semantic select ranks+redacts, hostile-doc red-team). No new deps; `crustcore-index` is
   a sidecar (not in nano); nano unchanged at 412.0 KiB.
 - **v0.3 B2-gh-app — hardened GitHub webhook ingestion.** A new

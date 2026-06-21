@@ -59,17 +59,22 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     h
 }
 
-/// Cosine similarity in `[-1, 1]`. Returns `0.0` for a zero vector or a length mismatch
-/// (a safe, neutral default — never a panic).
+/// Cosine similarity in `[-1, 1]`. Returns `0.0` for a zero vector, a length mismatch, or
+/// a non-finite result (a safe, neutral default — never a panic, never `NaN`).
+///
+/// Norms are accumulated in `f64` so a squared sum cannot overflow for any representable
+/// `f32` input (an overflow would otherwise produce `+inf` and then `NaN`); a non-finite
+/// final value is coerced to `0.0`, so the documented range holds for all finite inputs.
 #[must_use]
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() {
         return 0.0;
     }
-    let mut dot = 0f32;
-    let mut na = 0f32;
-    let mut nb = 0f32;
+    let mut dot = 0f64;
+    let mut na = 0f64;
+    let mut nb = 0f64;
     for (x, y) in a.iter().zip(b) {
+        let (x, y) = (f64::from(*x), f64::from(*y));
         dot += x * y;
         na += x * x;
         nb += y * y;
@@ -77,7 +82,12 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     if na <= 0.0 || nb <= 0.0 {
         return 0.0;
     }
-    dot / (na.sqrt() * nb.sqrt())
+    let sim = dot / (na.sqrt() * nb.sqrt());
+    if sim.is_finite() {
+        sim as f32
+    } else {
+        0.0
+    }
 }
 
 /// A vector-backed memory: [`MemoryEntry`]s paired with their embedding. Retrieval is a
@@ -182,6 +192,10 @@ mod tests {
         assert!(cosine(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6); // orthogonal → 0
         assert!(cosine(&[0.0, 0.0], &[1.0, 1.0]).abs() < 1e-6); // zero vector → 0
         assert!(cosine(&[1.0], &[1.0, 2.0]).abs() < 1e-6); // length mismatch → 0
+                                                           // Large-magnitude finite vectors: f64 norm accumulation avoids the f32
+                                                           // squared-norm overflow that would otherwise yield NaN (contract: [-1,1] or 0).
+        assert!((cosine(&[1e20, 1e20], &[1e20, 1e20]) - 1.0).abs() < 1e-6);
+        assert!(cosine(&[f32::MAX, f32::MAX], &[f32::MAX, f32::MAX]).is_finite());
     }
 
     #[test]
@@ -198,23 +212,30 @@ mod tests {
     fn nearest_ranks_by_similarity_and_bounds_k() {
         let e = HashEmbedder;
         let mut mem = VectorMemory::new();
+        // The query genuinely shares 3 tokens with "verify" and 1 with "clippy-tip", and
+        // none with "revenue" — so the ranking is driven by real token overlap, not an
+        // incidental hash-bucket collision.
         mem.put(
             entry("verify", "cargo xtask verify runs fmt clippy test"),
             e.embed("cargo xtask verify fmt clippy test"),
         );
         mem.put(
-            entry("deploy", "deploy the service to production"),
-            e.embed("deploy service production"),
+            entry("clippy-tip", "clippy lints catch common mistakes"),
+            e.embed("clippy lints mistakes"),
         );
         mem.put(
-            entry("style", "use rustfmt defaults for formatting"),
-            e.embed("rustfmt formatting style"),
+            entry("revenue", "quarterly revenue projections"),
+            e.embed("quarterly revenue projections"),
         );
 
-        let q = e.embed("how do I run cargo verify with clippy");
-        let hits = mem.nearest(&q, 2);
-        assert_eq!(hits.len(), 2); // k bounds the result
-        assert_eq!(hits[0].key.as_str(), "verify"); // most similar first
+        let q = e.embed("run cargo verify with clippy");
+        let hits = mem.nearest(&q, 5);
+        // The dominant match (3 shared tokens) ranks first — the load-bearing property.
+        assert_eq!(hits[0].key.as_str(), "verify");
+        // The partial match (shares "clippy") is retrieved too.
+        assert!(hits.iter().any(|h| h.key.as_str() == "clippy-tip"));
+        // k bounds the result regardless of how many are positively-similar.
+        assert_eq!(mem.nearest(&q, 1).len(), 1);
     }
 
     #[test]
