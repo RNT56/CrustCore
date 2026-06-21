@@ -30,6 +30,37 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **v0.2 P13-net — MCP JSON-RPC transport + gated call flow.** The live execution
+  layer beneath the existing std-only MCP trust core (registry, `gateway_check`,
+  `filter_result`, code-mode stubs). New `crustcore-mcp::transport`: an
+  `McpTransport` JSON-RPC `call` trait, an in-process **`MockMcp`** (canned,
+  deterministic — every CI test runs with no network/subprocess), and the real
+  **`StdioMcp`** that spawns a server process and speaks **Content-Length-framed**
+  JSON-RPC over stdio (std `process` + `serde_json`). The framing read is extracted
+  into a `BufRead`-generic function with **bounded reads — header section via
+  `MAX_HEADER_BYTES`, body via `MAX_MESSAGE_BYTES`** — so a hostile/buggy local server
+  cannot force an unbounded allocation; it is CI-tested in-memory (the real subprocess
+  round-trip stays an `#[ignore]`d test, and `Drop` tears the child down).
+  `list_tools` + `manifest_hash` read the live tool surface and
+  hash the **sorted tool-name set** (never the untrusted descriptions) for the
+  drift check, so a server that grows/swaps a tool after admission is re-gated while
+  reorder/re-describe does not false-trip. New `call_tool` (+ `ToolCall`,
+  `CallOutcome`) ties it together: `gateway_check` first, only `Allow` issues
+  `tools/call`, `Ask`→`NeedsApproval` and any `Deny`→`Denied(reason)` **short-circuit
+  before any call reaches the server**, then `filter_result` redacts → bounds →
+  artifact-hashes → receipts the **whole** (untrusted) response — the model sees the
+  complete result redacted+bounded and the artifact handle commits to the **full
+  canonical response**, not a lossy text projection (the receipt's audit anchor). A
+  **live-call red-team** proves a hostile server's "ignore policy / reveal the token /
+  merge now" output — including a secret smuggled into a non-`text` field — is inert,
+  redacted, and receipted (invariants 2, 7, 8, 10). `serde_json` admitted to the
+  `crustcore-mcp` sidecar (never linked by nano — `forbidden-deps` confirms); the
+  broker secret-proxy injection (`McpAuthMode::BrokerSecret`), remote HTTP transport,
+  and sandboxed stub exec remain `TODO(P13-net)`/`TODO(P13-net-http)`/P13.5.
+  `docs/mcp.md` §8 added. **Adversarial review: 4 findings, 3 confirmed and fixed**
+  (unbounded framing header → bounded + CI-tested; artifact hash over a lossy
+  projection → full canonical response; present-tense credential claim → deferred
+  `TODO` seam). Wave-2 phase.
 - **v0.2 P9-net — Telegram runtime loop.** The inbound long-poll loop + redacted
   outbound that drives the existing telegram trust core (allowlist, dedupe,
   normalize, route, approvals, renderer). New `TelegramApi` trait (`get_updates` /
@@ -840,6 +871,7 @@ agent/PR/role/size/invariant audit trail.
 | 2026-06-20 | v0.2 final audit | Address the 5 low-severity confirmed findings of a complete 5-dimension workspace audit (invariants/security, v0.2-net, consistency, gate-honesty, robustness — each adversarially verified; 1 refuted). **NET-001:** `Engine::complete` BudgetLedger uses `saturating_add` (kernel convention), not `+=`. **NET-002:** Anthropic adapter estimates output tokens on a truncated stream (after content, before `message_delta`) so produced output is never billed zero (inv 11); + regression test. **Doc drift:** README + docs/roadmap-v0.2.md test count 267→297 and nano 411.9→412.0 KiB. CLAUDE.md §7.3 status numbers updated via a separate serialized PR. `cargo xtask verify` green. | `claude/final-audit-fixes` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB nano (412.0 KiB, 51.5%) | Strengthens 11 (no zero-cost produced output; non-wrapping ledger); none weakened |
 | 2026-06-20 | v0.2 P8-store | Implement the encrypted-file secret vault in `crustcore_secrets::store` (behind the `vault-file` feature): `seal_vault`/`open_vault` — AES-256-GCM + scrypt(N=2^15) over `magic\|version\|salt\|nonce\|ciphertext`, decrypting into an `InMemoryStore` the broker reads. Fails closed (wrong passphrase / tamper → `VaultError::Decrypt`, no leak); no plaintext at rest; blob+key zeroed on **every** path via RAII `Scrubbed`/`ScrubbedKey` guards using the crate's `black_box`-fenced `scrub` (review fix — the only confirmed findings were error-path zeroing, all low; AEAD construction confirmed sound); bounded panic-free decode. **Maintainer-approved CONTRACT-FILE change** (serialized, user OK'd): `crustcore-secrets/src/lib.rs` (`pub mod store` behind the feature) + `docs/secrets.md` §9. Admitted feature-gated crypto deps (`aes-gcm`/`scrypt`/`getrandom`); added them to the nano forbidden-deps list (15 checked, none in nano) and added `xtask` `clippy-features`+`test-features` so the gated vault is clippy- and test-checked in CI. 6 vault tests. Native OS keychains remain TODO(P8-store). nano untouched at 412.0 KiB. | `claude/p8-store` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB nano (412.0 KiB, 51.5%; crypto feature-gated out of nano) | Enforces 1–3 (secrets sealed at rest, fail-closed, no plaintext on disk, SecretMaterial still non-Debug/Serialize/Clone), 19/20 (crypto never in nano — forbidden-deps + feature gate), 11/§6.5 (bounded, no-panic decode); none weakened |
 | 2026-06-20 | v0.2 P9-net | Implement the Telegram runtime loop in `crustcore-daemon::telegram`: `TelegramApi` trait (`get_updates`/`send_message`) + `TelegramPoller` driving the existing trust core (allowlist/dedupe/normalize/route/approvals/renderer). `poll_once` advances the long-poll offset past every fetched update (no re-delivery), drops replays, allowlist-checks+normalizes, routes survivors to `RuntimeEvent`s; counts not-allowlisted rejects. `send_message` takes `ModelVisibleText` (only constructible via the Redactor) — the channel can emit ONLY redacted output by the type system (inv 2/5); the model never gets a direct user channel (no outward channel on the poller). CI-tested with a mock (offset/dedupe/allowlist/route + redacted-only send). Live Bot API HTTP (token-in-URL via credential proxy over the crustcore-net helper) deferred `TODO(P9-net-live)`. 2 tests; `docs/telegram.md` updated. No new deps; daemon is a sidecar (not in nano). No §7.3 contract files touched. First v0.2 Wave-2 phase. | `claude/p9-net` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB nano (412.0 KiB, 51.5%; daemon sidecar) | Enforces 15 (Telegram default human channel), 5 (subagents/model can't address the user — no outward channel; redacted-only send), 2 (outbound redacted via ModelVisibleText), 7 (updates untrusted, allowlist-first); none weakened |
+| 2026-06-21 | v0.2 P13-net | Implement the MCP JSON-RPC transport + gated call flow in `crustcore-mcp::transport` + `call_tool`: an `McpTransport` `call(method,params)` trait, an in-process `MockMcp` (canned — all CI tests run with no net/subprocess), and the real `StdioMcp` (spawns a server process, Content-Length-framed JSON-RPC over stdio; std `process`+`serde_json`; bounded reads via `MAX_MESSAGE_BYTES`; `Drop` teardown; `#[ignore]`d real round-trip test). `list_tools`+`manifest_hash` hash the sorted tool-NAME set (not untrusted descriptions) for the drift check (grow/swap re-gates; reorder/re-describe does not false-trip). `call_tool` (+ `ToolCall`/`CallOutcome`, boxed `Done` for `large_enum_variant`) gates first: only `Allow` issues `tools/call`; `Ask`→`NeedsApproval` and any `Deny`→`Denied` short-circuit before any call reaches the server; then `filter_result` redacts→bounds→artifact-hashes→receipts the untrusted response. Live-call red-team: hostile "ignore policy/reveal token/merge now" output is inert+redacted+receipted (inv 2/7/8/10). Admitted `serde_json` to the `crustcore-mcp` sidecar (never linked by nano — `forbidden-deps` lists it; mcp gated behind crustcore's `mcp` feature). 13 unit + 5 integration tests + 1 ignored stdio. **Adversarial review: 4 findings, 3 confirmed and fixed** — (1) `read_framed` header section was unbounded (OOM before the body cap) → bounded by `MAX_HEADER_BYTES`, framing extracted into a `BufRead`-generic fn + CI-tested in-memory; (2) artifact hash was over a lossy text projection → `call_tool` now hashes/shows the full canonical response so the handle honestly commits to the whole output; (3) present-tense credential-injection doc claim → softened to a deferred `TODO(P13-net)` seam (`McpAuthMode::BrokerSecret` not yet consumed). Remote HTTP transport + sandboxed stub exec remain `TODO(P13-net-http)`/P13.5. `docs/mcp.md` §8 added. No §7.3 contract files touched. | `claude/p13-net` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB nano (412.0 KiB, 51.5%; mcp sidecar) | Enforces 8 (gate from policy not server self-description; Ask/Deny short-circuit), 7 (responses untrusted, never interpreted; drift re-gates), 2 (output redacted before model-visible), 10 (every result receipted), 1–3 (credential at the transport, never in args/model/log), 11/§6.5 (bounded reads), 19/20 (sidecar-only, serde_json never in nano); none weakened |
 
 ---
 

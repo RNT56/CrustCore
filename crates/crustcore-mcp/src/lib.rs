@@ -17,6 +17,8 @@
 //! network + the Phase-4 sandbox); the trust-critical gateway logic is fully tested.
 #![forbid(unsafe_code)]
 
+pub mod transport;
+
 use crustcore_receipts::{ReceiptChain, ReceiptParams, ToolReceipt};
 use crustcore_secrets::{ModelVisibleText, Redactor};
 use crustcore_types::hash::sha256;
@@ -313,6 +315,107 @@ pub fn filter_result(
         artifact_hash,
         receipt,
     }
+}
+
+// ---------------------------------------------------------------------------
+// The gated call flow (P13-net): gateway_check → JSON-RPC tools/call → filter_result
+// ---------------------------------------------------------------------------
+
+/// The outcome of a gated MCP tool call.
+#[derive(Debug)]
+pub enum CallOutcome {
+    /// Authorized, performed, and turned into a redacted, bounded, receipted result.
+    /// Boxed: [`McpResult`] (its receipt) dwarfs the other variants, so an unboxed
+    /// `Done` would bloat every `CallOutcome` (`clippy::large_enum_variant`).
+    Done(Box<McpResult>),
+    /// The gateway denied the call (the typed reason) — no call was made.
+    Denied(GatewayDeny),
+    /// The tool's policy is `Ask` — an approval must be obtained before calling.
+    NeedsApproval,
+}
+
+/// A request to call one MCP tool: the target server/tool, the repo context the call
+/// runs under, the (already-redacted, non-secret) arguments, and the live tool-surface
+/// hash for drift detection. Grouping these keeps [`call_tool`] to one request value
+/// instead of a long positional argument list.
+pub struct ToolCall<'a> {
+    /// The target server (must be registered).
+    pub server: McpServerId,
+    /// The tool name — the gateway keys policy on this.
+    pub tool: &'a str,
+    /// The repo the call runs under (checked against the record's `allowed_repos`).
+    pub repo: &'a str,
+    /// The tool arguments — already redacted, non-secret (the receipt binds these).
+    pub args: &'a serde_json::Value,
+    /// The live tool-surface hash, or `None` to skip drift detection (`docs/mcp.md` §4).
+    pub live_manifest_hash: Option<[u8; 32]>,
+}
+
+/// Performs a **gated** MCP tool call end to end (`docs/mcp.md` §4): check the gateway
+/// (the decision comes from the registry's `tool_policies`, **never** the server's
+/// self-description), and only on `Allow` issue the JSON-RPC `tools/call`, then turn
+/// the (untrusted) response into a redacted, bounded, receipted [`McpResult`] via
+/// [`filter_result`]. `Ask` and `Deny` short-circuit **before** any call is made — a
+/// denied or approval-needing tool never reaches the server.
+///
+/// The model is shown the **whole** response — redacted, then bounded — and the
+/// artifact handle commits to the **full canonical response**, never a lossy
+/// projection, so the receipt's artifact anchors exactly what the (untrusted) server
+/// returned (invariant 10). The response is never interpreted as a command (invariant
+/// 7); redaction runs over every field before anything is model-visible (invariant 2).
+///
+/// **Credential handling (`TODO(P13-net)`):** a server's `McpAuthMode::BrokerSecret`
+/// is **not yet consumed** — the broker secret-proxy injection (`docs/mcp.md` §4 step
+/// 4) is the deferred seam marked in the body; until it lands, only `McpAuthMode::None`
+/// servers authenticate. By construction the credential will be injected at the
+/// transport, never in `args`, the model context, or a log (invariants 1–3): the args
+/// and the redacted summary that flow through here carry no credential.
+///
+/// # Errors
+/// [`transport::McpError`] if an *authorized* call fails at the transport/RPC layer.
+pub fn call_tool(
+    registry: &McpRegistry,
+    call: &ToolCall,
+    transport: &dyn transport::McpTransport,
+    redactor: &Redactor,
+    receipts: &mut ReceiptChain,
+    ids: &McpCallIds,
+) -> Result<CallOutcome, transport::McpError> {
+    match gateway_check(
+        registry,
+        call.server,
+        call.tool,
+        call.repo,
+        call.live_manifest_hash,
+    ) {
+        GatewayDecision::Deny(reason) => return Ok(CallOutcome::Denied(reason)),
+        GatewayDecision::Ask => return Ok(CallOutcome::NeedsApproval),
+        GatewayDecision::Allow => {}
+    }
+    // TODO(P13-net): resolve the server's `McpAuthMode::BrokerSecret` via the broker and
+    // hand the resolved credential to the transport here — never into `args` or the
+    // model context (invariants 1–3). Until that seam lands, only `McpAuthMode::None`
+    // servers authenticate.
+    let raw = transport.call(
+        "tools/call",
+        serde_json::json!({ "name": call.tool, "arguments": call.args.clone() }),
+    )?;
+    // Hash + show the FULL canonical response (not a lossy text projection): the model
+    // sees the complete result redacted then bounded, and the artifact handle commits to
+    // the whole untrusted response — `filter_result`'s artifact hash is then honestly the
+    // full output it documents.
+    let raw_bytes = serde_json::to_vec(&raw).unwrap_or_default();
+    let args_bytes = serde_json::to_vec(call.args).unwrap_or_default();
+    let result = filter_result(
+        call.server,
+        call.tool,
+        &args_bytes,
+        &raw_bytes,
+        redactor,
+        receipts,
+        ids,
+    );
+    Ok(CallOutcome::Done(Box::new(result)))
 }
 
 /// A small helper to bound a [`ModelVisibleText`] to a byte cap (the redactor
