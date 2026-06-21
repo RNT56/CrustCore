@@ -17,6 +17,7 @@
 //! network + the Phase-4 sandbox); the trust-critical gateway logic is fully tested.
 #![forbid(unsafe_code)]
 
+pub mod server;
 pub mod transport;
 
 use crustcore_receipts::{ReceiptChain, ReceiptParams, ToolReceipt};

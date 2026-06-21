@@ -290,3 +290,33 @@ and until it lands only `McpAuthMode::None` servers authenticate. Also deferred:
 remote **HTTP** transport (would reuse `crustcore-net`, `TODO(P13-net-http)`) and
 sandboxed stub execution (P13.5, reuses the Phase-4 sandbox). All drop in behind the
 same `McpTransport` trait and gateway.
+
+## 9. Server mode (v0.3 B1-mcp-modes)
+
+§1–§8 cover CrustCore as an MCP **client/gateway** — gating its *calls* to other
+servers. **B1-mcp-modes** adds the inverse: CrustCore as an MCP **server**
+(`crustcore-mcp::server`), exposing a *curated* set of its own capabilities to other
+MCP clients. The trust direction flips, the posture does not:
+
+- **`McpServer` + `ExposedTool`** — nothing is callable until `expose`d. An
+  `ExposedTool` is just a name + bounded description + `ToolDecision`; there is
+  deliberately **no** variant by which a client could reach a secret, an approval, or a
+  kernel internal, so the exposed surface is a typed allowlist (invariants 4, 8).
+- **`handle_request`** — dispatches an (untrusted, invariant 7) inbound JSON-RPC request:
+  `initialize` (handshake), `tools/list` (the curated surface, descriptions bounded),
+  and `tools/call`. A call is **gated first** — an unexposed tool, a `Deny`, or an `Ask`
+  short-circuits to a typed JSON-RPC error and the handler never runs; only an exposed
+  `Allow` tool executes (default-deny).
+- **`ToolHandler`** runs the curated capability (live: `verify`/`inspect`; a mock drives
+  CI). Its output is **redacted** (no CrustCore secret reaches the client, invariant 2),
+  **bounded** (invariant 11), and **receipted** (every served call is an auditable
+  record, invariant 10) before it leaves — and a handler error string is redacted +
+  bounded too, so a path or secret never leaks through an error.
+
+The request/policy/redaction/receipt core is CI-tested with canned JSON-RPC requests
+(mock peers) including a **hostile-client red-team** (a client asking for `read_secret`
+/ `approve_merge` / `kernel_step` is default-denied; a leaky handler's secret is redacted
+before the response). The live serving transport (listening on stdio/HTTP, reusing the
+P13 `transport`) is `TODO(B1-mcp-modes-live)`. The client/registry admission + per-repo
+scoping (B1.3) is already provided by the §3 `McpRegistry`. Zero deps beyond the
+`serde_json` admitted in P13-net; never linked into nano.
