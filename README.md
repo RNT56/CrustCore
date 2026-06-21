@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/crustcore_header_op.png" alt="CrustCore — a sub-800 kB Rust coding-agent verifier kernel" width="820">
+<img src="assets/crustcore_transparent.png" alt="CrustCore — a sub-800 kB Rust coding-agent verifier kernel" width="820">
 
 # CrustCore
 
