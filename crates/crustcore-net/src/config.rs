@@ -109,6 +109,13 @@ pub fn parse_providers(json: &str) -> Result<Vec<ProviderConfig>, String> {
                 streaming: bool_field(m, "streaming", true),
                 cost_per_1k_micros: u64_field(m, "cost_per_1k_micros", 0),
                 local,
+                // Additive capability flags (Track C C1-providers). These default
+                // OFF — unlike `streaming` (default true) — so a model the operator
+                // does not explicitly mark as embeddings/rerank-capable is never
+                // routed those requests (invariant 17: fail closed by omission).
+                embeddings: bool_field(m, "embeddings", false),
+                rerank: bool_field(m, "rerank", false),
+                embedding_dims: u32_field(m, "embedding_dims", 0),
             });
         }
         if models.is_empty() {
@@ -174,6 +181,35 @@ mod tests {
         assert!(cfg[2].models[0].local);
         // Unspecified caps default conservatively (tools off).
         assert!(!cfg[2].models[0].tools);
+    }
+
+    #[test]
+    fn capability_flags_default_off_and_parse_when_present() {
+        // Track C C1-providers: embeddings/rerank default OFF by omission (invariant
+        // 17), and parse correctly when the operator sets them. embedding_dims
+        // defaults to 0.
+        let json = r#"[
+          { "id":"openai", "kind":"openai", "base_url":"https://api.openai.com",
+            "secret_label":"openai-key",
+            "models":[
+              {"model":"gpt-x"},
+              {"model":"emb-1","embeddings":true,"embedding_dims":1536},
+              {"model":"rr-1","rerank":true}
+            ] }
+        ]"#;
+        let cfg = parse_providers(json).unwrap();
+        let models = &cfg[0].models;
+        // Omitted → all off (fail closed).
+        assert!(!models[0].embeddings);
+        assert!(!models[0].rerank);
+        assert_eq!(models[0].embedding_dims, 0);
+        // Explicit embeddings model.
+        assert!(models[1].embeddings);
+        assert!(!models[1].rerank);
+        assert_eq!(models[1].embedding_dims, 1536);
+        // Explicit rerank model.
+        assert!(models[2].rerank);
+        assert!(!models[2].embeddings);
     }
 
     #[test]

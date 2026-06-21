@@ -1,0 +1,31 @@
+[package]
+name = "crustcore-session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Read-only conversation/session/artifact VIEW over the CrustCore event log (C4-session)."
+
+# NON-NANO sidecar crate (CLAUDE.md §5.1). It is a redacted, verify-or-refuse VIEW
+# over the hash-chained event log — never a competing store. It is consumed by the
+# daemon, crustcore-flow (C3), and the dev UI (C7); it is NEVER added to the nano
+# feature graph, so `serde`/`serde_json` (used only for snapshot persistence here)
+# never reach nano (proven by `cargo xtask forbidden-deps`).
+[dependencies]
+crustcore-types = { workspace = true }
+crustcore-kernel = { workspace = true }
+crustcore-eventlog = { workspace = true }
+crustcore-receipts = { workspace = true }
+crustcore-secrets = { workspace = true }
+crustcore-index = { workspace = true }
+# Snapshot persistence only. Sidecar-local; never linked into nano.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+default = []
+# Reserved for the large-scale persistence/perf path against a real daemon-produced
+# log (NOT in CI). The deterministic core needs none of it.
+live-session = []

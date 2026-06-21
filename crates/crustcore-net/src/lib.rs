@@ -33,8 +33,11 @@
 
 pub mod config;
 pub mod credsource;
+pub mod embed;
 pub mod github;
+pub mod modality;
 pub mod providers;
+pub mod rerank;
 pub mod transport;
 
 use std::io::{BufRead, Write};
@@ -65,6 +68,16 @@ pub struct ModelCard {
     pub cost_per_1k_micros: u64,
     /// Whether this model runs on a local endpoint (privacy / `local_only` routing).
     pub local: bool,
+    /// Embedding support (additive, default off — Track C C1-providers). A model
+    /// that does not declare it is never selected for an embedding request
+    /// (invariant 17: capability fails closed, never on by omission).
+    pub embeddings: bool,
+    /// Rerank support (additive, default off — Track C C1-providers). Fails closed
+    /// the same way `embeddings` does.
+    pub rerank: bool,
+    /// Embedding dimensionality, or `0` when unknown / not an embedding model
+    /// (additive, default `0` — Track C C1-providers).
+    pub embedding_dims: u32,
 }
 
 impl ModelCard {
@@ -78,6 +91,11 @@ impl ModelCard {
             structured: self.structured,
             streaming: self.streaming,
             cost_per_1k_micros: self.cost_per_1k_micros,
+            // Additive capability fields (Track C C1-providers); the completion
+            // mapping above is byte-identical, these are appended only.
+            embeddings: self.embeddings,
+            rerank: self.rerank,
+            embedding_dims: self.embedding_dims,
         }
     }
 
@@ -236,6 +254,15 @@ impl Engine {
     #[must_use]
     pub fn ledger(&self) -> &BudgetLedger {
         &self.ledger
+    }
+
+    /// Mutable access to the aggregate budget ledger, so embedding/rerank engines can
+    /// accumulate into the **same** ledger as completion — one per-task ceiling across
+    /// all three modalities (invariant 11; Track C C1-providers). The completion path
+    /// (`complete`) is unchanged; this only exposes the existing ledger for the
+    /// unified multi-modal engine to share.
+    pub fn ledger_mut(&mut self) -> &mut BudgetLedger {
+        &mut self.ledger
     }
 
     /// Routes and runs a completion, streaming chunks to `sink`. Composes the
@@ -440,6 +467,11 @@ pub fn run_reliable(
 /// binary runs over stdin/stdout (std blocking I/O — no async runtime needed for
 /// a single-in-flight request/response helper).
 ///
+/// This entry point serves the **completion** path only (the frozen P7 engine). An
+/// [`Request::Embed`]/[`Request::Rerank`] received here fails closed with a typed
+/// [`Response::Error`] (this engine has no embedding/rerank registry). To serve all
+/// three modalities, use [`MultiModalEngine::serve`].
+///
 /// # Errors
 /// [`ProtoError`] on a transport/decode failure (a failed *routing* is reported
 /// in-band as [`Response::Error`], not as an `Err` here).
@@ -449,37 +481,181 @@ pub fn serve<R: BufRead, W: Write>(
     w: &mut W,
 ) -> Result<(), ProtoError> {
     while let Some(req) = read_request(r)? {
-        match req {
-            Request::Probe => {
-                for (pid, card) in engine.registry() {
+        serve_one(engine, None, None, req, w)?;
+    }
+    Ok(())
+}
+
+/// Routes a single request through the completion `engine` and (optionally) the
+/// embedding/rerank engines, writing the response(s) to `w`. The embed/rerank engines
+/// accumulate into the completion engine's **single shared** ledger (invariant 11).
+/// When an embed/rerank engine is absent, that modality fails closed.
+fn serve_one<W: Write>(
+    engine: &mut Engine,
+    embed: Option<&modality::EmbedEngine>,
+    rerank: Option<&modality::RerankEngine>,
+    req: Request,
+    w: &mut W,
+) -> Result<(), ProtoError> {
+    match req {
+        Request::Probe => {
+            // The unified registry: completion models, then embedding, then rerank.
+            // Capability flags ride on each card via `to_info` (default off for
+            // completion-only cards), so the probe surfaces capability across the
+            // helper boundary (Track C C1-providers).
+            for (pid, card) in engine.registry() {
+                write_response(w, &Response::Model(card.to_info(&pid)))?;
+            }
+            if let Some(e) = embed {
+                for (pid, card) in e.registry() {
                     write_response(w, &Response::Model(card.to_info(&pid)))?;
                 }
-                write_response(w, &Response::RegistryEnd)?;
             }
-            Request::Complete(c) => {
-                let stream = c.stream;
-                // Stream chunks to `w` during the call; the closure's borrow of `w`
-                // is scoped to this block so `w` is free again for the Final/Error.
-                let result = {
-                    let writer = &mut *w;
-                    let mut sink = |t: &str| {
-                        if stream {
-                            let _ = write_response(
-                                writer,
-                                &Response::Chunk(BoundedText::truncated(t, MAX_TEXT_BYTES)),
-                            );
-                        }
-                    };
-                    engine.complete(&c, &mut sink)
-                };
-                match result {
-                    Ok(fin) => write_response(w, &Response::Final(fin))?,
-                    Err(e) => write_response(w, &Response::Error(e.reason()))?,
+            if let Some(rr) = rerank {
+                for (pid, card) in rr.registry() {
+                    write_response(w, &Response::Model(card.to_info(&pid)))?;
                 }
             }
+            write_response(w, &Response::RegistryEnd)?;
+        }
+        Request::Complete(c) => {
+            let stream = c.stream;
+            // Stream chunks to `w` during the call; the closure's borrow of `w`
+            // is scoped to this block so `w` is free again for the Final/Error.
+            let result = {
+                let writer = &mut *w;
+                let mut sink = |t: &str| {
+                    if stream {
+                        let _ = write_response(
+                            writer,
+                            &Response::Chunk(BoundedText::truncated(t, MAX_TEXT_BYTES)),
+                        );
+                    }
+                };
+                engine.complete(&c, &mut sink)
+            };
+            match result {
+                Ok(fin) => write_response(w, &Response::Final(fin))?,
+                Err(e) => write_response(w, &Response::Error(e.reason()))?,
+            }
+        }
+        Request::Embed(e) => {
+            let resp = match embed {
+                None => Response::Error(
+                    RouteError::NoModelForConstraints("requires embeddings".into()).reason(),
+                ),
+                Some(engine_e) => {
+                    let mreq = modality::EmbeddingRequest::new(e.role, e.inputs, e.max_cost_micros);
+                    match engine_e.embed(&mreq, engine.ledger_mut()) {
+                        Ok((resp, fallbacks, provider, model)) => {
+                            Response::Embedding(crustcore_netproto::EmbeddingResult {
+                                vectors: resp.vectors,
+                                usage: resp.usage,
+                                provider,
+                                model,
+                                fallbacks,
+                            })
+                        }
+                        Err(err) => Response::Error(err.reason()),
+                    }
+                }
+            };
+            write_response(w, &resp)?;
+        }
+        Request::Rerank(r) => {
+            let resp = match rerank {
+                None => Response::Error(
+                    RouteError::NoModelForConstraints("requires rerank".into()).reason(),
+                ),
+                Some(engine_r) => {
+                    let mreq = modality::RerankRequest::new(
+                        r.role,
+                        r.query,
+                        r.documents,
+                        r.max_cost_micros,
+                    );
+                    match engine_r.rerank(&mreq, engine.ledger_mut()) {
+                        Ok((resp, fallbacks, provider, model)) => {
+                            // usize → u32 for the wire (indices are bounded by MAX_DOCS).
+                            let ranking = resp
+                                .ranking
+                                .into_iter()
+                                .map(|(i, s)| (i as u32, s))
+                                .collect();
+                            Response::Ranking(crustcore_netproto::RankingResult {
+                                ranking,
+                                usage: resp.usage,
+                                provider,
+                                model,
+                                fallbacks,
+                            })
+                        }
+                        Err(err) => Response::Error(err.reason()),
+                    }
+                }
+            };
+            write_response(w, &resp)?;
         }
     }
     Ok(())
+}
+
+/// The unified multi-modal sidecar engine (Track C C1-providers): the frozen
+/// completion [`Engine`] plus optional [`EmbedEngine`](modality::EmbedEngine) and
+/// [`RerankEngine`](modality::RerankEngine). All three meter through the completion
+/// engine's **single** [`BudgetLedger`] (invariant 11). The probe surfaces every
+/// modality's capability via the additive `ModelInfo` flags.
+pub struct MultiModalEngine {
+    completion: Engine,
+    embed: Option<modality::EmbedEngine>,
+    rerank: Option<modality::RerankEngine>,
+}
+
+impl MultiModalEngine {
+    /// Builds a multi-modal engine. Pass `None` for a modality the helper does not
+    /// serve — requests for it then fail closed with a typed error.
+    #[must_use]
+    pub fn new(
+        completion: Engine,
+        embed: Option<modality::EmbedEngine>,
+        rerank: Option<modality::RerankEngine>,
+    ) -> Self {
+        MultiModalEngine {
+            completion,
+            embed,
+            rerank,
+        }
+    }
+
+    /// A completion-only engine (embedding/rerank absent → fail closed).
+    #[must_use]
+    pub fn completion_only(completion: Engine) -> Self {
+        MultiModalEngine::new(completion, None, None)
+    }
+
+    /// The shared budget ledger (accumulated across all three modalities).
+    #[must_use]
+    pub fn ledger(&self) -> &BudgetLedger {
+        self.completion.ledger()
+    }
+
+    /// The sidecar request loop over all three modalities. Runs until clean EOF.
+    ///
+    /// # Errors
+    /// [`ProtoError`] on a transport/decode failure (a failed *routing* is reported
+    /// in-band as [`Response::Error`], not as an `Err`).
+    pub fn serve<R: BufRead, W: Write>(&mut self, r: &mut R, w: &mut W) -> Result<(), ProtoError> {
+        while let Some(req) = read_request(r)? {
+            serve_one(
+                &mut self.completion,
+                self.embed.as_ref(),
+                self.rerank.as_ref(),
+                req,
+                w,
+            )?;
+        }
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -585,6 +761,9 @@ pub fn default_mock_engine() -> Engine {
         streaming: true,
         cost_per_1k_micros: 15_000,
         local: false,
+        embeddings: false,
+        rerank: false,
+        embedding_dims: 0,
     };
     let remote_fast = ModelCard {
         model: "fast-1".into(),
@@ -595,6 +774,9 @@ pub fn default_mock_engine() -> Engine {
         streaming: true,
         cost_per_1k_micros: 1_000,
         local: false,
+        embeddings: false,
+        rerank: false,
+        embedding_dims: 0,
     };
     let local_small = ModelCard {
         model: "local-1".into(),
@@ -605,6 +787,9 @@ pub fn default_mock_engine() -> Engine {
         streaming: true,
         cost_per_1k_micros: 0,
         local: true,
+        embeddings: false,
+        rerank: false,
+        embedding_dims: 0,
     };
     Engine::new(vec![
         Box::new(MockProvider::new(
@@ -618,6 +803,59 @@ pub fn default_mock_engine() -> Engine {
             MockBehavior::Echo,
         )),
     ])
+}
+
+/// A default **multi-modal** engine for the helper binary: the deterministic mock
+/// completion providers plus deterministic mock embedding + rerank providers (no
+/// network). This keeps the default/CI build linking nothing new while making the
+/// embedding and rerank routing/fallback/budget behaviors observable. The live
+/// counterpart is [`live_multimodal_engine`] (behind the `live` feature).
+#[must_use]
+pub fn default_mock_multimodal_engine() -> MultiModalEngine {
+    use modality::{
+        EmbedEngine, MockEmbedBehavior, MockEmbedProvider, MockRerankBehavior, MockRerankProvider,
+        RerankEngine,
+    };
+
+    let embed_card = ModelCard {
+        model: "mock-embed-1".into(),
+        healthy: true,
+        context: 8192,
+        tools: false,
+        structured: false,
+        streaming: false,
+        cost_per_1k_micros: 100,
+        local: false,
+        embeddings: true,
+        rerank: false,
+        embedding_dims: 8,
+    };
+    let rerank_card = ModelCard {
+        model: "mock-rerank-1".into(),
+        healthy: true,
+        context: 8192,
+        tools: false,
+        structured: false,
+        streaming: false,
+        cost_per_1k_micros: 50,
+        local: false,
+        embeddings: false,
+        rerank: true,
+        embedding_dims: 0,
+    };
+
+    let embed = EmbedEngine::new(vec![Box::new(MockEmbedProvider::new(
+        "mock-embed",
+        vec![embed_card],
+        MockEmbedBehavior::Echo,
+    ))]);
+    let rerank = RerankEngine::new(vec![Box::new(MockRerankProvider::new(
+        "mock-rerank",
+        vec![rerank_card],
+        MockRerankBehavior::Echo,
+    ))]);
+
+    MultiModalEngine::new(default_mock_engine(), Some(embed), Some(rerank))
 }
 
 /// Builds a **live** [`Engine`] from a provider config + credential source using the
@@ -634,6 +872,44 @@ pub fn live_engine(
     let http: std::rc::Rc<dyn transport::HttpClient> =
         std::rc::Rc::new(transport::UreqClient::new());
     Engine::new(providers::build_providers(configs, http, creds))
+}
+
+/// Builds a **live** [`MultiModalEngine`] from a provider config + credential source
+/// using the real `UreqClient` HTTP transport (`live` feature). Completion, embedding,
+/// and rerank adapters share one `UreqClient` and one [`CredentialSource`]; the
+/// completion engine's single [`BudgetLedger`] meters all three (invariant 11). An
+/// embedding/rerank engine is omitted (fails closed) when no configured model declares
+/// that capability — capability is configured, never assumed (invariant 17).
+#[cfg(feature = "live")]
+#[must_use]
+pub fn live_multimodal_engine(
+    configs: &[config::ProviderConfig],
+    creds: std::rc::Rc<dyn credsource::CredentialSource>,
+) -> MultiModalEngine {
+    let http: std::rc::Rc<dyn transport::HttpClient> =
+        std::rc::Rc::new(transport::UreqClient::new());
+
+    let completion = Engine::new(providers::build_providers(
+        configs,
+        http.clone(),
+        creds.clone(),
+    ));
+
+    let embedders = embed::build_embed_providers(configs, http.clone(), creds.clone());
+    let embed = if embedders.is_empty() {
+        None
+    } else {
+        Some(modality::EmbedEngine::new(embedders))
+    };
+
+    let rerankers = rerank::build_rerankers(configs, http, creds);
+    let rerank = if rerankers.is_empty() {
+        None
+    } else {
+        Some(modality::RerankEngine::new(rerankers))
+    };
+
+    MultiModalEngine::new(completion, embed, rerank)
 }
 
 #[cfg(test)]
@@ -670,6 +946,9 @@ mod tests {
             streaming: true,
             cost_per_1k_micros: cost,
             local,
+            embeddings: false,
+            rerank: false,
+            embedding_dims: 0,
         }
     }
 
@@ -884,5 +1163,138 @@ mod tests {
         // Streamed chunks concatenate to the final text.
         assert_eq!(fin.text.as_str(), streamed);
         assert!(fin.text.as_str().contains("hello"));
+    }
+
+    // ---- Track C C1-providers: multi-modal serve over the protocol ----
+
+    #[test]
+    fn multimodal_serve_routes_embed_and_rerank_and_meters_one_ledger() {
+        use crustcore_netproto::{EmbedRequest, RerankRequest};
+        use std::io::{BufReader, Cursor};
+
+        // Drive the multi-modal serve loop with embed + rerank requests and parse the
+        // responses with the caller-side decoder — the full wire round-trip.
+        let mut input = Vec::new();
+        input.extend_from_slice(
+            crustcore_netproto::encode_request(&Request::Embed(EmbedRequest {
+                role: Role::Research,
+                inputs: vec!["alpha".into(), "beta".into()],
+                max_cost_micros: 0,
+            }))
+            .as_bytes(),
+        );
+        input.push(b'\n');
+        input.extend_from_slice(
+            crustcore_netproto::encode_request(&Request::Rerank(RerankRequest {
+                role: Role::Review,
+                query: "q".into(),
+                documents: vec!["short".into(), "longer document".into()],
+                max_cost_micros: 0,
+            }))
+            .as_bytes(),
+        );
+        input.push(b'\n');
+
+        let mut engine = default_mock_multimodal_engine();
+        let mut reader = BufReader::new(Cursor::new(input));
+        let mut out: Vec<u8> = Vec::new();
+        engine.serve(&mut reader, &mut out).unwrap();
+
+        let mut resp = BufReader::new(Cursor::new(out));
+        // First: an embedding result with two vectors.
+        match crustcore_netproto::read_response(&mut resp)
+            .unwrap()
+            .unwrap()
+        {
+            Response::Embedding(e) => {
+                assert_eq!(e.vectors.len(), 2);
+                assert!(e.vectors.iter().all(|v| !v.is_empty()));
+                assert_eq!(e.provider, "mock-embed");
+            }
+            other => panic!("expected Embedding, got {other:?}"),
+        }
+        // Second: a ranking result with two in-range entries.
+        match crustcore_netproto::read_response(&mut resp)
+            .unwrap()
+            .unwrap()
+        {
+            Response::Ranking(r) => {
+                assert_eq!(r.ranking.len(), 2);
+                assert!(r.ranking.iter().all(|(i, _)| *i < 2));
+            }
+            other => panic!("expected Ranking, got {other:?}"),
+        }
+
+        // ONE shared ledger accumulated both requests (invariant 11).
+        assert_eq!(engine.ledger().requests, 2);
+    }
+
+    #[test]
+    fn multimodal_probe_surfaces_capability_flags() {
+        use std::io::{BufReader, Cursor};
+
+        let mut input = Vec::new();
+        input.extend_from_slice(crustcore_netproto::encode_request(&Request::Probe).as_bytes());
+        input.push(b'\n');
+
+        let mut engine = default_mock_multimodal_engine();
+        let mut reader = BufReader::new(Cursor::new(input));
+        let mut out: Vec<u8> = Vec::new();
+        engine.serve(&mut reader, &mut out).unwrap();
+
+        let mut resp = BufReader::new(Cursor::new(out));
+        let mut models = Vec::new();
+        loop {
+            match crustcore_netproto::read_response(&mut resp)
+                .unwrap()
+                .unwrap()
+            {
+                Response::Model(m) => models.push(m),
+                Response::RegistryEnd => break,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        // The probe surfaces completion-only, embedding, and rerank models with their
+        // additive capability flags (default off for completion-only ones).
+        assert!(models
+            .iter()
+            .any(|m| m.model == "strong-1" && !m.embeddings && !m.rerank));
+        assert!(models.iter().any(|m| m.embeddings && m.embedding_dims == 8));
+        assert!(models.iter().any(|m| m.rerank));
+    }
+
+    #[test]
+    fn embed_request_fails_closed_when_no_embed_engine() {
+        use crustcore_netproto::EmbedRequest;
+        use std::io::{BufReader, Cursor};
+
+        // A completion-only multi-modal engine: an embed request must fail closed
+        // with a typed error, never route to a completion model (invariant 17).
+        let mut input = Vec::new();
+        input.extend_from_slice(
+            crustcore_netproto::encode_request(&Request::Embed(EmbedRequest {
+                role: Role::Research,
+                inputs: vec!["x".into()],
+                max_cost_micros: 0,
+            }))
+            .as_bytes(),
+        );
+        input.push(b'\n');
+
+        let mut engine = MultiModalEngine::completion_only(default_mock_engine());
+        let mut reader = BufReader::new(Cursor::new(input));
+        let mut out: Vec<u8> = Vec::new();
+        engine.serve(&mut reader, &mut out).unwrap();
+
+        let mut resp = BufReader::new(Cursor::new(out));
+        match crustcore_netproto::read_response(&mut resp)
+            .unwrap()
+            .unwrap()
+        {
+            Response::Error(e) => assert!(e.contains("embeddings")),
+            other => panic!("expected Error, got {other:?}"),
+        }
+        // Nothing was metered (no capable engine ran).
+        assert_eq!(engine.ledger().requests, 0);
     }
 }

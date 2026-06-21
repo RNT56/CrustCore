@@ -1,0 +1,16 @@
+error[E0308]: mismatched types
+ --> tests/ui/missing_host.rs:6:1
+  |
+6 | #[crust_tool]
+  | ^^^^^^^^^^^^^ expected `String`, found `&mut RefMut<'_, HostTool<'_>>`
+7 | fn no_host(x: String) -> Result<String, ToolError> {
+  |    ------- arguments to this function are incorrect
+  |
+  = note:         expected struct `std::string::String`
+          found mutable reference `&mut RefMut<'_, HostTool<'_>>`
+note: function defined here
+ --> tests/ui/missing_host.rs:7:4
+  |
+7 | fn no_host(x: String) -> Result<String, ToolError> {
+  |    ^^^^^^^ ---------
+  = note: this error originates in the attribute macro `crust_tool` (in Nightly builds, run with -Z macro-backtrace for more info)

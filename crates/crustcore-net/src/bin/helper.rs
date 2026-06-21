@@ -30,7 +30,7 @@ fn main() -> ExitCode {
     let mut reader = stdin.lock();
     let stdout = std::io::stdout();
     let mut writer = stdout.lock();
-    match crustcore_net::serve(&mut engine, &mut reader, &mut writer) {
+    match engine.serve(&mut reader, &mut writer) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("crustcore-net helper: {e}");
@@ -40,16 +40,17 @@ fn main() -> ExitCode {
 }
 
 /// Selects the engine from argv. `--providers <file>` (live feature) builds a live
-/// engine; anything else is the mock default.
-fn build_engine(args: &[String]) -> Result<crustcore_net::Engine, String> {
+/// multi-modal engine; anything else is the mock default. The default serves all three
+/// modalities (completion + embedding + rerank) over deterministic mocks.
+fn build_engine(args: &[String]) -> Result<crustcore_net::MultiModalEngine, String> {
     match args.first().map(String::as_str) {
         Some("--providers") => build_live_engine(args.get(1).map(String::as_str)),
-        _ => Ok(crustcore_net::default_mock_engine()),
+        _ => Ok(crustcore_net::default_mock_multimodal_engine()),
     }
 }
 
 #[cfg(feature = "live")]
-fn build_live_engine(path: Option<&str>) -> Result<crustcore_net::Engine, String> {
+fn build_live_engine(path: Option<&str>) -> Result<crustcore_net::MultiModalEngine, String> {
     use std::rc::Rc;
 
     let path = path.ok_or_else(|| "--providers needs a config file path".to_string())?;
@@ -73,13 +74,13 @@ fn build_live_engine(path: Option<&str>) -> Result<crustcore_net::Engine, String
             }
         }
     }
-    Ok(crustcore_net::live_engine(
+    Ok(crustcore_net::live_multimodal_engine(
         &configs,
         Rc::new(creds) as Rc<dyn crustcore_net::credsource::CredentialSource>,
     ))
 }
 
 #[cfg(not(feature = "live"))]
-fn build_live_engine(_path: Option<&str>) -> Result<crustcore_net::Engine, String> {
+fn build_live_engine(_path: Option<&str>) -> Result<crustcore_net::MultiModalEngine, String> {
     Err("live providers require building crustcore-net with --features live".to_string())
 }

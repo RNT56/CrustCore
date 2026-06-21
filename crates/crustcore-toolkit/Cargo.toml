@@ -1,0 +1,20 @@
+[package]
+name = "crustcore-toolkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "std-only runtime support for #[crust_tool]-authored CrustCore capability-pack tools (schema, bounded I/O, redaction, host-minted receipts, fail-safe risk)."
+
+# C2-toolmacro. This crate holds the REAL safety logic (schema/bound/redact/receipt
+# wiring) so it is unit-testable WITHOUT the proc-macro. It is a capability-pack
+# SIDECAR support crate: it is used only by sidecar packs (mcp/daemon/backend) and is
+# NEVER added to the nano feature graph. Its only deps are the already-linked, std-only
+# contract crates — ZERO third-party runtime deps — so it adds nothing new to ship.
+[dependencies]
+crustcore-types = { workspace = true }
+crustcore-policy = { workspace = true }
+crustcore-secrets = { workspace = true }
+crustcore-receipts = { workspace = true }

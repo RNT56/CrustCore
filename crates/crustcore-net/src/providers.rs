@@ -42,7 +42,11 @@ fn sse_data(line: &str) -> Option<&str> {
 /// Maps a non-2xx HTTP status + error body to a typed [`ProviderError`]. Rate limits
 /// / server errors / overload → `Unavailable` (drives fallback); a context-length
 /// rejection → `Capability`; everything else → `Other`.
-fn map_status_error(status: u16, body: &str) -> ProviderError {
+///
+/// Status-only by construction: the returned error never embeds the provider body
+/// verbatim (which could echo a credential), so the embedding/rerank adapters reuse
+/// it to keep their error paths leak-free too (Track C C1-providers).
+pub(crate) fn map_status_error(status: u16, body: &str) -> ProviderError {
     let lower = body.to_ascii_lowercase();
     let context_overflow = lower.contains("context")
         || lower.contains("maximum context")
@@ -428,6 +432,9 @@ mod tests {
             streaming: true,
             cost_per_1k_micros: cost,
             local: false,
+            embeddings: false,
+            rerank: false,
+            embedding_dims: 0,
         }
     }
 
