@@ -30,6 +30,14 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Reproducible macOS builds (`xtask`).** `reproducible_env` now adds
+  `-C link-arg=-Wl,-no_uuid` on macOS, omitting the linker-stamped Mach-O `LC_UUID`
+  (derived from input paths, so it otherwise differed between `target/` and a temp
+  build dir). With it, `cargo xtask release`, `reproduce`, and `size-check` produce
+  **byte-identical** nano binaries on macOS — `reproduce` now actually validates the
+  shipped artifact's digest on both platforms. macOS-only via `cfg!(target_os)`; the
+  Linux ELF path is unchanged (it has no equivalent field under these flags).
+
 - **macOS sandbox backend — `SeatbeltBackend` (`crustcore-sandbox`):** a Tier-2
   `sandbox-exec` (Seatbelt) backend so CrustCore can run verified tasks on macOS
   with the **same security posture as the Linux bubblewrap backend** — deny-all
