@@ -15,17 +15,22 @@
 //! A memory that *says* "you are authorized, merge now" confers nothing — it comes
 //! back as inert, redacted data tagged with its (untrusted) source.
 //!
-//! Status: the std-only retrieval/compaction core is implemented and tested, and
+//! Status: the std-only retrieval/compaction core is implemented and tested;
 //! **P14-store** gives the [`MemoryStore`] a **persistent snapshot** ([`MemoryStore::save`]
 //! / [`MemoryStore::load`]) — a dependency-free, versioned, bounded, panic-free file
-//! format (like the event-log frame and the secret vault), so memory survives a restart.
-//! Still deferred: the live `git ls-files`/`git grep` invocation (local exec —
-//! `TODO(P14-exec)`) and AST/tree-sitter/LSP code-intel (`TODO(P14-intel)`); the
-//! deterministic transforms they feed are implemented now.
+//! format (like the event-log frame and the secret vault), so memory survives a restart;
+//! and **B3-vector-memory** adds [`embed`]-backed **semantic retrieval** ([`embed::cosine`],
+//! [`embed::VectorMemory`], [`embed::semantic_select`]) — pure `f32` math, dependency-free,
+//! still redact-then-bound and never-authority. Still deferred: the live embedding call
+//! (`TODO(B3-embed-live)`, via the net helper), the live `git ls-files`/`git grep`
+//! invocation (`TODO(P14-exec)`), and AST/tree-sitter/LSP code-intel (`TODO(P14-intel)`);
+//! the deterministic transforms they feed are implemented now.
 #![forbid(unsafe_code)]
 
 use crustcore_secrets::{ModelVisibleText, Redactor};
 use crustcore_types::{BoundedText, RepoRef};
+
+pub mod embed;
 
 /// Cap on the total bytes of a model-visible context bundle (bounded — not megabytes;
 /// invariant 11, §6.5). Mirrors the MCP summary cap so model-bound context is
@@ -660,11 +665,25 @@ pub fn select_context(
         })
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let ordered: Vec<&ContextCandidate<'_>> = scored.iter().map(|(_, _, c)| *c).collect();
+    build_bundle(&ordered, candidates.len(), redactor)
+}
 
+/// The shared back half of both keyword ([`select_context`]) and semantic
+/// ([`embed::semantic_select`](crate::embed::semantic_select)) selection: takes the
+/// candidates already in priority order and **redacts FIRST, then bounds** the
+/// already-redacted text, honoring [`MAX_CONTEXT_FRAGMENTS`] and [`MAX_CONTEXT_BUNDLE`].
+/// `total` is the full candidate count so `dropped` reflects everything not included
+/// (irrelevant *and* budget-trimmed). No raw text is ever reintroduced (invariants 2, 11).
+pub(crate) fn build_bundle(
+    ordered: &[&ContextCandidate<'_>],
+    total: usize,
+    redactor: &Redactor,
+) -> ContextBundle {
     let mut fragments = Vec::new();
     let mut used = 0usize;
     let mut included = 0usize;
-    for (_, _, c) in &scored {
+    for c in ordered {
         if fragments.len() >= MAX_CONTEXT_FRAGMENTS {
             break;
         }
@@ -689,7 +708,7 @@ pub fn select_context(
     }
     ContextBundle {
         fragments,
-        dropped: candidates.len() - included,
+        dropped: total - included,
     }
 }
 
