@@ -6,13 +6,16 @@
 //! kernel by feeding it events and executing the actions it emits
 //! (`docs/telegram.md`, `docs/github.md`, `docs/maintainer-agent.md`).
 //!
-//! Status: the **Telegram runtime channel** logic ([`telegram`]) is implemented
-//! (Phase 9: allowlist, dedupe, normalization, commands, queue/steer, nonce
-//! approvals, typed redacted outbound). The Bot API HTTP long-polling/send
-//! (`TODO(P9-net)`), the GitHub loop, and supervision land in later phases.
+//! Status: the **Telegram runtime channel** logic ([`telegram`]) and the **subagent
+//! execution control plane** ([`exec`], P11-exec: scheduler/budget/blackboard/no-user/
+//! verifier-owned acceptance over a [`SubagentExecutor`](crate::exec::SubagentExecutor)
+//! trait) are implemented and CI-tested. The Bot API HTTP long-polling/send
+//! (`TODO(P9-net)`), the GitHub loop, the live `WorktreeSubagentExecutor`
+//! (`TODO(P11-exec-live)`), and supervision land in later phases.
 #![forbid(unsafe_code)]
 
 pub mod advisor;
+pub mod exec;
 pub mod github;
 pub mod selfimprove;
 pub mod supervisor;
