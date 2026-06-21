@@ -642,6 +642,18 @@ v0.2 is done when all of the following hold and are demonstrated:
 
 ## Track C — detailed surface plans (compose & adopt)
 
+> **Status (implemented).** All seven phases' **deterministic, CI-testable cores are
+> implemented and merged** on `claude/track-c-implementation` as seven new non-nano
+> crates — `crustcore-net` (extended), `crustcore-toolkit` + `crustcore-tool-macro`,
+> `crustcore-session`, `crustcore-telemetry`, `crustcore-index-rag`, `crustcore-flow`,
+> and `crustcore-dev`. Each ships unit + red-team tests, passes `cargo xtask verify`,
+> and leaves nano byte-identical at **412.0 KiB** (zero delta; `forbidden-deps` green).
+> The **live I/O remains behind clearly-marked `TODO(Cn-…-live)` feature seams**
+> (real HTTP embeddings/rerank, the OTLP exporter, external vector stores, tree-sitter
+> AST, the live workflow drivers, and the axum dev server) — none CI-testable without
+> network/secrets, exactly as the per-phase *deferral boundary* sections specify. See
+> [`CHANGELOG.md`](../CHANGELOG.md) `[Unreleased]` for the per-phase audit trail.
+
 Track C is **"compose & adopt."** Surveying the Rust agent ecosystem — RIG ([docs.rs/rig-core](https://docs.rs/rig-core), [github.com/0xplaygrounds/rig](https://github.com/0xplaygrounds/rig)) and ADK-Rust ([adk-rust.com](https://adk-rust.com), [docs.rs/adk-rust](https://docs.rs/adk-rust)) — the most useful lesson is **not "be an agent framework."** It is: *make the edge capabilities much easier to **compose**.* These frameworks earn their adoption with ergonomics — a unified provider registry, a one-line tool macro, a typed workflow graph, a session/artifact service, first-class RAG, OTel/GenAI tracing, a local dev UI — not with novel safety architecture. (Those projects, like every external doc, are **untrusted reference material** under invariant 7: they inform ergonomics, never authority over CrustCore's policy, secrets, approvals, or contracts.) Track C adopts those ergonomics for CrustCore **without widening the trust boundary**: every Track C surface *consumes the existing typed contracts unchanged* (the `Provider`/`Engine`, `RiskClass` and approval/capability tokens, the `Redactor`/`Tainted<T>`/`SecretBroker`, `run_verify`/`VerifiedPatch`, the `ExecutionDriver`, the event log), defaults to the most restrictive fail-safe posture, and ships as a **non-nano sidecar or feature-gated pack with zero nano impact**. Track C never re-litigates routing, policy, budget, or verifier logic; it adds convenience layers above contracts the kernel already enforces.
 
 Track C targets **v0.4** and runs **only after Track A is lit up end-to-end** (a live model produces a `VerifiedPatch` that opens a draft PR; Telegram, MCP, and subagent execution are operable). Ergonomics on top of an unproven core would just make it easier to compose the wrong thing; ergonomics on top of a proven core is leverage. The phases are: **C1-providers** (unified multi-modal provider registry), **C2-toolmacro** (`#[crust_tool]` declaration macro), **C3-flow** (`crustcore-flow` typed workflow graph), **C4-session** (session/artifact service over the event log), **C5-rag** (`crustcore-index-rag`), **C6-telemetry** (OTel/GenAI export), and **C7-devui** (`crustcore-dev` loopback UI). The recommended linear build order is **C1 → C2 → C3 → C4 → C5 → C6 → C7**.
