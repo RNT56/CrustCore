@@ -310,6 +310,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "crustcore-telemetry"
+version = "0.1.0"
+dependencies = [
+ "crustcore-eventlog",
+ "crustcore-kernel",
+ "crustcore-receipts",
+ "crustcore-secrets",
+ "crustcore-types",
+]
+
+[[package]]
 name = "crustcore-tool-macro"
 version = "0.1.0"
 dependencies = [
