@@ -1,0 +1,13 @@
+error: a #[crust_tool] fn must return a `Result<Ok, crustcore_toolkit::ToolError>`
+ --> tests/ui/non_result_return.rs:7:45
+  |
+7 | fn bare(_host: &mut HostTool, x: String) -> String {
+  |                                             ^^^^^^
+
+warning: unused import: `crustcore_toolkit::HostTool`
+ --> tests/ui/non_result_return.rs:4:5
+  |
+4 | use crustcore_toolkit::HostTool;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

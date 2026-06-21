@@ -38,6 +38,8 @@ members = [
     "crates/crustcore-mcp",
     "crates/crustcore-index",
     "crates/crustcore-eval",
+    "crates/crustcore-toolkit",
+    "crates/crustcore-tool-macro",
     "crates/crustcore-full",
     "xtask",
 ]
@@ -74,6 +76,8 @@ crustcore-daemon = { path = "crates/crustcore-daemon", version = "0.1.0" }
 crustcore-mcp = { path = "crates/crustcore-mcp", version = "0.1.0" }
 crustcore-index = { path = "crates/crustcore-index", version = "0.1.0" }
 crustcore-eval = { path = "crates/crustcore-eval", version = "0.1.0" }
+crustcore-toolkit = { path = "crates/crustcore-toolkit", version = "0.1.0" }
+crustcore-tool-macro = { path = "crates/crustcore-tool-macro", version = "0.1.0" }
 
 # Release profile (general). The flagship size claim uses `nano` below.
 [profile.release]

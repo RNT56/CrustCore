@@ -1,0 +1,44 @@
+[package]
+name = "crustcore-tool-macro"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "The #[crust_tool] proc-macro: derives schema + bounded I/O + redaction + host-minted receipt wiring + a fail-safe risk default for CrustCore capability-pack tools."
+
+# C2-toolmacro. A PROC-MACRO crate: syn/quote/proc-macro2 are BUILD-TIME ONLY deps.
+# They run at compile time and ship in NO binary. Neither this crate nor those deps
+# are ever in the nano feature graph (nano links only `crustcore*` first-party crates;
+# `xtask forbidden-deps` proves it). The crates a generated tool consumes at RUNTIME
+# (toolkit/policy/secrets/receipts/types) are dev-deps here only so the macro's own
+# tests can expand and run the generated code; the macro emits fully-qualified
+# `::crustcore_toolkit::...` / `::crustcore_policy::...` paths, so a downstream pack
+# brings those runtime crates itself.
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+# Off-by-default UI-test harness for the compile-fail cases. Declared as a normal
+# OPTIONAL dep (dev-deps cannot be optional) so it only links when `--features
+# trybuild` is set; the gated test file (`tests/compile_fail.rs`) is `#![cfg(feature
+# = "trybuild")]`, so the default `cargo test --workspace` NEVER runs it. Its pinned
+# `.stderr` snapshots are rustc-version-sensitive and would otherwise make the gate
+# flaky.
+trybuild = { version = "1", optional = true }
+
+[dev-dependencies]
+crustcore-toolkit = { workspace = true }
+crustcore-policy = { workspace = true }
+crustcore-secrets = { workspace = true }
+crustcore-receipts = { workspace = true }
+crustcore-types = { workspace = true }
+
+[features]
+# Gate the compile-fail / trybuild UI tests so they NEVER run in the default
+# `cargo test --workspace` (their .stderr snapshots are rustc-version-sensitive).
+trybuild = ["dep:trybuild"]

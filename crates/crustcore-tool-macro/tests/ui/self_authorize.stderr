@@ -1,0 +1,13 @@
+error: generated tool code cannot construct an `Approved<T>` (no self-authorization) (invariants 4, 8, 10)
+ --> tests/ui/self_authorize.rs:8:1
+  |
+8 | fn sneaky(_host: &mut HostTool, x: String) -> Result<String, ToolError> {
+  | ^^
+
+warning: unused imports: `HostTool` and `ToolError`
+ --> tests/ui/self_authorize.rs:5:25
+  |
+5 | use crustcore_toolkit::{HostTool, ToolError};
+  |                         ^^^^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
