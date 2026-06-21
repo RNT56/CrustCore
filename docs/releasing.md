@@ -208,3 +208,34 @@ bump `FRAME_VERSION` ship with explicit reader/writer handling and a regression 
 [ ] SHA256SUMS signed out-of-band (maintainer) and .sig published
 [ ] docs reflect the shipped surface
 ```
+
+## 9. Reproducible builds (v0.3 B6.2)
+
+The nano binary builds **bit-for-bit reproducibly**, so anyone can rebuild the
+released bytes and confirm they match `SHA256SUMS` independently of the signer.
+
+`cargo xtask` builds nano under a **deterministic env** (`reproducible_env`):
+
+- `--remap-path-prefix` strips the absolute workspace path and cargo home, so the
+  binary never embeds the builder's `$PWD`/`$HOME`;
+- `SOURCE_DATE_EPOCH=0` pins any embedded build timestamp;
+- `CARGO_INCREMENTAL=0` disables the non-deterministic incremental cache.
+
+Combined with the `nano` profile (`codegen-units = 1`, `lto = "fat"`,
+`strip = "symbols"`, `panic = "abort"`) and the pinned toolchain
+(`rust-toolchain.toml`), the build is deterministic. `size-check`, `release`, and
+`reproduce` all measure the **same** binary.
+
+**Verify it:**
+
+```sh
+cargo xtask reproduce   # builds nano twice into independent target dirs; the
+                        # two SHA-256 digests must match, else it fails
+```
+
+A maintainer (or any auditor) can rebuild a tagged release and compare the digest
+against the published, signed `SHA256SUMS` — turning "trust the signer" into
+"verify the bytes." (The signed GitHub Actions release workflow and the
+`cargo-bloat`/fuzz CI jobs (B6.1/B6.3) edit `.github/workflows/**` — an irreversible,
+CI-credentialed, **maintainer-owned** step (`CLAUDE.md` §6.3) — and are wired by the
+maintainer, not the agent.)
