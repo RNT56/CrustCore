@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! impl Kernel {
-//!     pub fn step(&mut self, event: Event) -> Vec<Action> { ... }
+//!     pub fn step(&mut self, event: Event) -> ActionVec { ... }
 //! }
 //! ```
 //!

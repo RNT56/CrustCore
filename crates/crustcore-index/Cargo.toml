@@ -11,9 +11,11 @@ description = "Optional repo memory / code intelligence for CrustCore."
 [dependencies]
 crustcore-types = { workspace = true }
 crustcore-secrets = { workspace = true }
-# TODO(P14): the std-only retrieval/compaction core (repo map/capsule, grep
-# code-intel, memory store, redacted+bounded context selection) is implemented.
-# Still deferred (all optional, never linked into nano): the live
-# `git ls-files`/`git grep` invocation (`TODO(P14-exec)`), a persistent
-# SQLite/redb store (`TODO(P14-store)`), and AST/tree-sitter/LSP/embeddings
-# code-intel (`TODO(P14-intel)`). Memory is retrieved context, never authority.
+# The std-only retrieval/compaction core (repo map/capsule, grep code-intel, memory
+# store, redacted+bounded context selection) is implemented; P14-store added a
+# dependency-free persistent memory snapshot, and B3-vector-memory added dependency-free
+# embedding-backed semantic retrieval (cosine NN + `semantic_select` over an `Embedder`
+# trait). Still deferred (all optional, never linked into nano): the live
+# `git ls-files`/`git grep` invocation (`TODO(P14-exec)`), the live text→vector embedding
+# call via the net helper (`TODO(B3-embed-live)`), and AST/tree-sitter/LSP code-intel
+# (`TODO(P14-intel)`). Memory is retrieved context, never authority.

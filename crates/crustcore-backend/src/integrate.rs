@@ -17,8 +17,9 @@ use crustcore_types::{ApprovalId, RepoRef, Timestamp};
 use crate::VerifiedPatch;
 
 /// A verified, approved intent to open a **draft** PR (`docs/github.md` §6). Carries
-/// the evidence the daemon renders into the PR body; the actual REST call is the
-/// `crustcore-net` adapter's job (`TODO(P10-net)`).
+/// the evidence the daemon renders into the PR body; the actual REST call is performed
+/// by `crustcore-net::github::RestGitHub::create_pull` (the daemon maps this `PrIntent`
+/// onto a `CreatePrRequest`).
 #[derive(Debug, Clone)]
 pub struct PrIntent {
     /// The repository (from the approved capability, not from model/comment input).
@@ -252,6 +253,22 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, IntegrateError::BranchNotUnderPrefix(_)));
+    }
+
+    #[test]
+    fn branch_under_prefix_matches_at_a_segment_boundary_and_fails_closed() {
+        // In-prefix branches (with or without the trailing slash on the prefix) match.
+        assert!(branch_under_prefix("crustcore/ok", "crustcore"));
+        assert!(branch_under_prefix("crustcore/ok", "crustcore/"));
+        assert!(branch_under_prefix("crustcore", "crustcore")); // the prefix itself
+                                                                // A sibling that merely shares a textual prefix does NOT match (segment boundary).
+        assert!(!branch_under_prefix("crustcore-evil/x", "crustcore"));
+        // `.`/`..` traversal in any segment is rejected.
+        assert!(!branch_under_prefix("crustcore/../etc", "crustcore"));
+        assert!(!branch_under_prefix("crustcore/./x", "crustcore"));
+        // An empty prefix fails closed (never matches everything).
+        assert!(!branch_under_prefix("anything/x", ""));
+        assert!(!branch_under_prefix("anything/x", "/"));
     }
 
     // The type-13 gate is structural: `open_pr` takes a `VerifiedPatch` by value,
