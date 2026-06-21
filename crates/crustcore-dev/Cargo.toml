@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# `crustcore-dev` — the loopback developer launcher + inspector UI (Track C,
+# phase C7-devui; docs/roadmap-v0.2.md §C7).
+#
+# NON-NANO sidecar. The crate is split in two:
+#   * a PURE, deterministic CORE (default features) — no axum/tokio/hyper. The whole
+#     HTTP *handler* surface is exercised in CI over a `MockDevBackend`.
+#   * a thin `serve` feature that wires the real loopback HTTP server (axum/hyper/tokio).
+#     Those crates are OPTIONAL and enabled only by `serve`; the default build links
+#     none of them. The nano graph never reaches this crate at all.
+[package]
+name = "crustcore-dev"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Loopback-only, read-only-by-default local developer/inspection UI for CrustCore (non-nano sidecar)."
+
+[dependencies]
+crustcore-types = { workspace = true }
+crustcore-kernel = { workspace = true }
+crustcore-eventlog = { workspace = true }
+crustcore-receipts = { workspace = true }
+crustcore-secrets = { workspace = true }
+crustcore-policy = { workspace = true }
+crustcore-flow = { workspace = true }
+crustcore-session = { workspace = true }
+crustcore-mcp = { workspace = true }
+crustcore-daemon = { workspace = true }
+crustcore-netproto = { workspace = true }
+
+# The heavy web stack — OPTIONAL, enabled ONLY by the `serve` feature. The default
+# CI build links none of these; the deterministic core is tested without them.
+axum = { version = "0.7", optional = true, default-features = false, features = [
+    "http1",
+    "tokio",
+    "query",
+] }
+tokio = { version = "1", optional = true, default-features = false, features = [
+    "rt-multi-thread",
+    "net",
+    "macros",
+] }
+
+[features]
+default = []
+# Wire the real loopback HTTP server. Self-verified by the author; NOT part of the
+# default workspace gate. Real provider/MCP/spawned-helper wiring under this feature
+# is marked TODO(C7-serve-live).
+serve = ["dep:axum", "dep:tokio"]
+# Live integration tests (real net helper / MCP transport). All `#[ignore]`d; never CI.
+live-dev = ["serve"]

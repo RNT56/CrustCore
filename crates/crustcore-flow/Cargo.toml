@@ -1,0 +1,38 @@
+[package]
+name = "crustcore-flow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Typed, deterministic workflow DSL over CrustCore's supervisor/subagent/verify primitives (non-nano sidecar)."
+
+[dependencies]
+crustcore-types = { workspace = true }
+crustcore-policy = { workspace = true }
+crustcore-secrets = { workspace = true }
+crustcore-backend = { workspace = true }
+crustcore-daemon = { workspace = true }
+crustcore-runner = { workspace = true }
+# Live-only deps: needed solely by the `live-flow` driver wrappers (run_verify's
+# inputs). Optional so the default CI build never pulls them.
+crustcore-path = { workspace = true, optional = true }
+crustcore-receipts = { workspace = true, optional = true }
+crustcore-sandbox = { workspace = true, optional = true }
+crustcore-worktree = { workspace = true, optional = true }
+
+[features]
+# Live drivers (real net helper, sandbox, run_verify, NativeAdvisor). Never linked
+# in CI: the deterministic engine is identical and is driven by `FakeDrivers`. The
+# live integration tests behind this feature are all `#[ignore]`d (C3.7).
+live-flow = [
+    "dep:crustcore-path",
+    "dep:crustcore-receipts",
+    "dep:crustcore-sandbox",
+    "dep:crustcore-worktree",
+]
+
+[[example]]
+name = "consult_implement_verify"
+path = "examples/consult_implement_verify.rs"

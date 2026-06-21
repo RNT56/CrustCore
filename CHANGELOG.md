@@ -30,6 +30,251 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **v0.4 Track C C7-devui — `crustcore-dev`: a loopback-only, read-only-by-default local
+  developer/inspection UI built fail-safe so it CANNOT become a back door.** A new
+  NON-NANO crate (also intended as `crustcore-daemon serve`) split into a PURE,
+  deterministic CORE (default features, no axum/tokio/hyper — fully CI-tested over a mock
+  backend) and a thin `serve` feature that wires the real loopback HTTP server. The
+  trust story is preserved structurally, not by convention:
+  - **`backend`** — a `DevBackend` decoupling trait split into **two disjoint
+    capability traits**: `ReadOnlyBackend` (inspector/replay/provider/MCP/flow/session
+    view models — every method borrows; none mints/writes/appends/verifies) and
+    `MutatingBackend` (the single side-effecting op: dispatching an operation-bound
+    approval resolution). A read handler is handed `&dyn ReadOnlyBackend`, which has NO
+    method returning a `MutatingBackend` — reaching a side effect from a read view is a
+    **compile error**, proven by a `compile_fail` doctest (dimension (c)). `MockDevBackend`
+    is the CI fake; flat redacted view models carry no live/secret types.
+  - **`request` / `route_class`** — a transport-agnostic `DevRequest`
+    (`{method, path, headers, query, body}`) with every untrusted field length-bounded +
+    validated and unknown verbs rejected at the door (invariant 7); a `RouteClass`
+    `ReadOnly`/`Mutating` split + route table (assets/ws registered so auth covers them).
+  - **`auth`** — a per-launch `BearerToken` (256-bit, OS-CSPRNG in `serve`), required on
+    EVERY route, constant-time compared, redacted in `Debug`, never in a response/log
+    (dimension (b)).
+  - **`config`** — loopback `127.0.0.1` default; off-loopback (incl. `0.0.0.0`/`::`) is an
+    explicit, warned opt-in via `bind_host(.., acknowledge_exposure=true)` and otherwise
+    fails closed (dimension (a)); mutating routes are off unless explicitly unlocked.
+  - **`views`** — `inspector`/`replay` (read-only over `EventLog::inspect`/`verify`/`iter`
+    + the P5-join `verify_against_log`/`FrameRef`; reports `Intact`/`Broken`, respects
+    `visibility`/`redaction_state`, inlines no payload, references artifacts by id);
+    `provider` (renders `ModelCardView`/usage metadata only — never a key, redactor on
+    every field); `mcp` (gate decisions from `gateway_check`/`tool_policies` + manifest
+    drift — never server self-description); `flow` (loads a C3 `Flow` and SIMULATES
+    single-stepping with a no-op driver — dispatches no `Action`, appends no frame,
+    never reaches `run_verify`, mints no `VerifiedPatch`); `approvals` (surfaces pending
+    approvals read-only).
+  - **`mutation`** — the approval/mutation gate + the single request-dispatch chokepoint
+    (auth → loopback → classify → read-only vs gated-mutate). A resolution is dispatched
+    into the EXISTING `crustcore_daemon::telegram::ApprovalEngine` (where
+    `AuthorizedUser::approve` is the sole `Approved<T>` minter); the UI never constructs
+    an `Approved<T>` and a resolution is operation-bound (op-hash) so it cannot approve a
+    different operation than the one shown, and mutating routes refuse without the launch
+    flag (dimensions (c), (d)).
+  - **`serve` / `serve_entry`** (feature-gated) — an axum/hyper loopback server mapping
+    HTTP → the core `route` chokepoint, plus the `crustcore-daemon serve` alias entry;
+    real provider/MCP/spawned-helper wiring is `TODO(C7-serve-live)`. axum/tokio are
+    OPTIONAL deps enabled only by `serve`; the default build and the nano graph link
+    none of them.
+  - **`tests/redteam_devui.rs`** — 18 deterministic red-team tests over `MockDevBackend`
+    covering dimensions (a)–(g): no off-loopback default, non-loopback peer rejected,
+    auth required on every route (assets/ws included), token never in a response,
+    read-views cause no log side effect, flow simulation never completes/mints a
+    `VerifiedPatch`, mutating route off by default, cannot approve a different operation
+    or as a non-allowlisted identity, no sentinel secret in any response, redacted
+    payloads never inlined, oversized/unknown input rejected, and no chat/free-text
+    channel to model or user (invariants 15/16).
+- **v0.4 Track C C3-flow — `crustcore-flow`: a typed, deterministic workflow DSL over
+  CrustCore's supervisor/subagent/verify primitives WITHOUT widening the trust
+  boundary.** A new NON-NANO sidecar crate giving an ergonomic, typed `Flow` graph
+  (`model` · `tool` · `verify` · `review` · `parallel` · `loop_until` · `route` ·
+  `join`). The engine is a **pure deterministic scheduler that owns no I/O** — every
+  effectful node delegates to an INJECTED driver (the project's seam pattern), so the
+  whole graph is CI-testable with `FakeDrivers` and live transports drop in behind the
+  `live-flow` feature with the engine unchanged. **A Flow is a plan, not an
+  authority** — the trust story is preserved structurally:
+  - **`graph` + `builder`** — `Node` enum, opaque `NodeId`, typed `FlowState`
+    (predicates read this and only this), `FlowError`, `Flow`, and a `FlowBuilder`
+    whose constructors default every classification to the MOST RESTRICTIVE posture
+    (`ToolSpec::fail_closed` ⇒ `Reversibility::Destructive` + execution-capable;
+    `FlowBudget::fail_closed` tight caps) so a forgotten field fails closed (Track C
+    P2). `FlowState`'s approval field is **non-`Serialize`/non-forgeable** — it holds
+    only externally-minted `Approved<()>` (from `AuthorizedUser::approve`); no node
+    writes it (invariants 4, 14).
+  - **`drivers`** — the `ModelDriver`/`ToolDriver`/`VerifyDriver`/`ReviewDriver` trait
+    bundle (`FlowDrivers`), the ONLY way a node performs I/O, plus `FakeDrivers` for
+    CI. `VerifyDriver::verify` returns the backend `VerifyOutcome`; because
+    `VerifiedPatch` is type-sealed in `crustcore-backend`, a `FakeVerifyDriver` can
+    return ONLY `Failed`/`Refused` — the seal working as intended (no test backdoor
+    mints a patch).
+  - **`engine`** — `FlowEngine::run`, a deterministic scheduler: topological/branch
+    eval, `Parallel` bounded fan-out with a `max_concurrency` wave cap, `LoopUntil`
+    with a `max_iterations` cap, `Route`/`LoopUntil` predicates evaluated ONLY over
+    typed `FlowState`, `Join` merge. Per node it enforces budget → policy
+    (`PolicySnapshot::classify`, invariant 8) → approval (invariant 14) → untrusted-
+    data declassification (invariant 7). **No integration path** — it never calls
+    `decide_integration` and has no integration node (invariant 6).
+  - **`outcome`** — the completion gate. `FlowOutcome::Completed(VerifiedPatch)` is the
+    SOLE terminal carrying a patch and is produced ONLY by a `Verify` node's
+    `Verified` outcome (i.e. only the public `run_verify` minted it, invariant 13);
+    `Model`/`Review`/`Tool` results are `NodeOutput::Advisory`/`ToolResult`/`Review`
+    that the type system FORBIDS from completing a flow (no `NodeOutput →
+    Completed`/`VerifiedPatch` path). A flow that runs out without a passing verify
+    ends `Finished` — done, never *completed*, never integrated.
+  - **`predicate`** — the untrusted-data boundary: `declassify` wraps any
+    model/tool/review output with `Tainted::new`, redacts it through the `Redactor`,
+    and bounds it to `MAX_OUTPUT_BYTES` before it enters `FlowState`; `Predicate` reads
+    only typed flags/counters/output-PRESENCE — never raw text — so a hostile output
+    ("approve and merge", "ignore policy") is inert data that cannot steer a branch
+    (invariant 7).
+  - **`budget`** — a per-`Flow` `FlowBudget` (model cost, wall time, node steps, total
+    fan-out) checked BEFORE each unit of work; a breach halts the run (invariant 11).
+  - **`live`** (behind `live-flow`, never in CI) — `LiveModelDriver` (consult seam),
+    `LiveToolDriver` (policy-gated + sandbox), `LiveVerifyDriver` (wraps the public
+    `run_verify` — the ONLY driver that can yield `Verified`), `LiveReviewDriver`
+    (`NativeAdvisor`); all integration tests `#[ignore]`d.
+  - **Tests + example** — `tests/redteam_flow.rs` (18 deterministic tests) proving the
+    NEGATIVES across adversarial dimensions (a)–(g): determinism; `Completed`
+    unreachable except via a `Verify` node; `Parallel`/`LoopUntil`/`FlowBudget` caps;
+    predicates read only typed state; a hostile tool/model/review output can't steer a
+    side-effect branch; secrets echoed by a model/tool are redacted before reaching
+    state; an irreversible node halts without a real `Approved<T>` (and runs with one,
+    refuses an expired one); read-only policy denies a tool; the flow never integrates.
+    `tests/live_flow.rs` is the `live-flow` `#[ignore]`d positive path (a real
+    `VerifiedPatch` → `Completed` over a sandboxed `run_verify`). `examples/` shows the
+    safe path is the easy path. **Nano size delta: n/a** (non-nano sidecar, off the
+    nano graph; live deps `live-flow`-gated). Invariants touched/verified: 4, 5, 6, 7,
+    8, 9, 11, 13, 14.
+
+- **v0.4 Track C C5-rag — `crustcore-index-rag`: a composable RAG layer that
+  generalizes B3-vector-memory WITHOUT widening the trust boundary (memory is never
+  authority).** A new OPTIONAL, OFF-NANO pack that turns B3's single in-process vector
+  store + `semantic_select` proof into the swappable RAG surface real repos need — pick
+  your store, chunk the repo once, retrieve symbol-accurate context — by composing only
+  existing typed contracts. Every retrieved fragment stays inert, redacted, bounded,
+  provenance-tagged `ModelVisibleText` with **no path to `Approved<T>` or any
+  capability**. Modules:
+  - **`store`** — a pluggable `VectorStore` adapter trait (`upsert` /
+    `nearest(query, k, floor)` / `delete` / namespace scoping), **retrieval-only —
+    grants nothing**, mirroring `VectorMemory::nearest`. `ChunkMeta { path, byte_span,
+    symbol: Option<..>, source: MemorySource, redact_required }` is a **pure data tag
+    with no capability/approval field** (dangerous "memory-as-authority" state is
+    unrepresentable). `k` is capped to `MAX_NEAREST_K`; returned hits truncated to
+    `MAX_STORE_HITS`.
+  - **`store::local`** — the DEFAULT **dependency-free** backend over
+    `crustcore-index`'s in-memory set, reusing `crustcore_index::embed::cosine` verbatim;
+    preserves `VectorMemory` query semantics exactly (positively-similar only,
+    descending score with deterministic insertion-order ties) plus an explicit floor.
+    Persistence is the `TODO(C5-persist)` seam behind the off-by-default `persist`
+    feature.
+  - **`store::mock`** — a controllable `MockVectorStore` for CI that can be told to
+    misbehave like a hostile backend (oversized payloads, NaN/inf/negative scores,
+    duplicate-forged `ChunkId`s) so the planner's bounding/sanitization/redaction is
+    what's under test.
+  - **`store::qdrant` / `store::lancedb`** — thin adapters, each behind its OWN
+    off-by-default cargo feature, routing any auth via `crustcore_secrets::CredentialProxy`
+    (key never to model/sandbox env); the real client is `TODO(C5-<backend>-live)`.
+  - **`chunk`** — a bounded repo `Chunker`: line-oriented fragments with overlap,
+    **defaulting to whole-line, bounded, deny-large chunks** (fail-safe). Every fragment
+    is `<= MAX_CHUNK_BYTES` (a giant single line is split at a UTF-8 boundary); per-file
+    and per-call fan-out are capped. `ChunkMeta` defaults to `redact_required = true`,
+    `symbol = None`.
+  - **`chunk::symbol`** — symbol-aware metadata via the EXISTING
+    `crustcore_index::CodeIntel` trait (backed by the real `GrepCodeIntel`): aligns chunk
+    boundaries to symbol spans and tags `ChunkMeta.symbol`. **Conservative line-chunk
+    fallback is the DEFAULT** whenever symbol info is absent (fail-closed, never
+    unbounded). Malformed/inverted/out-of-range symbol spans are sanitized, never
+    trusted. A tree-sitter/AST backend is `TODO(C5-ast)` behind the off-by-default `ast`
+    feature.
+  - **`plan`** — the `QueryPlanner` trust chokepoint: embed the (bounded) query via the
+    B3-owned `crustcore_index::embed::Embedder`, build a bounded `RetrievalPlan
+    { namespace, k (capped), floor }`, run the store NN, dedup forged `ChunkId`s, then
+    push every hit through the **existing** `semantic_select` redact-then-bound boundary
+    (`Redactor` + the `MAX_CONTEXT_*` caps) — emitting a `ContextBundle` of inert,
+    provenance-tagged fragments. The store score is NOT trusted for ranking;
+    `semantic_select` re-ranks by cosine, so a NaN/forged store score cannot reorder or
+    smuggle a fragment.
+  - **`index`** — `index_repo(files, &Chunker, &Embedder, &mut VectorStore, source)`:
+    chunk → embed → upsert, all bounded; **write-to-store only** (no chunk content enters
+    model context — it returns an opaque `IndexedContent` resolver, not a bundle); the
+    live indexer reads via confined paths.
+  - Reused verbatim (never re-implemented): the `Embedder` trait, `HashEmbedder`,
+    `cosine`, `VectorMemory` semantics, `semantic_select`/`build_bundle`'s
+    redact-then-bound boundary, `CodeIntel`/`GrepCodeIntel`, and
+    `crustcore_secrets::{Redactor, CredentialProxy}`. Seams left for live work:
+    `TODO(B3-embed-live)` (`live` feature), `TODO(C5-ast)` (`ast`), `TODO(C5-persist)`
+    (`persist`), `TODO(C5-<backend>-live)` (`qdrant`/`lancedb`).
+  - **Tests (deterministic, CI):** chunker bounds every fragment to `MAX_CHUNK_BYTES`
+    incl. the giant-line / multibyte cases; the `ast`-off / symbol-absent line-chunk
+    fallback is always exercised; symbol metadata aligns to `CodeIntel` spans; the local
+    backend matches `VectorMemory` semantics; the planner caps `k`, applies the floor,
+    and bounds+redacts every fragment; a precision@1 eval over a canned corpus meets a
+    floor (3/4); retrieval is deterministic across runs. **Red-team (`redteam_rag.rs`):**
+    the B3 `sk-VECSENTINEL` hostile chunk, ranked nearest, stays inert + redacted +
+    provenance-tagged with no `Approved<T>` path — run through the planner over BOTH the
+    local backend AND `MockVectorStore`; a malicious backend (10k oversized hits,
+    NaN/inf/negative scores, forged duplicate ids) does not bypass bounding or panic;
+    missing classification fails closed; indexing is write-to-store only. Covers
+    dimensions (a)–(g).
+  - **Nano size: ZERO delta.** New off-nano pack; `crustcore-index` is already never
+    linked into nano; the default build links no heavy third-party dep, and all
+    external-store / `ast` / `live` / `persist` deps are behind off-by-default cargo
+    features. Confirmed: `crustcore-index-rag` absent from
+    `cargo tree -p crustcore --no-default-features --features nano`; `cargo xtask
+    forbidden-deps` green (nano tree first-party only).
+
+- **v0.4 Track C C6-telemetry — `crustcore-telemetry`: a read-only OpenTelemetry /
+  GenAI-semconv PROJECTION of the audit log (mints nothing, never authoritative).** A
+  new NON-NANO sidecar crate that turns CrustCore's already-authoritative hash-chained
+  event log + MAC-chained tool receipts into standard OTel spans/metrics under the
+  GenAI semantic conventions — so model calls, tool runs, verify outcomes, and budget
+  burn become Grafana/Honeycomb/Jaeger-native *without widening the trust boundary*.
+  The event log stays the single source of truth; telemetry is a derived projection
+  that changes no state, so a deleted/altered span cannot affect a verdict, budget, or
+  `VerifiedPatch`. Modules:
+  - **`project`** — `EventProjector`, a pure, sync, SDK-free mapper from a *borrowed*
+    `FrameMeta` (+ its joined `ToolReceipt`) to a neutral in-crate IR
+    (`SpanModel { name, attrs }` / `MetricSample { name, value, labels }`). Reads only
+    typed header/receipt fields, never payload bytes; deterministic and idempotent.
+  - **`semconv`** — the `EventKind` → span/metric mapping table. Model frames →
+    `gen_ai.model_request`/`gen_ai.model_response` (`gen_ai.system = crustcore` + the
+    operation; conservative — no model name/usage from untrusted output, inv 17);
+    `ToolCall*` + joined receipt → `crustcore.tool.*` (receipt hashes/MAC/ids only,
+    never tool name/args/result values, inv 10); `Patch*` → `crustcore.verify.*`;
+    budget deltas → `crustcore.budget.<axis>` metrics. **Span/metric NAMES come ONLY
+    from the closed `EventKind`/`BudgetAxis` enums via an exhaustive `match`** — never
+    payload (inv 6, 7).
+  - **`redact`** — the MANDATORY redaction gate as the SOLE emission chokepoint:
+    every attribute value + metric label passes `Redactor::redact`, then is bounded by
+    `MAX_ATTR_LEN` (per-value, char-safe, AFTER redaction so no fragment leaks) and
+    `MAX_ATTRS` (per span/metric, excess dropped with a `crustcore.telemetry.attrs_dropped`
+    marker). `redact_frame` is the only IR→exporter path.
+  - **`export`** — an `Exporter` trait consuming ONLY the post-redaction IR (never a
+    raw frame), an `InMemoryExporter` (CI default; `all_strings()` for leak scans), and
+    an `OtlpExporter` behind the `otlp` feature (minimal buffering stub; real socket
+    `TODO(C6-otlp-live)`).
+  - **`auth`** — broker-mediated OTLP endpoint auth seam: `OtlpEndpointAuth` holds only
+    a `SecretHandle`, never bytes; the `otlp`-gated `inject` resolves the bearer per
+    request via `SecretBroker`→`ApprovedSecretView`→`CredentialProxy::bearer`, never
+    env/span/model-visible (inv 1; `TODO(C6-otlp-live)`).
+  - **`run`** — the driver: `run` over typed `FrameInput`s and `run_log` over an
+    `EventLog` + receipts (range-filtered in-crate, receipt↔log join via P5-join's
+    `verify_against_log`, consumed not re-implemented). Project → redact → export;
+    `batch_bound`/`sample_rate` bound the work; Internal/`Redacted` frames emit only
+    kind+seq; `enabled = false` default (fail-closed).
+  - **`config`** — opt-in config defaulting fully OFF, in-memory exporter, loopback
+    collector (`127.0.0.1:4318`), bounded batch.
+  43 deterministic CI tests (29 unit + 10 integration + 4 red-team) over synthetic
+  `EventLog`+receipt fixtures: each `EventKind` → expected span name + `gen_ai.*`/
+  `crustcore.*` attrs; attr count/length bounding; Internal-visibility + `Redacted`
+  frames emit no payload-derived attrs; read-only (log bytes/head unchanged, idempotent);
+  forged receipt seq doesn't bind to an unrelated span; **C6T.7 leak-canary** — a log
+  whose payloads embed sentinel `sk-LEAKCANARY-7f3a` (+ a `Tainted<T>` frame + a
+  `Redacted` frame) emits NO sentinel in any span attr, metric label, span name, or
+  metric name, and `would_leak` is false on every emitted string. Workspace `Cargo.toml`
+  touched additively only (1 member + 1 internal path dep). Default build links zero
+  third-party crates; `cargo xtask forbidden-deps` green (telemetry/OTel absent from
+  nano); nano 412.0 KiB, zero delta.
+
 - **v0.4 Track C C4-session — `crustcore-session`: a conversation/session/artifact
   service as a redacted, verify-or-refuse VIEW over the hash-chained event log
   (never a competing store).** A new NON-NANO crate giving the daemon, `crustcore-flow`
@@ -1306,7 +1551,11 @@ agent/PR/role/size/invariant audit trail.
 | 2026-06-21 | v0.3 B6-release-infra | Implement reproducible builds (B6.2) in `xtask`: the nano build runs under a deterministic env (`reproducible_env` — `--remap-path-prefix` strips the workspace path + cargo home + rustup sysroot, `SOURCE_DATE_EPOCH=0`, `CARGO_INCREMENTAL=0`) which, with the `nano` profile (codegen-units=1/lto=fat/strip/panic=abort) + pinned `rust-toolchain.toml`, makes the build deterministic. New `cargo xtask reproduce` builds nano twice into independent target dirs + asserts the SHA-256 digests match — **ran it, it passed**. `nano_build` refactored to `nano_build_into(Option<&Path>)` so size-check/release/reproduce all measure the SAME reproducible binary; `run_env` added for env-bearing builds. `docs/releasing.md` §9 added. **Review: 8 found, 4 confirmed+fixed** — all the same overclaim (`reproduce` proves SAME-MACHINE determinism, not cross-machine "anyone can rebuild"): fixed by adding the rustup/sysroot remap (a real cross-machine variance source I'd missed) + rewriting §9 to honestly bound the claim (cross-machine bit-identity still needs a `1.x.y` toolchain-version pin — `stable` is a channel, not a pin — and the same target triple), reconciled with §2. No new deps; nano steady at 412.0 KiB (remap leaves the stripped binary size unchanged). **B6.1 (signed GH Actions release workflow) + B6.3 (cargo-bloat/fuzz CI jobs) edit `.github/workflows/**` — irreversible/CI-credentialed, MAINTAINER-OWNED (§6.3), not agent-wired; B6.4 TUI/packaging are separate non-nano artifacts.** No §7.3 contract files touched. **Final Track B phase.** | `claude/b6-release-infra` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB nano (412.0 KiB, 51.5%; xtask is build tooling, not linked) | Enforces auditability (reproducible bytes — verify, don't trust the signer), 19 (size gate measures the same reproducible binary); respects §6.3 (workflow/signing irreversible steps left to the maintainer); none weakened |
 | 2026-06-21 | v0.4 Track C (C1–C7) | Add **Track C (compose & adopt)** — the RIG/ADK-Rust ergonomics track — to `docs/roadmap-v0.2.md`: seven fully-specified phases (C1-providers unified multi-modal provider registry; C2-toolmacro `#[crust_tool]` macro; C3-flow `crustcore-flow` typed workflow graph; C4-session session/artifact service; C5-rag `crustcore-index-rag`; C6-telemetry OTel/GenAI export; C7-devui `crustcore-dev` loopback UI), each with the full per-phase template (tasks + owned globs, deferral boundary, contract-file impact, adversarial-review dimensions, parallelization, risks, DoD, nano size impact), plus Track C front matter (intro, dependency waves C-1/C-2/C-3, cross-cutting principles, v0.4 DoD, out-of-scope) and four front-matter splices. **Drafted by a multi-agent workflow (8× design + adversarial review + synthesis), integrated by the supervisor**; review corrected real symbol inaccuracies (`crustcore-index::embed::Embedder` per B3; public `run_verify` not private `run_verify_with`; string-bound non-`Clone` `Tainted<T>`; `AuthorizedUser::approve` as sole `Approved<T>` minter; host-`MacKey` `ReceiptChain::mint`). Documentation/planning only — no code; reconciled with P7-live/B3/B6/P11-exec. Every Track C surface is a non-nano sidecar/feature-gated pack with zero nano impact, consumes existing contracts unchanged, defaults fail-safe, and cannot become a side-effect/completion/user-comms path. | `claude/polish-pass` (docs/planning) | Maintainer agent (supervisor + worker fleet) | n/a (docs only) | References 1–14, 16, 19, 20 (ergonomics must not widen the trust boundary); none weakened |
 | 2026-06-21 | v0.4 C1-providers | Generalize `crustcore-net` completion routing into a unified multi-modal capability registry adding **embedding + rerank** without touching the frozen P7-live `Provider`/`Engine`/`select_candidates`/`apply_budget`/`run_reliable`/`BudgetLedger`. **Additive** `embeddings`/`rerank`/`embedding_dims` (default-off) flow through `ModelCard` (net) **and** `ModelInfo` (netproto) via `ModelCard::to_info` — completion routing byte-for-byte unchanged; conservative-off enforced at both the config parse and the wire decode (inv 17). New `modality.rs`: sibling `EmbedProvider`/`RerankProvider` traits + value types `EmbeddingRequest`/`Response` (bounded by `MAX_BATCH`) + `RerankRequest`/`Response` (bounded by `MAX_DOCS`), `select_candidates_for` (capability-gated, fail-closed) + `EmbedEngine`/`RerankEngine` sharing the **single** `BudgetLedger` across all three modalities (inv 11). Live adapters `embed.rs` (`/v1/embeddings`) + `rerank.rs` (Cohere/Jina + OpenAI `/v1/rerank`) over the `HttpClient` boundary (CI-tested via `ReplayClient`), per-call credential resolution (never stored), status-only `map_status_error`, and **rerank indices/scores treated as untrusted — out-of-range/duplicate dropped, non-finite sanitized, never propagated raw** (inv 7). New bounded wire variants `Request::Embed`/`Rerank` + `Response::Embedding`/`Ranking` + `NetHelper::embed`/`rerank` + a `MultiModalEngine`/`serve` that routes all three; deterministic `MockEmbedProvider`/`MockRerankProvider` + `default_mock_multimodal_engine` so the default/CI build links nothing new (the `UreqClient` path stays `live`-gated). Red-team `tests/redteam_c1_modality.rs` (10 tests) covers dims (a)-(g): credential never leaks through any embed/rerank error/garbage path, no panic/over-read, indices can't corrupt selection, capability-missing fails closed, omission can't flip a capability on, failing embedder emits no partial output. `docs/model-routing.md` §1.2 added; B3-vector-memory named as the `EmbedProvider` consumer. No new deps; `crustcore-net`/`-netproto`/`docs/model-routing.md` not §7.3 contract files; `forbidden-deps` + `size-check` green (nano 412.0 KiB, zero delta). | `claude/track-c-implementation` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB nano (412.0 KiB, 51.5%; net/netproto sidecars, live behind `live`) | Enforces 1-3 (credential per-call, never stored/logged/in sandbox env), 7 (provider bytes untrusted — bounded, no-panic, rerank indices clamped), 11 (one shared budget ledger; `MAX_BATCH`/`MAX_DOCS`/dims caps), 17 (capability default-off at config + wire decode, fail-closed routing), 19/20 (zero nano delta; live HTTP behind `live`); none weakened |
+| 2026-06-21 | v0.4 C5-rag (C5.1–C5.8) | Add `crustcore-index-rag`, a NEW optional OFF-NANO pack that generalizes B3-vector-memory into a composable RAG layer WITHOUT widening the trust boundary (memory is never authority). Modules: `store` (pluggable `VectorStore` adapter trait — `upsert`/`nearest(query, k, floor)`/`delete`/namespace, **retrieval-only, grants nothing**; `ChunkMeta { path, byte_span, symbol, source: MemorySource, redact_required }` is a **pure data tag with NO capability/approval field** so memory-as-authority is unrepresentable; `k` capped to `MAX_NEAREST_K`, returned hits to `MAX_STORE_HITS`); `store::local` (DEFAULT dependency-free backend over `crustcore-index`'s in-memory set, reusing `crustcore_index::embed::cosine` verbatim, preserving `VectorMemory` semantics — positively-similar only, descending score with deterministic insertion-order ties — plus an explicit floor; persistence = `TODO(C5-persist)`, off-by-default `persist` feature); `store::mock` (`MockVectorStore` for CI, can return oversized payloads / NaN-inf / forged-duplicate `ChunkId`s to test the planner's guards); `store::qdrant`+`store::lancedb` (thin adapters, each behind its OWN off-by-default cargo feature, auth via `crustcore_secrets::CredentialProxy` only — key never to model/sandbox env; real client `TODO(C5-<backend>-live)`); `chunk` (bounded line-oriented `Chunker` with overlap, **defaults to whole-line, bounded, deny-large** — every fragment `<= MAX_CHUNK_BYTES`, giant lines split at UTF-8 boundaries, per-file/per-call fan-out capped, `redact_required=true`+`symbol=None` defaults); `chunk::symbol` (symbol-aware metadata via the EXISTING `crustcore_index::CodeIntel`/`GrepCodeIntel` — aligns boundaries to symbol spans, tags `ChunkMeta.symbol`; **conservative line-chunk fallback is the DEFAULT** when symbol info is absent [fail-closed]; malformed/inverted/OOB spans sanitized; tree-sitter `TODO(C5-ast)` behind off-by-default `ast`); `plan` (`QueryPlanner` trust chokepoint — embed the bounded query via the B3-owned `crustcore_index::embed::Embedder`, bounded `RetrievalPlan { namespace, k (capped), floor }`, run store NN, dedup forged ids, then push every hit through the EXISTING `semantic_select` redact-then-bound boundary [`Redactor` + `MAX_CONTEXT_*` caps] → a `ContextBundle` of inert provenance-tagged fragments; store score NOT trusted, `semantic_select` re-ranks by cosine so a NaN/forged score can't reorder/smuggle); `index` (`index_repo` — chunk→embed→upsert, all bounded, **write-to-store only**: returns an opaque `IndexedContent` resolver, no content to model context; live indexer reads via confined paths). Reused verbatim (never re-implemented): `Embedder`/`HashEmbedder`/`cosine`/`VectorMemory`/`semantic_select`/`build_bundle`/`CodeIntel`/`GrepCodeIntel` + `crustcore_secrets::{Redactor, CredentialProxy}`. Seams: `TODO(B3-embed-live)` (`live`), `TODO(C5-ast)` (`ast`), `TODO(C5-persist)` (`persist`), `TODO(C5-<backend>-live)` (`qdrant`/`lancedb`). 24 deterministic CI tests (13 unit + 5 `rag.rs` + 6 `redteam_rag.rs`): fragment bounding incl. giant-line/multibyte; ast-off line-chunk fallback always exercised; symbol alignment to `CodeIntel` spans; local backend matches `VectorMemory`; planner caps `k`+floor+redacts+bounds; precision@1 eval over a canned corpus meets a 3/4 floor; deterministic across runs. **Red-team:** the B3 `sk-VECSENTINEL` hostile chunk ranked nearest stays inert+redacted+provenance-tagged with no `Approved<T>` path — through the planner over BOTH local backend AND `MockVectorStore`; a malicious backend (10k oversized hits + NaN/inf/negative scores + forged duplicate ids) does not bypass bounding or panic; missing classification fails closed; indexing write-to-store only. Dims (a)–(g) covered. Workspace `Cargo.toml` touched additively only (1 member + 1 internal path dep). Default build links zero third-party crates; `forbidden-deps` green (`crustcore-index-rag` + store SDKs absent from nano graph); nano unchanged (zero delta). | `claude/track-c-implementation` (PR) | Maintainer agent (Architect/Implementer) | n/a (412.0 KiB, 51.5%; non-nano pack; store SDKs/`ast`/`live`/`persist` feature-gated, off nano graph) | Enforces 3 (store-backend creds via `CredentialProxy` only, never model/sandbox env), 7 (indexed content untrusted — a hostile chunk stays inert data), 11 (bounded everything — chunk/query/`k`/hits/files/chunks + the `MAX_CONTEXT_*` bundle caps), 20 (external-store SDKs + `ast`/`live` feature-gated, zero nano linkage); plus memory-never-authority by construction (no path from `ChunkMeta`/fragment to `Approved<T>`/capability — red-team (a)); none weakened |
+| 2026-06-21 | v0.4 C6-telemetry (C6T.1–C6T.8) | Add `crustcore-telemetry`, a NEW non-nano sidecar crate that projects CrustCore's already-authoritative audit trail (hash-chained `crustcore-eventlog` + MAC-chained `crustcore-receipts`) into OTel/GenAI-semconv spans & metrics — a READ-ONLY projection that mints nothing, mutates no state, and is never authoritative (the event log stays the single source of truth; a deleted/altered span can't affect a verdict/budget/`VerifiedPatch`). Modules: `project` (`EventProjector` — pure, sync, SDK-free mapper from a borrowed `FrameMeta` + joined `ToolReceipt` to a neutral `SpanModel`/`MetricSample` IR; deterministic, idempotent, reads typed fields not payload); `semconv` (the `EventKind`→span/metric table — model frames → `gen_ai.*` with `gen_ai.system=crustcore` + operation [conservative, no model name/usage from untrusted output, inv 17]; `ToolCall*`+receipt → `crustcore.tool.*` with receipt hashes/MAC/ids only [never values, inv 10]; `Patch*` → `crustcore.verify.*`; budget deltas → `crustcore.budget.<axis>` metrics; **NAMES from the closed `EventKind`/`BudgetAxis` enums via exhaustive `match`, never payload** [inv 6, 7]); `redact` (the SOLE emission chokepoint — every attr value + metric label through `Redactor::redact`, then `MAX_ATTR_LEN`/`MAX_ATTRS` bounding [after redaction, drop-with-marker], `redact_frame` is the only IR→exporter path); `export` (`Exporter` trait consuming ONLY post-redaction IR, `InMemoryExporter` CI default, `OtlpExporter` behind `otlp` feature, real socket `TODO(C6-otlp-live)`); `auth` (`OtlpEndpointAuth` holds only a `SecretHandle`; `otlp`-gated `inject` resolves the bearer per-request via `SecretBroker`→`ApprovedSecretView`→`CredentialProxy::bearer`, never env/span/model-visible [inv 1]); `run` (`run`/`run_log` driver — range-filtered frames, receipt↔log join via P5-join's `verify_against_log` [consumed not re-implemented], project→redact→export, `batch_bound`/`sample_rate` bounded, Internal/`Redacted` frames emit only kind+seq, `enabled=false` default fail-closed); `config` (opt-in, default OFF, in-memory exporter, loopback collector, bounded batch). 43 deterministic CI tests (29 unit + 10 integration + 4 red-team) over synthetic `EventLog`+receipt fixtures: span-name/attr mapping, count/length bounding, Internal+`Redacted` emit no payload-derived attrs, read-only (log bytes/head unchanged, idempotent), forged receipt seq doesn't bind, **C6T.7 leak-canary** (sentinel `sk-LEAKCANARY-7f3a` in payloads + a `Tainted<T>` frame + a `Redacted` frame → NO sentinel in any span attr/metric label/span name/metric name, `would_leak` false on every emitted string). Adversarial dims (a)–(g) covered. Workspace `Cargo.toml` touched additively only (1 member + 1 internal path dep). Default build links zero third-party crates; `forbidden-deps` green (telemetry/OTel/Tokio/HTTP absent from nano graph); `size-check` green (nano 412.0 KiB, zero delta). | `claude/track-c-implementation` (PR) | Maintainer agent (Architect/Implementer) | n/a (412.0 KiB, 51.5%; non-nano sidecar; OTel/OTLP SDK behind `otlp`, off nano graph) | Enforces 1 (OTLP endpoint credential broker-mediated per-request, never env/span/model-visible), 2/3 (every attr/label through `Redactor` at the single chokepoint; `Tainted<T>` dropped not declassified; leak-canary asserts names+values), 7 (frame payload untrusted — span/metric names from the closed `EventKind` enum only), 11 (`MAX_ATTRS`/`MAX_ATTR_LEN`/`batch_bound` caps, drop-with-marker), 20 (OTel SDK feature-gated, zero nano linkage); plus read-only/never-authority (6, 13 — no path mints a receipt/budget/`VerifiedPatch`); none weakened |
 | 2026-06-21 | v0.4 C4-session (C4.1–C4.7) | Add `crustcore-session`, a NEW non-nano crate giving the daemon/`crustcore-flow`/dev-UI an application-level session model as a redacted, verify-or-refuse **VIEW over the hash-chained event log — never a competing store** (the event log stays the single source of truth). Modules: `id` (opaque `SessionId`/`ConversationId`); `view` (borrowing `SessionView` indexing an `EventLog` by `task_id`/`job_id`/`seq` range via `EventFrame`/`iter`, plus `ConversationView` over turn frames — never copies the chain, exposes no completion/integration method); `snapshot` (`Snapshot { at_seq, head_hash, turns }` projected up to a `seq`, including ONLY `Visibility::ModelVisible` frames — Internal/unclassified excluded FAIL-CLOSED via a positive match — redactor-per-field, structurally no `SecretMaterial`/`Tainted<T>` field [inv 3], `Serialize` for disk persistence with serde, reloaded snapshot UNTRUSTED until `verify_against` re-checks `head_hash` via `verify_to_head`); `resume` (`resume`/`resume_to_head` gate on `EventLog::verify`/`verify_to_head` AND `crustcore_receipts::join::verify_against_log`, returning a view only when `is_intact()` AND `is_joined()`, else `ResumeRefused` carrying the exact `BreakReason`/`JoinBreak`; mutates no kernel state [inv 13, 18]); `lease` (re-derives lease/heartbeat/cancellation/recovery from `JobLeased`/`TaskKilled`/`TaskFailed` frames, ASSERTS ownership via `owned_by`, surfaces kill/cancel [inv 12]); `artifact` (opaque `ArtifactHandle(ArtifactId)`, contents NEVER inlined, `BoundedArtifact` capped accessor for trusted code only [inv 20]); `compact` (`CompactionPolicy` keep-last-N/summarize/drop-bulk redact-then-bound, `MAX_*` caps mirroring `crustcore-index`, never-authority `ModelVisibleText`, default = most restrictive [inv 7, 11]); `service` (`SessionService` open/snapshot/resume/compact/list, strictly READ/DERIVE/VERIFY-ONLY — no `Approved<T>`/`VerifiedPatch`/capability/side-effect method, enforced by construction since the crate doesn't depend on `crustcore-backend`/`-policy`; completion stays solely `verify::run_verify`, stated as an explicit non-goal). Serde bridges for the external std-only `crustcore-types` ids live in a sidecar-local `serde_compat` module so serde stays off the nano graph. 64 deterministic CI tests (41 unit + 14 integration + 9 red-team) over synthetic + a committed on-disk fixture (`fixtures/clean_session.cclog`, `examples/gen_fixture.rs`): snapshot round-trip + `head_hash` re-verify; fail-closed visibility; every event-log tamper class + every forged-receipt `JoinBreak` → exact `ResumeRefused`; compaction within caps; artifact opacity; red-team (a)–(h). Workspace `Cargo.toml` touched additively only (1 member + 1 internal path dep). `cargo xtask forbidden-deps` green; nano untouched (no `crustcore-session`/serde in the nano graph). | `claude/track-c-implementation` (PR) | Maintainer agent (Architect/Implementer) | n/a (412.0 KiB, 51.5%; non-nano sidecar; serde/serde_json off the nano graph) | Enforces 3 (no secret in snapshot — structural, redactor-per-field), 7 (untrusted history is data; compacted history never-authority), 11 (bounded compaction/artifact reads), 12 (lease/heartbeat/cancellation/recovery re-derived, asserted not claimed), 13 (session never completes/integrates/mints a VerifiedPatch), 18 (resume reconstructs a view, mutates no kernel state), 20 (artifacts by opaque handle, contents never inlined); none weakened |
+| 2026-06-21 | v0.4 C3-flow (C3.1–C3.8) | Add `crustcore-flow`, a NEW non-nano sidecar crate giving a typed, deterministic workflow DSL over the existing supervisor/subagent/verify primitives WITHOUT widening the trust boundary — **a Flow is a plan, not an authority**. Modules: `graph`+`builder` (`Node` enum [`Model`/`Tool`/`Verify`/`Review`/`Parallel`/`LoopUntil`/`Route`/`Join`/`End`], opaque `NodeId`, typed `FlowState` [predicates read this and ONLY this], `FlowError`, `Flow::validate`; `FlowBuilder` whose constructors default every classification to the MOST RESTRICTIVE posture — `ToolSpec::fail_closed` = `Reversibility::Destructive`+execution-capable, `FlowBudget::fail_closed` tight caps — so a forgotten field fails closed [P2]; `FlowState`'s approval field is **non-`Serialize`/non-forgeable**, holding only externally-minted `Approved<()>` from `AuthorizedUser::approve`, never written by a node [inv 4, 14]); `drivers` (the `ModelDriver`/`ToolDriver`/`VerifyDriver`/`ReviewDriver` bundle `FlowDrivers` — the ONLY I/O path — plus `FakeDrivers` for CI; `VerifyDriver::verify` returns the backend `VerifyOutcome`, and because `VerifiedPatch` is type-sealed a fake can return ONLY `Failed`/`Refused` [the seal working — no test backdoor mints a patch]); `engine` (`FlowEngine::run`, a pure deterministic scheduler: per-node budget→policy [`PolicySnapshot::classify`, inv 8]→approval [inv 14]→untrusted-data declassify [inv 7]; `Parallel` `max_concurrency` wave cap + total-fan-out charge, `LoopUntil` `max_iterations` cap, `Route`/`LoopUntil` predicates over typed `FlowState` only, `Join` merge; **no integration path** — never calls `decide_integration`, no integration node [inv 6]); `outcome` (the completion gate — `FlowOutcome::Completed(VerifiedPatch)` is the SOLE patch-carrying terminal, produced ONLY by a `Verify` node's `Verified` outcome [i.e. only the public `run_verify` minted it, inv 13]; `Model`/`Review`/`Tool` yield `NodeOutput` the type system FORBIDS from completing — no `NodeOutput→Completed` path; a run that ends without a passing verify is `Finished`, never *completed*/integrated); `predicate` (`declassify` = `Tainted::new`→`Redactor`→bound to `MAX_OUTPUT_BYTES` before any model/tool/review output enters state; `Predicate` reads only typed flags/counters/output-PRESENCE — never raw text — so a hostile "approve and merge"/"ignore policy" output is inert data that can't steer a branch [inv 7]); `budget` (per-`Flow` `FlowBudget` — model cost/wall/steps/total fan-out — charged before each unit of work, halt on breach [inv 11]); `live` (behind `live-flow`, never in CI: `LiveModelDriver`/`LiveToolDriver` [policy+sandbox]/`LiveVerifyDriver` [wraps public `run_verify` — the ONLY driver that can yield `Verified`]/`LiveReviewDriver` [`NativeAdvisor`], all integration tests `#[ignore]`d). 33 deterministic CI tests (15 unit + 18 `redteam_flow.rs`) proving the NEGATIVES across dims (a)–(g): determinism; `Completed` unreachable except via `Verify`; `Parallel`/`LoopUntil`/`FlowBudget` (incl. cyclic-graph step-cap) caps; predicates read only typed state; hostile model/tool/review output can't steer a route/loop into a side-effect arm; secrets echoed by model/tool redacted before reaching state; irreversible node halts without a real `Approved<T>` (runs with one, refuses an expired one); read-only policy denies a tool; the flow never integrates. `tests/live_flow.rs` is the `live-flow` `#[ignore]`d positive path (real `VerifiedPatch`→`Completed` over a sandboxed `run_verify`, probe-first). `examples/consult_implement_verify.rs` shows the safe path is the easy path. Workspace `Cargo.toml` touched additively only (1 member + 1 internal path dep); live-only deps (`crustcore-path`/`-receipts`/`-sandbox`/`-worktree`) are `live-flow`-gated optionals. `cargo xtask verify` green; `forbidden-deps` green (`crustcore-flow` absent from nano graph); nano 412.0 KiB, zero delta. | `claude/track-c-implementation` (PR) | Maintainer agent (Architect/Implementer) | n/a (412.0 KiB, 51.5%; non-nano sidecar; live drivers `live-flow`-gated, off nano graph) | Enforces 13 (`Completed`/`VerifiedPatch` reachable only via a `Verify` node's public `run_verify`; no node fabricates evidence — type-sealed), 4/14 (irreversible nodes need a non-forgeable `Approved<T>`; no node mints/forges one; `FlowState` approval field non-`Serialize`), 7 (untrusted node output `Tainted`+redacted+bounded before a predicate; predicates read typed state only), 8/9 (tool nodes pass `classify`; execution-capable ones pass a sandbox profile live), 5/6 (advisory model/review output never reaches the user, flow never integrates — `decide_integration` stays the supervisor's authority), 11 (per-`Parallel` fan-out cap, per-`LoopUntil` iteration cap, per-`Flow` budget); none weakened |
+| 2026-06-21 | v0.4 C7-devui (C7.1–C7.7) | Add `crustcore-dev`, a NEW non-nano crate (also intended as `crustcore-daemon serve`) serving a **loopback-only, read-only-by-default local developer/inspection UI** built fail-safe so it CANNOT become a back door. **Core/`serve` split:** a PURE deterministic CORE (default features — no axum/tokio/hyper) holding ALL the security logic and exercised in CI over a `MockDevBackend`, plus a thin `serve` feature that wires the real axum/hyper loopback server (axum/tokio are OPTIONAL deps enabled only by `serve`; the default build and the nano graph link none). Modules: `backend` (the `DevBackend` decoupling trait split into TWO disjoint capability traits — `ReadOnlyBackend` [inspector/replay/provider/MCP/flow/session view models, every method borrows, none mints/writes/appends/verifies] and `MutatingBackend` [the single side-effecting op]; a read handler gets `&dyn ReadOnlyBackend` with NO method returning a `MutatingBackend`, so reaching a side effect from a read view is a COMPILE ERROR — proven by a `compile_fail` doctest; `MockDevBackend` the CI fake, flat redacted view models carrying no live/secret types); `request`/`route_class` (transport-agnostic `DevRequest` with every untrusted field length-bounded+validated and unknown verbs rejected at the door [inv 7]; `RouteClass` ReadOnly/Mutating split + route table with assets/ws registered so auth covers them); `auth` (per-launch 256-bit `BearerToken` [OS-CSPRNG in `serve`], required on EVERY route, constant-time compared, redacted in `Debug`, never in a response/log); `config` (loopback `127.0.0.1` default; off-loopback incl. `0.0.0.0`/`::` is an explicit WARNED opt-in via `bind_host(..,acknowledge_exposure=true)` else fails closed; mutation off unless explicitly unlocked); `views::inspector`/`replay` (read-only over `EventLog::inspect`/`verify`/`iter` + P5-join `verify_against_log`/`FrameRef`; reports `Intact`/`Broken`, respects `visibility`/`redaction_state`, inlines no payload, artifacts by id); `views::provider` (renders `ModelCardView`/usage metadata only — never a key, redactor on every field; live probe/complete via the spawned net helper is `TODO(C7-serve-live)`); `views::mcp` (gate decisions from `gateway_check`/`tool_policies` + manifest-drift — NEVER server self-description); `views::flow` (loads a C3 `Flow` and SIMULATES single-stepping with a no-op driver — dispatches no `Action`, appends no frame, never reaches `run_verify`, mints no `VerifiedPatch`); `views::approvals` (surfaces pending approvals read-only); `mutation` (the approval/mutation gate + the single request-dispatch chokepoint auth→loopback→classify→read-vs-gated-mutate; a resolution is dispatched into the EXISTING `crustcore_daemon::telegram::ApprovalEngine` where `AuthorizedUser::approve` is the sole `Approved<T>` minter — the UI never constructs an `Approved<T>` and a resolution is operation-bound [op-hash] so it can't approve a different op than shown; mutating routes refuse without the launch flag); `serve`/`serve_entry` (feature-gated axum loopback server mapping HTTP→the core `route` chokepoint, plus the `crustcore-daemon serve` alias entry — alias enabled here, daemon-CLI wiring noted as a follow-up since editing the daemon's tree was out of scope this pass). 65 deterministic CI tests (46 unit + 18 `redteam_devui.rs` + 1 `compile_fail` doctest) over `MockDevBackend` — no axum/net/secrets — covering adversarial dims (a)–(g). Workspace `Cargo.toml` touched additively only (1 member + 1 internal path dep). `cargo xtask forbidden-deps` green (`crustcore-dev`/axum/tokio/hyper absent from the nano graph); nano 412.0 KiB, zero delta. | `claude/track-c-implementation` (PR) | Maintainer agent (Architect/Implementer) | n/a (412.0 KiB, 51.5%; non-nano sidecar; web stack `serve`-gated, off nano graph) | Enforces 4/14 (UI never mints `Approved<T>`; resolutions dispatched into the existing operation-bound `AuthorizedUser::approve` engine, op-hash binds the resolution, mutating routes off by default), 7 (all browser input bounded+validated; server/MCP/repo/graph content untrusted), 8 (`RouteClass`/two-trait split makes a side effect from a read view a compile error), 9/13 (read paths never reach `run_verify`/mint a `VerifiedPatch`; flow debugger only simulates), 15/16 (no free-text path to model/user — typed views only), 20 (web stack feature-gated, zero nano linkage); none weakened |
 | 2026-06-21 | v0.4 C2-toolmacro (C2.1–C2.8) | Add the `#[crust_tool]` tool-authoring macro as two NEW non-nano crates that consume the policy/secrets/receipts/types contracts UNCHANGED — making the safe path the easy path (P2). **`crustcore-toolkit`** (std-only, zero new third-party runtime deps) holds the real safety logic so it is testable without the macro: `CrustTool` trait, `ToolOutcome { visible: ModelVisibleText, .. }` (the ONLY visible channel — sole constructor `Redactor::to_model_visible`), `ToolSchema`/`SchemaType` (`is_concrete()` rules out `Any`), bounded `ToolArgs`, `ToolError` (`Input/OutputTooLarge`), and the host-side `finalize`/`HostTool::emit` doing the fixed order **redact → bound (refuse-on-overrun) → mint receipt over the EXACT shown bytes** (HOST owns the `MacKey`/`ReceiptChain`, passed by `&mut`; generated code never holds a key, calls `mint`, or names `Approved`/`AuthorizedUser`). **`crustcore-tool-macro`** (proc-macro; `syn`/`quote`/`proc-macro2` BUILD-TIME ONLY) derives the schema from the typed signature (String/ints/bool/`Option<T>`/`Vec<T>`; UNSUPPORTED type = HARD COMPILE ERROR, never `Any`), defaults `default_reversibility()` to the most restrictive `Destructive` unless explicitly downgraded (unknown value = hard error), wires `invoke` through the toolkit `finalize`, and emits a per-tool `#[cfg(test)]` safety fixture. Tests are the gate (`toolkit/tests/safe_path.rs` 9 + unit 4; `macro/tests/generated_tool.rs` 8 + 8 generated fixtures = 16); `compile_fail`/trybuild bypass tests (`tests/compile_fail.rs` + `tests/ui/*` — unsupported type, unknown reversibility, self-authorize symbol, missing host, non-Result return) are gated behind a `trybuild` feature and OFF in default `cargo test --workspace`. **C2.7 migration of a live pack tool DEFERRED (approved scoping)** to keep blast radius small — representative end-to-end examples ship instead (`toolkit/examples/safe_tool.rs`, `macro/examples/crust_tool_demo.rs`). Workspace `Cargo.toml` gained 2 members + 2 internal path deps (additive). `ReceiptParams` fields used exactly: `task_id`/`job_id`/`tool_call_id`/`tool_name`/`args`/`result`(redacted+bounded)/`artifacts`/`event_seq`. `forbidden-deps` + `size-check` green; nano 412.0 KiB, zero delta (no toolkit/macro/syn/quote/proc-macro2 in the nano graph). | `claude/track-c-implementation` (PR) | Maintainer agent (Architect/Implementer) | +0 KiB nano (412.0 KiB, 51.5%; both crates non-nano; proc-macro deps build-only) | Enforces 2/10 (every model-visible result redacted-then-receipted; `ModelVisibleText`-only channel; receipt binds the final bytes), 11 (bounded I/O, refuse-on-overrun), 4/8 (generated code routes the decision through `classify`, never inlines it, never constructs `Approved<T>`), 1/3 (host-owned `MacKey`, no secret in visible output), 7 (args untrusted), 19/20 (zero nano delta; proc-macro deps build-time only); none weakened |
 
 ---

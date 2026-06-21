@@ -1,0 +1,25 @@
+[package]
+name = "crustcore-telemetry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Read-only OpenTelemetry / GenAI-semconv projection of CrustCore's audit log (non-nano sidecar)."
+
+[dependencies]
+crustcore-types = { workspace = true }
+crustcore-kernel = { workspace = true }
+crustcore-eventlog = { workspace = true }
+crustcore-receipts = { workspace = true }
+crustcore-secrets = { workspace = true }
+
+[features]
+# The live OTLP exporter (OTel/OTLP SDK: Tokio/HTTP/protobuf) and broker-mediated
+# endpoint auth live behind this feature ONLY, so the default build (workspace + CI)
+# links no heavy stack — the deterministic projection core is feature-free. This is a
+# non-nano sidecar crate the nano binary never links; `xtask forbidden-deps` proves the
+# OTel/HTTP stack never enters the nano graph (CLAUDE.md §5.1, invariants 19, 20).
+# The real socket is `TODO(C6-otlp-live)`; the feature ships only a minimal seam today.
+otlp = []
