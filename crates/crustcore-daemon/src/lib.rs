@@ -11,14 +11,18 @@
 //! verifier-owned acceptance over a [`SubagentExecutor`](crate::exec::SubagentExecutor)
 //! trait), the **model-backed advisor** ([`advisor`], P12-native:
 //! [`NativeAdvisor`](crate::advisor::NativeAdvisor) over an injected consult fn,
-//! advisory-not-policy preserved, untrusted response redacted), and the **hardened
+//! advisory-not-policy preserved, untrusted response redacted), the **hardened
 //! webhook ingestion** ([`webhook`], B2-gh-app: HMAC-SHA256 constant-time signature
-//! verification + size-bound + replay-dedup → a redacted, bounded `GitHubEnvelope`) are
-//! implemented and CI-tested. The Bot API HTTP long-polling/send (`TODO(P9-net)`), the
-//! GitHub loop, the live `WorktreeSubagentExecutor` (`TODO(P11-exec-live)`), the live
-//! advisor routing + advisor-note log append (`TODO(P12-native-live)`), the live webhook
-//! HTTP listener + GitHub App JWT/RS256 auth (`TODO(B2-webhook-live)`/`TODO(B2-gh-app-live)`),
-//! and supervision land in later phases.
+//! verification + size-bound + replay-dedup → a redacted, bounded `GitHubEnvelope`), and
+//! the **self-improvement loop runner** ([`run_cycle`](crate::selfimprove::run_cycle),
+//! B5-autoloop: eval-run → evidence-gate → contract-gate → *draft* self-PR over an
+//! `EvalRunner` seam — no self-merge, no kernel mutation) are implemented and CI-tested.
+//! The Bot API HTTP long-polling/send (`TODO(P9-net)`), the GitHub loop, the live
+//! `WorktreeSubagentExecutor` (`TODO(P11-exec-live)`), the live advisor routing +
+//! advisor-note log append (`TODO(P12-native-live)`), the live webhook HTTP listener +
+//! GitHub App JWT/RS256 auth (`TODO(B2-webhook-live)`/`TODO(B2-gh-app-live)`), the live
+//! autoloop evals/PRs + multi-repo orchestration (`TODO(B5-autoloop-live)`), and
+//! supervision land in later phases.
 #![forbid(unsafe_code)]
 
 pub mod advisor;
