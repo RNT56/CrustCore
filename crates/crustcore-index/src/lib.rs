@@ -212,9 +212,14 @@ impl MemoryStore {
     /// credential, so the snapshot is written in the clear (contrast `crustcore-secrets`'s
     /// encrypted vault, which holds keys).
     ///
+    /// Each `key`/`value` is bounded to [`MAX_MEMORY_FIELD`] on write — the **same** bound
+    /// [`load`](Self::load) enforces — so the format is symmetric: a `save` always produces
+    /// a file `load` accepts (an entry whose `BoundedText` was constructed with a looser
+    /// cap is truncated to the snapshot bound, never silently rejected on reload).
+    ///
     /// # Errors
     /// [`MemoryStoreError::Io`] if the file cannot be written; [`MemoryStoreError::BadContents`]
-    /// only if the store somehow exceeds `u32` entries (not reachable in practice).
+    /// only if the store somehow exceeds `u32::MAX` entries (not reachable in practice).
     pub fn save(&self, path: &std::path::Path) -> Result<(), MemoryStoreError> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&MEMORY_MAGIC);
@@ -224,8 +229,10 @@ impl MemoryStore {
         for e in &self.entries {
             buf.push(kind_to_u8(e.kind));
             buf.push(source_to_u8(e.source));
-            write_field(&mut buf, e.key.as_str().as_bytes())?;
-            write_field(&mut buf, e.value.as_str().as_bytes())?;
+            // Bound each field to MAX_MEMORY_FIELD on write so the format is symmetric with
+            // `load` (which rejects an over-cap field): `save` always round-trips.
+            write_field(&mut buf, bounded_field(e.key.as_str()))?;
+            write_field(&mut buf, bounded_field(e.value.as_str()))?;
         }
         std::fs::write(path, &buf).map_err(|e| MemoryStoreError::Io(e.to_string()))
     }
@@ -322,6 +329,19 @@ fn write_field(buf: &mut Vec<u8>, data: &[u8]) -> Result<(), MemoryStoreError> {
     buf.extend_from_slice(&len.to_le_bytes());
     buf.extend_from_slice(data);
     Ok(())
+}
+
+/// Truncates a field to [`MAX_MEMORY_FIELD`] bytes on a char boundary (alloc-free), so
+/// `save` writes only what `load` will accept — keeping the snapshot format symmetric.
+fn bounded_field(s: &str) -> &[u8] {
+    if s.len() <= MAX_MEMORY_FIELD {
+        return s.as_bytes();
+    }
+    let mut end = MAX_MEMORY_FIELD;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s.as_bytes()[..end]
 }
 
 fn kind_to_u8(k: MemoryKind) -> u8 {
@@ -862,6 +882,34 @@ mod tests {
             decode_snapshot(&huge),
             Err(MemoryStoreError::BadContents)
         ));
+    }
+
+    #[test]
+    fn oversized_field_is_bounded_on_save_so_it_round_trips() {
+        // A caller can build an entry whose BoundedText exceeds MAX_MEMORY_FIELD (the
+        // type permits a looser cap). `save` must bound it so `load` still accepts the
+        // snapshot — save success implies load success (symmetric format).
+        let mut store = MemoryStore::new();
+        let big = "v".repeat(MAX_MEMORY_FIELD + 5_000);
+        store.put(MemoryEntry {
+            kind: MemoryKind::RepoSummary,
+            key: bt("big"),
+            value: BoundedText::truncated(&big, MAX_MEMORY_FIELD * 2), // over the snapshot bound
+            source: MemorySource::RepoFile,
+        });
+        let path = std::env::temp_dir().join("cc_index_mem_oversized.ccms");
+        store.save(&path).unwrap();
+
+        let loaded = MemoryStore::load(&path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(
+            loaded.by_kind(MemoryKind::RepoSummary)[0]
+                .value
+                .as_str()
+                .len()
+                <= MAX_MEMORY_FIELD
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     // --- context selection / compaction (P14.5, invariants 2/7/11) ---
