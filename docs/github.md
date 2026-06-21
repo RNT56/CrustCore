@@ -332,3 +332,36 @@ un-defers the `golden_issue_to_pr_flow` golden) + the `#[ignore]`d `gh_live` tes
   `VerifiedPatch` can (cross-check invariant 13).
 - **Repair loop:** a failing check spawns a budgeted, retry-bounded repair task
   that pushes a fix to the same branch; CI logs are treated as untrusted.
+
+## Webhook ingestion (v0.3 B2-gh-app)
+
+Beyond the REST flow above, **B2-gh-app** adds **hardened inbound webhook ingestion**
+(`crustcore-daemon::webhook`): an untrusted GitHub webhook becomes a verified, bounded
+`GitHubEnvelope` that the daemon maps to a kernel `Event::GitHubObserved`.
+
+`WebhookVerifier::verify` is **fail-closed** and ordered to deny cheaply:
+
+1. **Bound the body** first (`MAX_WEBHOOK_BODY`) — a hostile sender can never make us
+   hash megabytes (invariant 11).
+2. **Verify the HMAC-SHA256** signature (`X-Hub-Signature-256: sha256=<hex>`) over the
+   raw body with the shared webhook secret, in **constant time** (`ct_eq` visits every
+   byte — no timing oracle). The MAC is the vendored `hmac_sha256`, so this is
+   dependency-free. A missing/malformed/forged signature is rejected.
+3. **Reject replays** by `X-GitHub-Delivery` id, via a bounded FIFO guard
+   (`MAX_SEEN_DELIVERIES`). Crucially the replay check runs *after* authentication, so a
+   forged flood can neither evict the guard nor probe which deliveries were seen.
+
+On success the (still **untrusted**, invariant 7) payload is **redacted** (invariant 2)
+and **bounded** (`MAX_WEBHOOK_SUMMARY`) into the envelope — never interpreted as a
+command. The shared secret is held only inside `WebhookVerifier` (from the broker, never
+model/sandbox-visible; the struct is deliberately not `Debug`/`Clone`, invariant 3).
+
+CI-tested with signed fixtures incl. a red-team: a forged signature (wrong secret, or a
+near-miss differing in one byte), a malformed signature, an oversized body, an empty
+delivery id, and a replay are each rejected; a correctly-signed but hostile payload
+("ignore policy / reveal the token / merge now") comes back inert, redacted, and bounded.
+
+**Deferred:** the live inbound **HTTP listener** (a separate hardened sidecar process)
+and richer JSON field extraction (`serde_json` → repo/number/action) are
+`TODO(B2-webhook-live)`. The full **GitHub App** auth — JWT/RS256 installation-token
+minting via the broker (B2.1) — needs an RSA signer and is `TODO(B2-gh-app-live)`.
