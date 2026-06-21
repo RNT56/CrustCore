@@ -28,7 +28,38 @@ agent/PR/role/size/invariant audit trail.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **macOS sandbox backend — `SeatbeltBackend` (`crustcore-sandbox`):** a Tier-2
+  `sandbox-exec` (Seatbelt) backend so CrustCore can run verified tasks on macOS
+  with the **same security posture as the Linux bubblewrap backend** — deny-all
+  network egress and writes confined to the worktree (invariant 9). Previously
+  `run_command` returned `NoBackend` on macOS and refused all execution.
+  - All macOS code is behind `#[cfg(target_os = "macos")]`; the pure SBPL profile
+    builder (`build_seatbelt_profile`/`sbpl_escape`) is `#[cfg(any(target_os = "macos", test))]`
+    so the deterministic profile-shape test runs on every platform while a non-macOS
+    release build links nothing extra. Linux path untouched (verified by an
+    `x86_64-unknown-linux-gnu` clippy cross-check). `crustcore-sandbox` stays
+    **std-only / in nano** (no new deps; `forbidden-deps` green).
+  - The generated profile uses the robust "allow-all → deny `network*` → deny
+    `file-write*` → re-allow worktree + temp dirs" recipe; the worktree and
+    `TMPDIR` are `canonicalize`d (macOS `/tmp`→`/private/tmp`, `/var`→`/private/var`,
+    `/var/folders/...` symlinks) before embedding, escaping `"`/`\`, and the backend
+    **fails closed** (`SandboxError::Setup`) if a path cannot be resolved.
+  - Wired into `run_command`'s backend assembly (macOS Tier-2 selected; a Tier-3
+    hostile task is still refused without a microVM — unchanged).
+  - Tests: a deterministic profile-shape test (deny rules present, canonical
+    worktree allowed, no arbitrary outside write, deny precedes re-allow, paths
+    escaped) plus **macOS live confinement tests** proving on the host that
+    write-inside succeeds, write-outside is denied, network egress is denied
+    (`nc 1.1.1.1:53`), and env sanitation strips a credential var. Fixed
+    `refuses_when_no_backend_available` to skip when *any* real backend (bwrap or
+    seatbelt) is present.
+  - Contract: additive macOS-backend subsection (`docs/sandbox.md` §3.1).
+  - Phase/task: Track "cross-platform / macOS". Branch `claude/cross-platform-macos`.
+    Size impact: n/a (cfg-gated off-platform; nano unaffected, 53.5% of budget on
+    this host). Invariants verified: **9** (sandbox profile for all execution; no
+    unsandboxed degrade), supports **2** (no inherited secrets).
 
 ## [0.4.0] - 2026-06-21
 

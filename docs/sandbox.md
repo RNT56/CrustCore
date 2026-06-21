@@ -101,6 +101,54 @@ The launcher records which backend was selected (for the event log /
 `crustcore inspect`). If no acceptable backend is available for the required tier,
 execution is **refused** — there is no "run unsandboxed" degrade path.
 
+### 3.1 macOS backend v1: `sandbox-exec` (Seatbelt)
+
+The macOS Tier-2 backend (`SeatbeltBackend`, compiled only under
+`#[cfg(target_os = "macos")]`, std-only) wraps the command in
+`/usr/bin/sandbox-exec` under a generated SBPL profile, matching the bubblewrap
+backend's security posture: **deny-all network egress** and **writes confined to
+the worktree**. It is detected at runtime (probing `/usr/bin/sandbox-exec`, which
+ships on every macOS); a host without it **refuses** rather than degrading to
+unsandboxed execution. Like bubblewrap, allowlisted egress is not granted here in
+v1 — an `Allowlist` profile is refused until the trusted egress proxy exists.
+
+The generated profile uses an "allow-all, then deny the two load-bearing classes,
+then re-allow the writable surface" recipe (later SBPL rules override earlier
+ones), so a toolchain keeps its read access while the two guarantees are enforced:
+
+```scheme
+(version 1)
+(allow default)
+(deny network*)            ; deny-all egress — mirrors bubblewrap --unshare-all
+(deny file-write*)         ; then re-allow only the writable surface below
+(allow file-write*
+    (subpath "<CANONICAL_WORKTREE>")
+    (subpath "<CANONICAL_TMPDIR>")
+    (subpath "/private/tmp")
+    (subpath "/private/var/tmp")
+    (literal "/dev/null") (literal "/dev/zero")
+    (literal "/dev/stdout") (literal "/dev/stderr") (literal "/dev/tty")
+    (literal "/dev/dtracehelper") (literal "/dev/urandom"))
+```
+
+- `(deny network*)` is the deny-all-egress guarantee; `(deny file-write*)`
+  followed by re-allowing only the worktree + temp dirs is the write-confinement
+  guarantee. Both are verified by live confinement tests on macOS.
+- **Paths are canonicalized.** macOS symlinks `/tmp`→`/private/tmp`,
+  `/var`→`/private/var`, and worktrees under `/var/folders/...`; SBPL `subpath`
+  matches the kernel's **resolved** path. The backend therefore
+  `canonicalize`s the worktree and the (sanitized) `TMPDIR` before embedding them
+  (falling back to `/private/tmp` when `TMPDIR` is unset). If a path cannot be
+  canonicalized the backend **fails closed** (`SandboxError::Setup`) rather than
+  embedding an unresolved path that would either fail open or block legitimate
+  worktree writes. Embedded paths are escaped (`"` and `\`) to prevent breaking
+  out of the SBPL string literal.
+- The child runs with `cwd` set to the worktree and the env sanitized at the
+  launch boundary (§5), exactly as the bubblewrap backend does.
+
+Firecracker (Tier 3) and the network-proxy / container fallbacks remain future
+work; a Tier-3 (hostile) task on macOS is still refused without a microVM.
+
 ---
 
 ## 4. Network posture
