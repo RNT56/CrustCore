@@ -155,16 +155,24 @@ pub fn run_subagent(
 ) -> Result<SubagentOutcome, RunRefused> {
     let spec: AgentSpec = registry.get(agent).ok_or(RunRefused::UnknownAgent)?.clone();
 
+    // Reserve a concurrency slot. The RAII guard releases it on EVERY exit — a normal
+    // return, a `?` early-return, or an unwinding panic — so a failed, over-budget, or
+    // panicking run can never leak a slot. Bounded fan-out is structural (invariant 11),
+    // not a property of careful control flow.
     scheduler.try_spawn().map_err(|_| RunRefused::Concurrency)?;
-    // Reserve-then-always-release: run + charge, free the slot, THEN propagate any
-    // error — so a failed or over-budget run never leaks a concurrency slot.
-    let charged = run_charged(&spec, task, executor, *usage);
-    scheduler.finish();
-    let (raw, next_usage) = charged?;
+    let _slot = SlotGuard {
+        scheduler: &mut *scheduler,
+    };
+
+    let (raw, next_usage) = run_charged(&spec, task, executor, *usage)?;
     *usage = next_usage;
 
     // Acceptance is verifier evidence ONLY — never the worker's self-claim (inv 6, 13).
     let accepted = raw.verified;
+    // Re-bound the (untrusted) summary on the supervisor side rather than trusting the
+    // executor's chosen cap, so the declared `MAX_SUBAGENT_SUMMARY` actually holds here
+    // (invariant 11, §6.5; invariant 7: an executor's output is untrusted data).
+    let summary = BoundedText::truncated(raw.summary.as_str(), MAX_SUBAGENT_SUMMARY);
     let kind = if accepted {
         MessageKind::PatchProposal
     } else {
@@ -175,7 +183,7 @@ pub fn run_subagent(
         from_role: spec.role,            // registry-bound, not self-asserted
         target: AgentTarget::Supervisor, // never the user (invariant 5)
         kind,
-        payload: raw.summary.clone(),
+        payload: summary.clone(),
     });
 
     Ok(SubagentOutcome {
@@ -183,9 +191,22 @@ pub fn run_subagent(
         role: spec.role,
         accepted,
         self_claimed_done: raw.self_claimed_done,
-        summary: raw.summary,
+        summary,
         usage: next_usage,
     })
+}
+
+/// Releases a reserved [`Scheduler`] slot on drop — on a normal return, a `?`
+/// early-return, or an unwinding panic — so [`run_subagent`] cannot leak a concurrency
+/// slot down any path (invariant 11).
+struct SlotGuard<'a> {
+    scheduler: &'a mut Scheduler,
+}
+
+impl Drop for SlotGuard<'_> {
+    fn drop(&mut self) {
+        self.scheduler.finish();
+    }
 }
 
 /// Runs the executor and charges the result against the budget, returning the raw result
@@ -447,5 +468,41 @@ mod tests {
         );
         assert_eq!(sched.running(), 0); // released even on executor error
         assert!(bb.is_empty());
+    }
+
+    #[test]
+    fn oversized_executor_summary_is_rebounded_by_the_supervisor() {
+        // The executor hands back a summary far larger than MAX_SUBAGENT_SUMMARY (a
+        // BoundedText lets a producer pick a looser cap). The supervisor must re-clamp
+        // it on both the posted message and the returned outcome — it does not trust the
+        // (untrusted) producer to self-bound to the stricter limit.
+        let reg = registry_with(spec(1, Role::ExternalCommand));
+        let big = "x".repeat(MAX_SUBAGENT_SUMMARY * 4);
+        let exec = MockExecutor {
+            result: RawSubagentResult {
+                verified: true,
+                self_claimed_done: false,
+                summary: BoundedText::truncated(&big, 64 * 1024),
+                usage: AgentUsage::default(),
+            },
+        };
+        let mut sched = Scheduler::new(2);
+        let mut usage = AgentUsage::default();
+        let mut bb = Blackboard::new();
+
+        let out = run_subagent(
+            AgentId(1),
+            &reg,
+            &task(),
+            &exec,
+            &mut sched,
+            &mut usage,
+            &mut bb,
+        )
+        .unwrap();
+
+        assert!(out.summary.as_str().len() <= MAX_SUBAGENT_SUMMARY);
+        let msgs = bb.messages_for(AgentTarget::Supervisor);
+        assert!(msgs[0].payload.as_str().len() <= MAX_SUBAGENT_SUMMARY);
     }
 }
