@@ -422,8 +422,29 @@ fn size_check() -> Result<(), String> {
 /// gate, a future feature repoint or a heavy dep sneaking into `crustcore-netproto`
 /// would silently break invariant 20.
 fn forbidden_deps() -> Result<(), String> {
-    // 1. The nano build links no forbidden crate.
+    // 1. The nano build is FIRST-PARTY ONLY (invariant 20, CLAUDE.md §5.1). This is the
+    //    authoritative gate: nano links only `crustcore*` workspace crates and the std
+    //    library — an allowlist, not a spot-check denylist. It catches ANY third-party
+    //    crate leaking in (e.g. a feature repoint pulling a sidecar's HTTP/TLS/async/serde
+    //    stack), including ones not named in FORBIDDEN_IN_NANO below.
     let nano = tree_crate_names("nano")?;
+    let mut leaked: Vec<&str> = nano
+        .iter()
+        .map(String::as_str)
+        .filter(|n| !n.starts_with("crustcore"))
+        .collect();
+    if !leaked.is_empty() {
+        leaked.sort_unstable();
+        leaked.dedup();
+        return Err(format!(
+            "third-party crate(s) leaked into the std-only nano tree: {}. Nano links only \
+             `crustcore*` crates — a sidecar dependency must stay behind its feature/helper \
+             and never reach nano (invariant 20, CLAUDE.md §5.1).",
+            leaked.join(", ")
+        ));
+    }
+    // Secondary, friendlier-error denylist: a specifically-known-dangerous crate would
+    // already be caught by the allowlist above, but naming it gives a clearer message.
     let found: Vec<&str> = FORBIDDEN_IN_NANO
         .iter()
         .copied()
@@ -436,7 +457,7 @@ fn forbidden_deps() -> Result<(), String> {
         ));
     }
     println!(
-        "  no forbidden crates in the nano dependency tree ({} checked)",
+        "  nano dependency tree is first-party only (0 third-party crates; {} named-forbidden also checked)",
         FORBIDDEN_IN_NANO.len()
     );
 

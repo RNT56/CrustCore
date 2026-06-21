@@ -86,7 +86,7 @@ pub fn open_pr(
     if !approval.is_valid_at(now) {
         return Err(IntegrateError::ApprovalExpired);
     }
-    let cap = &approval.value;
+    let cap = approval.value();
     if !branch_under_prefix(head_branch, cap.branch_prefix.0.as_str()) {
         return Err(IntegrateError::BranchNotUnderPrefix(
             head_branch.to_string(),
@@ -100,7 +100,7 @@ pub fn open_pr(
         draft: true,
         title: format!("[crustcore] verified patch on {head_branch}"),
         body,
-        approval_id: approval.approval_id,
+        approval_id: approval.approval_id(),
     })
 }
 
@@ -200,7 +200,7 @@ mod tests {
     }
 
     fn approved(cap: GitHubWriteCap, expires_ms: u64) -> Approved<GitHubWriteCap> {
-        AuthorizedUser(1).approve(cap, ApprovalId(7), Timestamp::from_millis(expires_ms))
+        AuthorizedUser::bind(1).approve(cap, ApprovalId(7), Timestamp::from_millis(expires_ms))
     }
 
     #[test]

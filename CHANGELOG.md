@@ -1042,6 +1042,25 @@ agent/PR/role/size/invariant audit trail.
 
 ### Security
 
+- **Full-codebase audit hardening (post-Track-B).** A holistic 8-dimension adversarial
+  audit (secrets, verifier/approval, sandbox/exec, untrusted-data, path-confinement,
+  receipts/eventlog, panic/bounds, nano-deps/kernel), each finding independently refuted,
+  surfaced **2 confirmed structural gaps** (neither exploitable today; both now fixed):
+  - **Sealed `Approved<T>` + `AuthorizedUser`** (`crustcore-policy`, invariants 4/14).
+    Both had **public fields**, so the documented "only `AuthorizedUser::approve` mints an
+    `Approved<T>`" seal was bypassable by a struct literal from any workspace crate. Made
+    the fields private with read-only accessors (`value()`/`approval_id()`/`approved_by()`/
+    `expires_at()`/`id()`) and a single named mint path `AuthorizedUser::bind`, mirroring the
+    `VerifiedPatch` seal — so the central authority object for approvals now *enforces* what
+    its docs claim. Added a `compile_fail` doctest proving a forged tuple-literal does not
+    compile. No behavioral change to any call site.
+  - **Nano forbidden-deps gate is now an allowlist** (`xtask`, invariants 19/20). It was a
+    fixed 15-name **denylist** that omitted HTTP/TLS/async crates the same file flags as
+    dangerous (`ureq`/`ring`/`native-tls`), so a feature repoint leaking a sidecar dep into
+    nano could slip past (the size gate has ~388 KiB of headroom). The nano check now
+    **fails on any non-`crustcore*` crate** in the nano tree (first-party-only is the real
+    invariant-20 property); the named denylist is kept as a friendlier secondary message.
+  `cargo xtask verify` green; nano steady at 412.0 KiB.
 - **Phase 4 review hardening (`crustcore-runner`, `crustcore-sandbox`).** Address
   confirmed findings from the Phase 4 adversarial review:
   - Removed the clean-exit process-group SIGKILL sweep (a narrow pid-reuse TOCTOU:

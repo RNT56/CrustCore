@@ -637,7 +637,7 @@ mod tests {
     #[test]
     fn merge_requires_a_valid_approval() {
         assert_eq!(decide_merge(None, ts(1)), MergeDecision::RequiresApproval);
-        let appr = AuthorizedUser(42).approve(cap(), ApprovalId(1), ts(10_000));
+        let appr = AuthorizedUser::bind(42).approve(cap(), ApprovalId(1), ts(10_000));
         assert_eq!(
             decide_merge(Some(&appr), ts(1_000)),
             MergeDecision::Authorized
