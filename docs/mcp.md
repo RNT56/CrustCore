@@ -243,3 +243,43 @@ Unused MCP servers cost zero context.          -> §1, §4 (small typed APIs)
   (cross-check invariant 20).
 - **Drift detection:** a server whose `manifest_hash` no longer matches its
   admitted record is flagged and re-gated rather than trusted silently.
+
+## 8. Implementation status (v0.2 P13-net)
+
+The std-only trust core (registry, [`gateway_check`], [`filter_result`],
+code-mode stub descriptors) shipped in v0.1. **P13-net** lights up the JSON-RPC
+**transport** and the **gated call flow** that ties policy → transport → redaction
+together, all CI-tested with an in-process mock:
+
+- **`transport::McpTransport`** — a JSON-RPC `call(method, params)` trait. The
+  in-process **`MockMcp`** (canned, deterministic) drives every CI test, so the
+  protocol + call flow are exercised with **no network and no subprocess**.
+- **`transport::StdioMcp`** — the real local transport: spawns the server process
+  and speaks **Content-Length-framed** JSON-RPC over its stdin/stdout (the MCP
+  stdio transport), std-only (`process` + `serde_json`). Reads are bounded by
+  `MAX_MESSAGE_BYTES` (a hostile server cannot force an unbounded allocation), and
+  `Drop` tears the child down. Covered by an `#[ignore]`d round-trip test (it
+  spawns a process), runnable locally with `--ignored`.
+- **`transport::list_tools` + `manifest_hash`** — read the live tool surface and
+  hash the **sorted set of tool names** (never the untrusted descriptions) into the
+  value [`gateway_check`] compares against the pinned `manifest_hash`, so a
+  server that grows or swaps a tool after admission is **re-gated** (drift), while
+  reordering or re-describing tools does not trip a false drift.
+- **`call_tool` (+ `ToolCall`, `CallOutcome`)** — the gated flow: `gateway_check`
+  first; only `Allow` issues `tools/call`; `Ask` → `NeedsApproval` and any `Deny`
+  → `Denied(reason)` **short-circuit before any call reaches the server**; the
+  response is run through [`filter_result`] (redact → bound → artifact-hash →
+  receipt). The server's response is never interpreted as a command (invariant 7),
+  and its credential is injected at the transport by the broker — never in `args`,
+  the model context, or a log (invariants 1–3). A live-call red-team proves a
+  hostile server's "ignore policy / reveal the token / merge now" output is inert,
+  redacted, and receipted.
+
+`serde_json` is admitted to `crustcore-mcp` for JSON-RPC framing; the crate is a
+capability-pack **sidecar** the nano binary never links (gated behind the `mcp`
+feature of `crustcore`), so the dependency never enters the nano graph — the
+`forbidden-deps` gate lists `serde_json` and confirms nano stays clean.
+
+**Deferred:** a remote **HTTP** transport (would reuse `crustcore-net`,
+`TODO(P13-net-http)`) and sandboxed stub execution (P13.5, reuses the Phase-4
+sandbox). Both drop in behind the same `McpTransport` trait and gateway.

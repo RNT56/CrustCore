@@ -12,9 +12,11 @@ description = "MCP gateway/client/server and code-mode support for CrustCore."
 crustcore-types = { workspace = true }
 crustcore-secrets = { workspace = true }
 crustcore-receipts = { workspace = true }
-# TODO(P13-net): add `rmcp` or a custom MCP JSON-RPC client + the live stdio/HTTP
-# transports here (per feature) — never leaking into nano (CLAUDE.md §5.1). The
-# Phase-13 registry, gateway policy check, result redaction, receipting, and
-# code-mode stub descriptors are std-only and implemented now; the live transport
-# + sandboxed stub execution reuse the Phase-4 sandbox and need network, so they
-# are deferred.
+# Custom MCP JSON-RPC framing/parsing (P13-net). A normal dep: the protocol + the
+# gateway call flow are exercised in CI with an in-process `MockMcp` (no network).
+# `crustcore-mcp` is a capability-pack SIDECAR the nano binary never links (gated
+# behind the `mcp` feature of `crustcore`), so serde_json never enters the nano graph
+# (CLAUDE.md §5.1; the `forbidden-deps` nano check lists serde_json). The local
+# **stdio** transport is std `process` + this; a remote **HTTP** transport would reuse
+# `crustcore-net` and is the deferred `TODO(P13-net-http)`.
+serde_json = "1"
