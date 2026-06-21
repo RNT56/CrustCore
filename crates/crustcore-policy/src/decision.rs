@@ -57,8 +57,9 @@ impl PolicySnapshot {
     /// profile. This is the core "every side effect passes through policy"
     /// chokepoint (invariant 8).
     ///
-    /// TODO(P1.4/P1.5): extend with capability checks, budget state, taint, and
-    /// per-operation deny/ask defaults (`docs/policy.md`, `docs/github.md`).
+    /// Budget state and approval request/resolution are implemented in the kernel; the
+    /// remaining policy extension is capability checks, taint, and per-operation
+    /// deny/ask defaults (`docs/policy.md`, `docs/github.md`).
     #[must_use]
     pub fn classify(&self, reversibility: Reversibility) -> PolicyDecision {
         match self.profile {

@@ -9,11 +9,13 @@
 **Project:** CrustCore — a sub-800kB Rust coding-agent *verifier kernel* with
 optional capability packs.
 **Repository:** https://github.com/RNT56/CrustCore
-**Status:** v0.1 done; **v0.2 Track A in progress** — Phases 0–16 complete and
-merged, plus the first v0.2 "light it up" live-I/O phases (P5-join receipt↔log join,
-P7-live live model providers, P10-net GitHub REST wire layer; see
+**Status:** v0.1 done; **v0.2 (Track A "light it up") and v0.3 (Track B "expand",
+B1–B6) merged** — Phases 0–16 plus every Track A phase (P5-join, P7-live, P8-store,
+P9-net, P10-net, P11-exec, P12-native, P13-net, P14-store) and every Track B surface
+(B1-mcp-modes, B2-gh-app, B3-vector-memory, B4-sandbox-tiers, B5-autoloop,
+B6-release-infra) are complete and merged (see
 [`docs/roadmap-v0.2.md`](./docs/roadmap-v0.2.md)). Green `cargo xtask verify`; nano
-**412.0 KiB**, 51.5% of the 800 kB budget; **~300** workspace tests; the v0.1
+**412.0 KiB**, 51.5% of the 800 kB budget; **~350** workspace tests; the v0.1
 [definition of done](./ROADMAP.md) §22, all 12 criteria, is met. The trusted
 `Kernel::step` state machine is real (task/job transitions, typed budgets, approval
 request/resolution; sync, deterministic, no async/net/db, no wall clock). The
@@ -41,14 +43,21 @@ supervisor + advisor (`-daemon::supervisor`/`::advisor`), the MCP gateway
 self-improvement loop with its contract-file gate (`-daemon::selfimprove`). Backed by
 exhaustive property tests, no-panic fuzzes, a microbench, tamper + format-migration
 tests, real-fs symlink + sandbox red-team fixtures, the full red-team scenario set,
-and the golden "fix failing test" / "add small feature" tasks. **What remains is the
-live I/O behind clearly marked `TODO(Pn-…)` seams** — real HTTP providers
-(`P7-live`), the Bot API loop (`P9-net`), the GitHub REST flow (`P10-net`), native
-keychains (`P8-store`), the MCP JSON-RPC transport (`P13-net`), subagent execution
-(`P11-exec`), and tree-sitter/persistent memory (`P14-*`) — none of which is
-CI-testable without network/secrets; each drops into an already-verified, transport-
-agnostic core. **Authoritative roadmap:** [`ROADMAP.md`](./ROADMAP.md) (the maintainer
-handoff draft — the substance of everything below derives from it).
+and the golden "fix failing test" / "add small feature" tasks. **The v0.2/v0.3 live
+adapters are now wired behind a `live` cargo feature** — real HTTP model providers
+(P7-live), the encrypted secret vault (P8-store), the Telegram runtime loop (P9-net),
+the GitHub REST wire layer + hardened webhook verification (P10-net, B2-gh-app),
+subagent execution + the native advisor (P11-exec, P12-native), the MCP JSON-RPC
+transport + server mode (P13-net, B1-mcp-modes), persistent + semantic memory
+(P14-store, B3-vector-memory), tier-aware sandbox selection (B4-sandbox-tiers), the
+self-improvement loop runner (B5-autoloop), and reproducible builds (B6-release-infra).
+**What remains** are only the seams that genuinely cannot run in CI without real
+network, secrets, a sandbox backend, a microVM, or an embedding provider — each marked
+with a clear `TODO(*-live)` and dropping into an already-verified, transport-agnostic
+core — plus the irreversible, **maintainer-owned** steps (the signed release workflow,
+CI jobs, and signing keys; CLAUDE.md §6.3). **Authoritative roadmap:**
+[`ROADMAP.md`](./ROADMAP.md) (the maintainer handoff draft — the substance of everything
+below derives from it).
 
 ---
 
@@ -295,7 +304,7 @@ crustcore/
 > carries `TODO(Pn)` markers naming the phase that implements it; the docs remain
 > the contract the code must satisfy. Run `cargo xtask verify` for the full gate
 > (fmt, clippy, tests, forbidden-deps, nano size gate) and `cargo xtask
-> size-check` for the budget. The nano binary currently builds at ~296 KiB.
+> size-check` for the budget. The nano binary currently builds at 412.0 KiB.
 
 > **`AGENTS.md` is a thin router to this file.** Agents that look for
 > `AGENTS.md` first (e.g. Codex) get pointed straight back here. It is a contract

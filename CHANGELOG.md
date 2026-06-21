@@ -982,6 +982,16 @@ agent/PR/role/size/invariant audit trail.
 
 ### Changed
 
+- **Contract-file status refresh (serialized, §7.3).** Doc-only updates to the trust-
+  boundary files after the v0.2/v0.3 merges: `CLAUDE.md`'s status block now reflects
+  Track A **and** Track B (B1–B6) merged (was "Track A in progress" and listed done
+  phases as "remaining"), fixes the stale nano figure (`~296 KiB` → `412.0 KiB`), and the
+  test count (`~300` → `~350`); the kernel `Action` doc drops the already-done `TODO(P1.3)`
+  and **removes the dead, never-emitted `Action::Noop` variant**; the policy `classify`
+  doc drops the done `TODO(P1.4/P1.5)` (budget + approval state are implemented); and the
+  root `Cargo.toml` note is updated to describe the now-admitted feature-gated sidecar deps
+  (still none in nano — `forbidden-deps` proves it). No behavior change beyond removing the
+  unreferenced `Noop` variant; `cargo xtask verify` green.
 - **Codebase polish pass (post-Track-B).** A workspace-wide quality sweep (drift +
   stale-doc + dead-code) after the v0.2/v0.3 merges: refreshed the `README` status
   section to reflect Track A/B merged + the test badge `298 → 352` (prose `~350`); fixed

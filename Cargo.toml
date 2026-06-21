@@ -9,10 +9,11 @@
 # size gate and forbidden-dependency check (.github/workflows/ci.yml, xtask)
 # enforce this.
 #
-# NOTE: this scaffold is intentionally dependency-free (std only). Each sidecar
-# crate is a compilable skeleton; the dependency it will eventually pull is
-# recorded in a TODO(Pn) marker so the next session knows exactly what to add
-# and in which phase. Adding a dependency to nano requires the admission policy
+# NOTE: the nano binary and the kernel crates stay std-only. Sidecar capability packs
+# now carry the minimal, feature-gated dependencies their live adapters need (e.g.
+# serde_json/ureq in crustcore-net, aes-gcm/scrypt in crustcore-secrets behind
+# `vault-file`, serde_json in crustcore-mcp) — never linked into nano, and proven so by
+# the `forbidden-deps` gate. Adding a dependency to nano requires the admission policy
 # in CONTRIBUTING.md / ROADMAP.md §20.3.
 
 [workspace]
