@@ -53,6 +53,78 @@ Edge cases:
 - Probe results are cached with a TTL; health is refreshed so a degraded provider
   is detected and routed around.
 
+### 1.2 Multi-modal capability registry (completion · embedding · rerank)
+
+The registry is **one shape across modalities** (Track C `C1-providers`). The same
+`ModelCard` carries the completion capabilities above *plus* three additive,
+**default-off** capability flags:
+
+```text
+embeddings     : bool   (default off)  — model can serve /v1/embeddings
+rerank         : bool   (default off)  — model can serve /v1/rerank
+embedding_dims : u32    (default 0)    — vector dimensionality (0 = unknown)
+```
+
+These flags flow through **both** records: the `ModelCard` in `crustcore-net` and
+its wire mirror `ModelInfo` in the std-only `crustcore-netproto`, via the existing
+`ModelCard::to_info` mapping — so the probe surfaces capability across the spawned-
+helper boundary. They are **additive only**: the completion fields, their ordering,
+and the completion `to_info` mapping are byte-identical, so completion routing is
+unchanged.
+
+Conservative-off is enforced at **both** layers (invariant 17 — a forgotten
+capability classification fails closed, never on by omission):
+
+- **Config parse** (`config.rs`): `embeddings`/`rerank` default `false`,
+  `embedding_dims` defaults `0` — unlike `streaming`, which defaults `true`.
+- **Wire decode** (`crustcore-netproto`): a `model` line lacking the new keys decodes
+  to `embeddings=false`/`rerank=false`/`embedding_dims=0`.
+
+Completion, embedding, and rerank compose under the **same** abstraction:
+
+```text
+Provider        + Engine        + select_candidates  (completion — frozen P7-live)
+EmbedProvider   + EmbedEngine   + select_candidates_for(Embedding, ..)
+RerankProvider  + RerankEngine  + select_candidates_for(Rerank, ..)
+```
+
+`EmbedProvider`/`RerankProvider` are **sibling** sync traits mirroring `Provider`'s
+`id`/`probe`/call shape exactly; the per-modality engines reuse the same
+hard-constraint-then-role-order filter (gating on `card.embeddings`/`card.rerank` and
+`embedding_dims`), the same `run_reliable`-shaped fallback, and the **same single
+`BudgetLedger` instance** — one per-task ceiling is honored across all three
+modalities, not split three ways (invariant 11). A request with no capability-matching
+model **fails closed** with a typed `NoModelForConstraints` error rather than silently
+routing to a completion-only model.
+
+The trust boundary is exactly where P7-live put it. Credentials still resolve
+**per call** through the `CredentialSource`/`AuthHeader` adapter (never stored on the
+embed/rerank adapters, never carried into the sandbox/helper env — invariants 1–3).
+Every provider byte stays untrusted and bounded: embedding batches are capped by
+`MAX_BATCH`, documents by `MAX_DOCS`, dimensions by `MAX_EMBEDDING_DIMS`; non-finite
+floats are sanitized to `0.0`; and **rerank indices are validated against the request's
+document count — out-of-range and duplicate indices are dropped, never propagated raw
+into downstream selection** (invariants 7, 11). Error paths reuse `map_status_error`,
+so a non-2xx maps to a status-only `ProviderError` and never echoes a response body
+that could carry a credential.
+
+The wire protocol gains additive, bounded variants — `Request::Embed`/`Request::Rerank`
+and `Response::Embedding`/`Response::Ranking` — alongside `complete`/`probe`; the
+`serve` loop routes them through the new engines, and `NetHelper` gains `embed`/`rerank`
+client methods (bounded, single-shot, like `complete`).
+
+**Consumer relationship.** `C1-providers` is the **producer** that `B3-vector-memory`
+consumes: B3's "embedding provider over the net helper" is exactly this crate's
+net-side `crustcore-net::EmbedProvider` routed by this registry, which becomes the live
+backend fulfilling B3's *consumer-side* `crustcore-index::embed::Embedder` trait. The
+two are deliberately distinct — `C1` owns the routed *provider* trait in
+`crustcore-net`; B3 owns the *consumer* trait in `crustcore-index` and builds **on**
+this registry rather than beside it. Rerank likewise unblocks rerank-assisted context
+selection in `crustcore-index::select_context` without that crate ever linking HTTP/TLS.
+
+All of this lives in the non-nano sidecar; the live sockets stay behind the existing
+`live` feature and the default/CI build links nothing new (invariants 19, 20 — see §6).
+
 ---
 
 ## 2. Model roles

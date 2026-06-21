@@ -46,6 +46,22 @@ pub const MAX_REGISTRY_MODELS: usize = 4096;
 /// bounds a single read.
 pub const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
 
+/// Cap on the number of inputs in a single embedding batch (`Request::Embed`) and
+/// on the number of returned vectors (`Response::Embedding`). A hostile/buggy peer
+/// cannot force unbounded allocation by sending a giant batch (invariant 7, 11;
+/// "bounded everything"). Track C C1-providers.
+pub const MAX_BATCH: usize = 256;
+
+/// Cap on the number of documents in a single rerank request (`Request::Rerank`)
+/// and on the number of returned ranking entries (`Response::Ranking`). Bounds the
+/// rerank fan-out (invariant 7, 11). Track C C1-providers.
+pub const MAX_DOCS: usize = 1024;
+
+/// Cap on the dimensionality of a single embedding vector accepted on the wire. A
+/// vector longer than this is truncated rather than read unbounded (invariant 11).
+/// Comfortably above any realistic embedding size. Track C C1-providers.
+pub const MAX_EMBEDDING_DIMS: usize = 16_384;
+
 /// An abstract model role — a *requirement*, resolved against the dynamic registry
 /// at request time, never a hard-coded model name (invariant 17;
 /// `docs/model-routing.md` §2).
@@ -125,6 +141,36 @@ pub struct CompleteRequest {
     pub require: Require,
 }
 
+/// An embedding request (Track C C1-providers): embed a bounded batch of inputs.
+/// The inputs are modeled as a `\n`-delimited string on the wire (the flat-JSON
+/// codec carries scalars only), bounded by [`MAX_BATCH`] and [`MAX_TEXT_BYTES`].
+#[derive(Debug, Clone)]
+pub struct EmbedRequest {
+    /// The abstract role to route for (resolved against embedding-capable models).
+    pub role: Role,
+    /// The inputs to embed (already bounded: at most [`MAX_BATCH`] entries, each at
+    /// most [`MAX_TEXT_BYTES`]).
+    pub inputs: Vec<String>,
+    /// Hard cost ceiling in micros for this request (0 = unlimited).
+    pub max_cost_micros: u64,
+}
+
+/// A rerank request (Track C C1-providers): score `documents` against `query`. The
+/// documents are a `\n`-delimited string on the wire, bounded by [`MAX_DOCS`] and
+/// [`MAX_TEXT_BYTES`].
+#[derive(Debug, Clone)]
+pub struct RerankRequest {
+    /// The abstract role to route for (resolved against rerank-capable models).
+    pub role: Role,
+    /// The query to rank documents against (bounded).
+    pub query: String,
+    /// The candidate documents (already bounded: at most [`MAX_DOCS`] entries, each
+    /// at most [`MAX_TEXT_BYTES`]).
+    pub documents: Vec<String>,
+    /// Hard cost ceiling in micros for this request (0 = unlimited).
+    pub max_cost_micros: u64,
+}
+
 /// A request from the caller to the sidecar.
 #[derive(Debug, Clone)]
 pub enum Request {
@@ -134,6 +180,12 @@ pub enum Request {
     /// Run a completion; respond with [`Response::Chunk`]s (if streaming) then a
     /// [`Response::Final`], or a [`Response::Error`].
     Complete(CompleteRequest),
+    /// Embed a batch; respond with a [`Response::Embedding`] or a
+    /// [`Response::Error`] (Track C C1-providers).
+    Embed(EmbedRequest),
+    /// Rerank documents; respond with a [`Response::Ranking`] or a
+    /// [`Response::Error`] (Track C C1-providers).
+    Rerank(RerankRequest),
 }
 
 /// One model entry in the dynamic registry (`docs/model-routing.md` §1.1).
@@ -155,6 +207,16 @@ pub struct ModelInfo {
     pub streaming: bool,
     /// Rough cost in micros per 1000 output tokens (for budget ordering).
     pub cost_per_1k_micros: u64,
+    /// Embedding support (additive, default off — Track C C1-providers). A model
+    /// that does not declare it is never routed an embedding request (invariant 17:
+    /// capability fails closed, never on by omission).
+    pub embeddings: bool,
+    /// Rerank support (additive, default off — Track C C1-providers). Fails closed
+    /// the same way `embeddings` does.
+    pub rerank: bool,
+    /// Embedding dimensionality, or `0` when unknown / not an embedding model
+    /// (additive, default `0` — Track C C1-providers).
+    pub embedding_dims: u32,
 }
 
 /// Token/cost usage for a completed request (`docs/model-routing.md` §5).
@@ -184,6 +246,42 @@ pub struct Final {
     pub fallbacks: Vec<String>,
 }
 
+/// The result of an embedding request (Track C C1-providers). One vector per input,
+/// each a bounded `Vec<f32>` (at most [`MAX_BATCH`] vectors, each at most
+/// [`MAX_EMBEDDING_DIMS`] elements). Non-finite floats are sanitized to `0.0` on the
+/// wire so a hostile provider cannot smuggle NaN/Inf into downstream selection.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmbeddingResult {
+    /// One embedding vector per input.
+    pub vectors: Vec<Vec<f32>>,
+    /// Usage/cost for the served request.
+    pub usage: Usage,
+    /// The provider that served it.
+    pub provider: String,
+    /// The model that served it.
+    pub model: String,
+    /// Providers tried (and failed) before this one succeeded.
+    pub fallbacks: Vec<String>,
+}
+
+/// The result of a rerank request (Track C C1-providers): document indices paired
+/// with scores, highest-relevance first. Indices are validated against the request's
+/// document count by the adapter; out-of-range/duplicate indices are clamped or
+/// dropped, never propagated raw. Bounded by [`MAX_DOCS`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct RankingResult {
+    /// `(document_index, score)` pairs (typically sorted by descending score).
+    pub ranking: Vec<(u32, f32)>,
+    /// Usage/cost for the served request.
+    pub usage: Usage,
+    /// The provider that served it.
+    pub provider: String,
+    /// The model that served it.
+    pub model: String,
+    /// Providers tried (and failed) before this one succeeded.
+    pub fallbacks: Vec<String>,
+}
+
 /// A response from the sidecar to the caller.
 #[derive(Debug, Clone)]
 pub enum Response {
@@ -195,6 +293,10 @@ pub enum Response {
     Chunk(BoundedText),
     /// The completed result.
     Final(Final),
+    /// An embedding result (in reply to [`Request::Embed`]) — Track C C1-providers.
+    Embedding(EmbeddingResult),
+    /// A rerank result (in reply to [`Request::Rerank`]) — Track C C1-providers.
+    Ranking(RankingResult),
     /// A typed failure (no model satisfied the constraints, all providers down,
     /// budget exceeded, etc.). The caller never treats a partial/garbage line as
     /// success.
@@ -261,6 +363,21 @@ pub fn encode_request(req: &Request) -> String {
             o.int("req_min_context", i64::from(c.require.min_context));
             o.bool("req_local_only", c.require.local_only);
         }
+        Request::Embed(e) => {
+            o.str("kind", "embed");
+            o.str("role", e.role.as_str());
+            o.int("count", clamp_count(e.inputs.len(), MAX_BATCH));
+            o.str("inputs", &encode_texts(&e.inputs, MAX_BATCH));
+            o.uint("max_cost_micros", e.max_cost_micros);
+        }
+        Request::Rerank(r) => {
+            o.str("kind", "rerank");
+            o.str("role", r.role.as_str());
+            o.str("query", &r.query);
+            o.int("count", clamp_count(r.documents.len(), MAX_DOCS));
+            o.str("documents", &encode_texts(&r.documents, MAX_DOCS));
+            o.uint("max_cost_micros", r.max_cost_micros);
+        }
     }
     o.finish()
 }
@@ -280,6 +397,11 @@ pub fn encode_response(resp: &Response) -> String {
             o.bool("structured", m.structured);
             o.bool("streaming", m.streaming);
             o.uint("cost_per_1k_micros", m.cost_per_1k_micros);
+            // Additive capability flags (Track C C1-providers). Always emitted; the
+            // decoder defaults them off when absent (forward/backward compatible).
+            o.bool("embeddings", m.embeddings);
+            o.bool("rerank", m.rerank);
+            o.int("embedding_dims", i64::from(m.embedding_dims));
         }
         Response::RegistryEnd => {
             o.str("kind", "registry_end");
@@ -298,12 +420,213 @@ pub fn encode_response(resp: &Response) -> String {
             o.uint("cost_micros", fin.usage.cost_micros);
             o.str("fallbacks", &fin.fallbacks.join(","));
         }
+        Response::Embedding(e) => {
+            o.str("kind", "embedding");
+            o.int("count", clamp_count(e.vectors.len(), MAX_BATCH));
+            o.str("vectors", &encode_vectors(&e.vectors));
+            o.str("provider", &e.provider);
+            o.str("model", &e.model);
+            o.int("input_tokens", i64::from(e.usage.input_tokens));
+            o.int("output_tokens", i64::from(e.usage.output_tokens));
+            o.uint("cost_micros", e.usage.cost_micros);
+            o.str("fallbacks", &e.fallbacks.join(","));
+        }
+        Response::Ranking(r) => {
+            o.str("kind", "ranking");
+            o.int("count", clamp_count(r.ranking.len(), MAX_DOCS));
+            o.str("ranking", &encode_ranking(&r.ranking));
+            o.str("provider", &r.provider);
+            o.str("model", &r.model);
+            o.int("input_tokens", i64::from(r.usage.input_tokens));
+            o.int("output_tokens", i64::from(r.usage.output_tokens));
+            o.uint("cost_micros", r.usage.cost_micros);
+            o.str("fallbacks", &r.fallbacks.join(","));
+        }
         Response::Error(reason) => {
             o.str("kind", "error");
             o.str("reason", reason);
         }
     }
     o.finish()
+}
+
+// ---------------------------------------------------------------------------
+// Multi-modal payload codec (delimited strings — Track C C1-providers)
+//
+// The flat-JSON codec carries scalars only, so list-of-list / list-of-pair
+// payloads are encoded as bounded delimited strings (the same approach `fallbacks`
+// uses for `Vec<String>`). All counts/dims are clamped on encode, and every value
+// is bounded + sanitized on decode so a hostile peer cannot over-allocate, panic,
+// or smuggle a non-finite float into downstream selection (invariants 7, 11).
+// ---------------------------------------------------------------------------
+
+/// Clamp a length to an `i64` count field, never above `max`.
+fn clamp_count(len: usize, max: usize) -> i64 {
+    len.min(max) as i64
+}
+
+/// Format a single `f32` so it round-trips exactly for finite values; non-finite
+/// (NaN/±Inf) is sanitized to `0`.
+fn fmt_f32(x: f32) -> String {
+    if x.is_finite() {
+        x.to_string()
+    } else {
+        "0".to_string()
+    }
+}
+
+/// Parse a single `f32`; a malformed or non-finite token decodes to `0.0` (untrusted
+/// data — skip, never panic).
+fn parse_f32(s: &str) -> f32 {
+    match s.parse::<f32>() {
+        Ok(x) if x.is_finite() => x,
+        _ => 0.0,
+    }
+}
+
+/// Encode a bounded batch of texts as a `\n`-delimited string (each text already
+/// bounded by the caller); at most `max` entries are emitted. A `\n` inside an entry
+/// is escaped to keep the delimiter unambiguous; the matching decoder unescapes it.
+fn encode_texts(texts: &[String], max: usize) -> String {
+    let mut out = String::new();
+    for (i, t) in texts.iter().take(max).enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(&escape_delim(t));
+    }
+    out
+}
+
+/// Decode a `\n`-delimited batch of texts, bounded by `max` entries and
+/// [`MAX_TEXT_BYTES`] per entry. An empty string decodes to an empty batch.
+fn decode_texts(s: &str, max: usize) -> Vec<String> {
+    if s.is_empty() {
+        return Vec::new();
+    }
+    s.split('\n')
+        .take(max)
+        .map(|t| {
+            let un = unescape_delim(t);
+            bound_text(&un)
+        })
+        .collect()
+}
+
+/// Escape `\` and `\n` so a multi-line text survives `\n`-joining.
+fn escape_delim(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Inverse of [`escape_delim`].
+fn unescape_delim(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Bound a text to [`MAX_TEXT_BYTES`] on a char boundary.
+fn bound_text(s: &str) -> String {
+    if s.len() <= MAX_TEXT_BYTES {
+        return s.to_string();
+    }
+    let mut end = MAX_TEXT_BYTES;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
+/// Encode `Vec<Vec<f32>>` as `;`-separated vectors, each `,`-separated f32, bounded
+/// by [`MAX_BATCH`] vectors and [`MAX_EMBEDDING_DIMS`] dims.
+fn encode_vectors(vectors: &[Vec<f32>]) -> String {
+    let mut out = String::new();
+    for (i, v) in vectors.iter().take(MAX_BATCH).enumerate() {
+        if i > 0 {
+            out.push(';');
+        }
+        for (j, x) in v.iter().take(MAX_EMBEDDING_DIMS).enumerate() {
+            if j > 0 {
+                out.push(',');
+            }
+            out.push_str(&fmt_f32(*x));
+        }
+    }
+    out
+}
+
+/// Decode the [`encode_vectors`] format, bounded the same way on the way back in.
+fn decode_vectors(s: &str) -> Vec<Vec<f32>> {
+    if s.is_empty() {
+        return Vec::new();
+    }
+    s.split(';')
+        .take(MAX_BATCH)
+        .map(|v| {
+            if v.is_empty() {
+                Vec::new()
+            } else {
+                v.split(',')
+                    .take(MAX_EMBEDDING_DIMS)
+                    .map(parse_f32)
+                    .collect()
+            }
+        })
+        .collect()
+}
+
+/// Encode `Vec<(u32, f32)>` as `;`-separated `index,score` pairs, bounded by
+/// [`MAX_DOCS`].
+fn encode_ranking(ranking: &[(u32, f32)]) -> String {
+    let mut out = String::new();
+    for (i, (idx, score)) in ranking.iter().take(MAX_DOCS).enumerate() {
+        if i > 0 {
+            out.push(';');
+        }
+        out.push_str(&idx.to_string());
+        out.push(',');
+        out.push_str(&fmt_f32(*score));
+    }
+    out
+}
+
+/// Decode the [`encode_ranking`] format. A malformed pair (missing score, bad index)
+/// is skipped, never panicked on; bounded by [`MAX_DOCS`].
+fn decode_ranking(s: &str) -> Vec<(u32, f32)> {
+    if s.is_empty() {
+        return Vec::new();
+    }
+    s.split(';')
+        .take(MAX_DOCS)
+        .filter_map(|pair| {
+            let (idx_s, score_s) = pair.split_once(',')?;
+            let idx = idx_s.trim().parse::<u32>().ok()?;
+            Some((idx, parse_f32(score_s.trim())))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -384,6 +707,17 @@ fn request_from_fields(f: &Fields) -> Result<Request, ProtoError> {
                 local_only: f.bool("req_local_only").unwrap_or(false),
             },
         })),
+        Some("embed") => Ok(Request::Embed(EmbedRequest {
+            role: Role::from_token(f.str("role").unwrap_or("implementation")),
+            inputs: decode_texts(f.str("inputs").unwrap_or(""), MAX_BATCH),
+            max_cost_micros: f.uint("max_cost_micros").unwrap_or(0),
+        })),
+        Some("rerank") => Ok(Request::Rerank(RerankRequest {
+            role: Role::from_token(f.str("role").unwrap_or("implementation")),
+            query: bound_text(f.str("query").unwrap_or("")),
+            documents: decode_texts(f.str("documents").unwrap_or(""), MAX_DOCS),
+            max_cost_micros: f.uint("max_cost_micros").unwrap_or(0),
+        })),
         other => Err(ProtoError::Decode(format!(
             "unknown request kind {other:?}"
         ))),
@@ -402,6 +736,12 @@ fn response_from_fields(f: &Fields) -> Result<Response, ProtoError> {
             structured: f.bool("structured").unwrap_or(false),
             streaming: f.bool("streaming").unwrap_or(false),
             cost_per_1k_micros: f.uint("cost_per_1k_micros").unwrap_or(0),
+            // Additive capability fields default OFF when the key is absent — a
+            // probe from an older/forgetful helper fails closed, never flips a
+            // capability on by omission (invariant 17; Track C C1-providers).
+            embeddings: f.bool("embeddings").unwrap_or(false),
+            rerank: f.bool("rerank").unwrap_or(false),
+            embedding_dims: f.uint("embedding_dims").unwrap_or(0) as u32,
         })),
         Some("registry_end") => Ok(Response::RegistryEnd),
         Some("chunk") => Ok(Response::Chunk(BoundedText::truncated(
@@ -417,6 +757,28 @@ fn response_from_fields(f: &Fields) -> Result<Response, ProtoError> {
                 output_tokens: f.uint("output_tokens").unwrap_or(0) as u32,
                 cost_micros: f.uint("cost_micros").unwrap_or(0),
             },
+            fallbacks: split_csv(f.str("fallbacks").unwrap_or("")),
+        })),
+        Some("embedding") => Ok(Response::Embedding(EmbeddingResult {
+            vectors: decode_vectors(f.str("vectors").unwrap_or("")),
+            usage: Usage {
+                input_tokens: f.uint("input_tokens").unwrap_or(0) as u32,
+                output_tokens: f.uint("output_tokens").unwrap_or(0) as u32,
+                cost_micros: f.uint("cost_micros").unwrap_or(0),
+            },
+            provider: f.str("provider").unwrap_or("").to_string(),
+            model: f.str("model").unwrap_or("").to_string(),
+            fallbacks: split_csv(f.str("fallbacks").unwrap_or("")),
+        })),
+        Some("ranking") => Ok(Response::Ranking(RankingResult {
+            ranking: decode_ranking(f.str("ranking").unwrap_or("")),
+            usage: Usage {
+                input_tokens: f.uint("input_tokens").unwrap_or(0) as u32,
+                output_tokens: f.uint("output_tokens").unwrap_or(0) as u32,
+                cost_micros: f.uint("cost_micros").unwrap_or(0),
+            },
+            provider: f.str("provider").unwrap_or("").to_string(),
+            model: f.str("model").unwrap_or("").to_string(),
             fallbacks: split_csv(f.str("fallbacks").unwrap_or("")),
         })),
         Some("error") => Ok(Response::Error(f.str("reason").unwrap_or("").to_string())),
@@ -566,6 +928,43 @@ impl<W: Write, R: BufRead> NetHelper<W, R> {
                 }
                 None => return Err(ProtoError::UnexpectedEof),
             }
+        }
+    }
+
+    /// Embeds a batch of inputs, returning the [`EmbeddingResult`]. A
+    /// [`Response::Error`] becomes a typed `Err` — a failed request never looks like
+    /// success. The reply is single-shot (no streaming), so this reads exactly one
+    /// response line (Track C C1-providers).
+    ///
+    /// # Errors
+    /// [`ProtoError`] on a transport/decode failure or a sidecar-reported error.
+    pub fn embed(&mut self, req: &EmbedRequest) -> Result<EmbeddingResult, ProtoError> {
+        write_request(&mut self.w, &Request::Embed(req.clone()))?;
+        match read_response(&mut self.r)? {
+            Some(Response::Embedding(e)) => Ok(e),
+            Some(Response::Error(e)) => Err(ProtoError::Decode(e)),
+            Some(other) => Err(ProtoError::Decode(format!(
+                "unexpected response to embed: {other:?}"
+            ))),
+            None => Err(ProtoError::UnexpectedEof),
+        }
+    }
+
+    /// Reranks `documents` against `query`, returning the [`RankingResult`]. A
+    /// [`Response::Error`] becomes a typed `Err`. Single-shot reply (Track C
+    /// C1-providers).
+    ///
+    /// # Errors
+    /// [`ProtoError`] on a transport/decode failure or a sidecar-reported error.
+    pub fn rerank(&mut self, req: &RerankRequest) -> Result<RankingResult, ProtoError> {
+        write_request(&mut self.w, &Request::Rerank(req.clone()))?;
+        match read_response(&mut self.r)? {
+            Some(Response::Ranking(r)) => Ok(r),
+            Some(Response::Error(e)) => Err(ProtoError::Decode(e)),
+            Some(other) => Err(ProtoError::Decode(format!(
+                "unexpected response to rerank: {other:?}"
+            ))),
+            None => Err(ProtoError::UnexpectedEof),
         }
     }
 }
@@ -740,6 +1139,9 @@ mod tests {
             structured: false,
             streaming: false,
             cost_per_1k_micros: 0,
+            embeddings: false,
+            rerank: false,
+            embedding_dims: 0,
         }));
         let mut out = String::with_capacity((one.len() + 1) * (MAX_REGISTRY_MODELS + 8));
         for _ in 0..MAX_REGISTRY_MODELS + 5 {
@@ -779,6 +1181,178 @@ mod tests {
         assert!(seen <= MAX_STREAM_BYTES + MAX_TEXT_BYTES);
     }
 
+    // ---- Track C C1-providers: additive ModelInfo + multi-modal wire ----
+
+    fn model_info_full() -> ModelInfo {
+        ModelInfo {
+            provider: "p".into(),
+            model: "m".into(),
+            healthy: true,
+            context: 8192,
+            tools: true,
+            structured: true,
+            streaming: true,
+            cost_per_1k_micros: 100,
+            embeddings: true,
+            rerank: true,
+            embedding_dims: 1536,
+        }
+    }
+
+    #[test]
+    fn model_info_with_capability_flags_roundtrips() {
+        let m = Response::Model(model_info_full());
+        let mut cur = std::io::Cursor::new(format!("{}\n", encode_response(&m)).into_bytes());
+        match read_response(&mut cur).unwrap().unwrap() {
+            Response::Model(got) => assert_eq!(got, model_info_full()),
+            other => panic!("expected Model, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn model_decode_defaults_capability_keys_off_when_absent() {
+        // A `model` line lacking the new keys (an older/forgetful helper) must decode
+        // with embeddings=false / rerank=false / embedding_dims=0 (invariant 17:
+        // capability fails closed, never on by omission).
+        let line = r#"{"kind":"model","provider":"p","model":"m","healthy":true,"context":8192,"tools":true,"structured":true,"streaming":true,"cost_per_1k_micros":100}"#;
+        let mut cur = std::io::Cursor::new(format!("{line}\n").into_bytes());
+        match read_response(&mut cur).unwrap().unwrap() {
+            Response::Model(m) => {
+                assert!(!m.embeddings);
+                assert!(!m.rerank);
+                assert_eq!(m.embedding_dims, 0);
+                // Existing fields still decode unchanged.
+                assert_eq!(m.context, 8192);
+                assert!(m.tools);
+            }
+            other => panic!("expected Model, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn embed_request_and_embedding_response_roundtrip() {
+        let req = Request::Embed(EmbedRequest {
+            role: Role::Research,
+            inputs: vec!["hello".into(), "line\none\\two".into(), "café π".into()],
+            max_cost_micros: 9_000,
+        });
+        let mut cur = std::io::Cursor::new(format!("{}\n", encode_request(&req)).into_bytes());
+        match read_request(&mut cur).unwrap().unwrap() {
+            Request::Embed(e) => {
+                assert_eq!(e.role, Role::Research);
+                assert_eq!(e.inputs, vec!["hello", "line\none\\two", "café π"]);
+                assert_eq!(e.max_cost_micros, 9_000);
+            }
+            other => panic!("expected Embed, got {other:?}"),
+        }
+
+        let resp = Response::Embedding(EmbeddingResult {
+            vectors: vec![vec![0.5, -1.25, 0.0], vec![3.0]],
+            usage: Usage {
+                input_tokens: 7,
+                output_tokens: 0,
+                cost_micros: 42,
+            },
+            provider: "emb-a".into(),
+            model: "e1".into(),
+            fallbacks: vec!["emb-b".into()],
+        });
+        let mut cur = std::io::Cursor::new(format!("{}\n", encode_response(&resp)).into_bytes());
+        match read_response(&mut cur).unwrap().unwrap() {
+            Response::Embedding(e) => {
+                assert_eq!(e.vectors, vec![vec![0.5, -1.25, 0.0], vec![3.0]]);
+                assert_eq!(e.usage.input_tokens, 7);
+                assert_eq!(e.usage.cost_micros, 42);
+                assert_eq!(e.provider, "emb-a");
+                assert_eq!(e.fallbacks, vec!["emb-b"]);
+            }
+            other => panic!("expected Embedding, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rerank_request_and_ranking_response_roundtrip() {
+        let req = Request::Rerank(RerankRequest {
+            role: Role::Review,
+            query: "find the bug".into(),
+            documents: vec!["doc a".into(), "doc, b".into(), "doc;c".into()],
+            max_cost_micros: 0,
+        });
+        let mut cur = std::io::Cursor::new(format!("{}\n", encode_request(&req)).into_bytes());
+        match read_request(&mut cur).unwrap().unwrap() {
+            Request::Rerank(r) => {
+                assert_eq!(r.query, "find the bug");
+                assert_eq!(r.documents, vec!["doc a", "doc, b", "doc;c"]);
+            }
+            other => panic!("expected Rerank, got {other:?}"),
+        }
+
+        let resp = Response::Ranking(RankingResult {
+            ranking: vec![(2, 0.99), (0, 0.5), (1, -0.1)],
+            usage: Usage::default(),
+            provider: "rr-a".into(),
+            model: "r1".into(),
+            fallbacks: vec![],
+        });
+        let mut cur = std::io::Cursor::new(format!("{}\n", encode_response(&resp)).into_bytes());
+        match read_response(&mut cur).unwrap().unwrap() {
+            Response::Ranking(r) => {
+                assert_eq!(r.ranking, vec![(2, 0.99), (0, 0.5), (1, -0.1)]);
+                assert_eq!(r.provider, "rr-a");
+            }
+            other => panic!("expected Ranking, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn embedding_codec_sanitizes_non_finite_floats() {
+        let resp = Response::Embedding(EmbeddingResult {
+            vectors: vec![vec![f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1.0]],
+            usage: Usage::default(),
+            provider: "p".into(),
+            model: "m".into(),
+            fallbacks: vec![],
+        });
+        let mut cur = std::io::Cursor::new(format!("{}\n", encode_response(&resp)).into_bytes());
+        match read_response(&mut cur).unwrap().unwrap() {
+            Response::Embedding(e) => {
+                // NaN/±Inf are sanitized to 0.0; the finite value survives.
+                assert_eq!(e.vectors, vec![vec![0.0, 0.0, 0.0, 1.0]]);
+                assert!(e.vectors[0].iter().all(|x| x.is_finite()));
+            }
+            other => panic!("expected Embedding, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn embed_batch_is_bounded_on_the_wire() {
+        // An over-MAX_BATCH batch is clamped to MAX_BATCH on encode, and the decoder
+        // also caps at MAX_BATCH — no unbounded allocation (invariant 11).
+        let inputs: Vec<String> = (0..MAX_BATCH + 50).map(|i| format!("t{i}")).collect();
+        let req = Request::Embed(EmbedRequest {
+            role: Role::Research,
+            inputs,
+            max_cost_micros: 0,
+        });
+        let mut cur = std::io::Cursor::new(format!("{}\n", encode_request(&req)).into_bytes());
+        match read_request(&mut cur).unwrap().unwrap() {
+            Request::Embed(e) => assert_eq!(e.inputs.len(), MAX_BATCH),
+            other => panic!("expected Embed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_ranking_pairs_are_skipped_not_panicked() {
+        // Hand-crafted ranking string with garbage entries; the decoder drops the bad
+        // ones and keeps the valid pair (untrusted data — no panic).
+        let line = r#"{"kind":"ranking","count":3,"ranking":"notapair;5,0.7;bad,score","provider":"p","model":"m","input_tokens":0,"output_tokens":0,"cost_micros":0,"fallbacks":""}"#;
+        let mut cur = std::io::Cursor::new(format!("{line}\n").into_bytes());
+        match read_response(&mut cur).unwrap().unwrap() {
+            Response::Ranking(r) => assert_eq!(r.ranking, vec![(5, 0.7)]),
+            other => panic!("expected Ranking, got {other:?}"),
+        }
+    }
+
     #[test]
     fn client_probe_reads_registry_until_end() {
         // Canned sidecar output: two models then registry_end.
@@ -792,6 +1366,9 @@ mod tests {
             structured: true,
             streaming: true,
             cost_per_1k_micros: 100,
+            embeddings: false,
+            rerank: false,
+            embedding_dims: 0,
         })));
         out.push('\n');
         out.push_str(&encode_response(&Response::RegistryEnd));
