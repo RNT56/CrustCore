@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Red-team scenario suite (`ROADMAP.md` §19.3, `THREAT_MODEL.md`).
 //!
-//! Each scenario is `#[ignore]`d until the phase that defends it implements the
-//! fixture and un-ignores it. Ignored tests keep the suite honest: they show as
-//! "ignored", never as false green. A change that adds a new attack surface must
-//! add the matching fixture in the same PR (`INVARIANTS.md`).
+//! Most scenarios are implemented and run in CI; a scenario stays `#[ignore]`d only
+//! while the defense it exercises is still a live-gated seam (it un-ignores when that
+//! lands). Ignored tests keep the suite honest: they show as "ignored", never as false
+//! green. A change that adds a new attack surface must add the matching fixture in the
+//! same PR (`INVARIANTS.md`).
 
 use crustcore_eval::required_redteam_scenarios;
 

@@ -10,7 +10,7 @@
 
 [![CI](https://github.com/RNT56/CrustCore/actions/workflows/ci.yml/badge.svg)](https://github.com/RNT56/CrustCore/actions/workflows/ci.yml)
 &nbsp;![nano size](https://img.shields.io/badge/nano-412.0_KiB_%2F_800_KiB-2ea44f)
-&nbsp;![tests](https://img.shields.io/badge/tests-298_passing-2ea44f)
+&nbsp;![tests](https://img.shields.io/badge/tests-352_passing-2ea44f)
 &nbsp;![invariants](https://img.shields.io/badge/invariants-20_enforced-1f6feb)
 &nbsp;![kernel](https://img.shields.io/badge/kernel-std--only_%C2%B7_no_async%2Fnet%2Fdb-8957e5)
 &nbsp;![rust](https://img.shields.io/badge/rust-1.85+-orange)
@@ -164,25 +164,32 @@ Today, they hold:
 
 ---
 
-## Status — v0.1 trusted core complete
+## Status — v0.1 trusted core + v0.2/v0.3 live surfaces merged
 
-The entire roadmap (**Phases 0–16**) is implemented and merged, and the v0.1
-[definition of done](./ROADMAP.md) (all 12 criteria) is met.
+The entire roadmap (**Phases 0–16**) is implemented and merged, the v0.1
+[definition of done](./ROADMAP.md) (all 12 criteria) is met, and the **v0.2
+"light it up" (Track A) and v0.3 "expand" (Track B, B1–B6)** phases are merged on
+top — wiring real model providers, Telegram, GitHub REST + webhooks, MCP
+client/server, subagent execution, the native/vault secret store, semantic memory,
+tier-aware sandboxing, the self-improvement loop, and reproducible builds onto the
+already-verified cores.
 
 | | |
 | --- | --- |
 | **Nano binary** | **412.0 KiB** stripped — 51.5 % of the 800 kB budget (CI-gated) |
-| **Tests** | **~300** green across the workspace — property tests, no-panic fuzzes, tamper tests, red-team fixtures, goldens |
+| **Tests** | **~350** green across the workspace — property tests, no-panic fuzzes, tamper tests, red-team fixtures, goldens |
 | **Trusted core** | kernel · hash-chained event log + receipts · symlink-safe path confinement · runner + sandbox · worktree verify loop · type-sealed `VerifiedPatch` |
-| **Capability packs** | model transport · secret broker · Telegram · GitHub · subagent supervisor · advisor · MCP gateway · repo memory · self-improvement — all as **std-only, fully-tested decision cores** |
-| **Red-team** | prompt-injection, path-escape, fake-tool-result, secret-leak, MCP-hidden-instruction, memory-as-authority, and silent-weakening fixtures all pass |
+| **Capability packs** | model transport · secret broker + vault · Telegram · GitHub REST + webhooks · subagent supervisor + executor · advisor · MCP gateway + server · repo / semantic memory · self-improvement — all as **std-only, fully-tested decision cores** with their live adapters wired behind a `live` feature |
+| **Red-team** | prompt-injection, path-escape, fake-tool-result, secret-leak, MCP-hidden-instruction, memory-as-authority, silent-weakening, hostile-MCP-client, forged/replayed webhook, and hostile-embedded-doc fixtures all pass |
 
 > **Honest scope.** The *trust, policy, and decision logic* of every layer is
-> built and tested. The pieces that need real network, real execution, or OS
-> keychains — live HTTP providers, the Bot API loop, the GitHub REST flow,
-> native secret stores — are deliberately deferred behind clearly marked
-> `TODO(Pn-…)` seams (CI has no network or secrets). The architecture is
-> transport-agnostic, so each live adapter drops into an already-verified core.
+> built and tested, and the v0.2/v0.3 live adapters (HTTP model providers, the
+> Telegram Bot API, the GitHub REST flow + webhook verification, the encrypted
+> secret vault, MCP server mode, …) are now implemented behind a `live` cargo
+> feature. What remains are the few seams that genuinely cannot run in CI without
+> real network, secrets, a sandbox backend, a microVM, or an embedding provider —
+> each marked with a clear `TODO(*-live)` and dropping into an already-verified,
+> transport-agnostic core.
 
 ---
 

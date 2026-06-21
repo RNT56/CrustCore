@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Golden coding-task suite (`ROADMAP.md` §19.4).
 //!
-//! Each golden task is `#[ignore]`d until the phase that makes it runnable. They
+//! The golden tasks that run with the std-only harness are enabled and run in CI; one
+//! stays `#[ignore]`d while its end-to-end path is still a live-gated seam. They
 //! exercise the verifier-owned completion loop end to end.
 
 /// Golden (P5.6 / P16.7), the flagship task: a repo has a **failing test**; a worker

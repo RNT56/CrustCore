@@ -45,19 +45,6 @@ use crustcore_netproto::{
 };
 use crustcore_types::BoundedText;
 
-/// Capability packs this sidecar exposes to the kernel via the helper protocol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NetCapability {
-    /// Model transport (chat/completions/streaming) — implemented this phase.
-    ModelTransport,
-    /// Telegram Bot API runtime channel (later phase).
-    Telegram,
-    /// GitHub REST/GraphQL helper (later phase).
-    GitHub,
-    /// Credential-proxy endpoints (later phase).
-    CredentialProxy,
-}
-
 /// One model a provider currently offers (a registry entry — `docs/model-routing.md`
 /// §1.1). Probed live, never hard-coded (invariant 17).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,8 +119,8 @@ impl core::fmt::Display for ProviderError {
     }
 }
 
-/// A coding/model provider. Live providers (OpenAI/Anthropic/...) implement this
-/// over an HTTP transport (deferred to `TODO(P7-live)`); [`MockProvider`] does so
+/// A coding/model provider. Live providers (OpenAI/Anthropic/…) implement this over an
+/// HTTP transport ([`providers`], behind the `live` feature); [`MockProvider`] does so
 /// deterministically for tests and the default helper.
 pub trait Provider {
     /// Stable provider id (e.g. `openai`, `mock-remote`).
@@ -585,8 +572,8 @@ impl Provider for MockProvider {
 
 /// A default engine for the helper binary: deterministic mock providers that make
 /// the dynamic registry, routing, fallback, and budget behaviors observable
-/// **without any network** (`TODO(P7-live)` replaces these with credentialed
-/// adapters once the Phase 8 secret broker exists).
+/// **without any network**. The live counterpart — credentialed HTTP adapters over the
+/// secret broker — is [`live_engine`] / [`build_live_engine`], behind the `live` feature.
 #[must_use]
 pub fn default_mock_engine() -> Engine {
     let remote_strong = ModelCard {

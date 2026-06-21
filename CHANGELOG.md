@@ -982,6 +982,20 @@ agent/PR/role/size/invariant audit trail.
 
 ### Changed
 
+- **Codebase polish pass (post-Track-B).** A workspace-wide quality sweep (drift +
+  stale-doc + dead-code) after the v0.2/v0.3 merges: refreshed the `README` status
+  section to reflect Track A/B merged + the test badge `298 → 352` (prose `~350`); fixed
+  stale `TODO(P*-live)`/`TODO(Pn)` markers that pointed at now-merged work
+  (`crustcore-net` Provider/`default_mock_engine` docs, `crustcore-backend::integrate`
+  `PrIntent`, `crustcore-worktree::tools` "Phase 4 will…", `crustcore-index/Cargo.toml`,
+  the `crustcore-eval` red-team/golden suite docs, the `xtask` `verify` description, the
+  `crustcore-kernel` crate-doc `step` sketch → `ActionVec`, `docs/roadmap-v0.2.md`);
+  removed the dead, never-constructed `crustcore_net::NetCapability` enum; and **added a
+  `branch_under_prefix` segment-boundary / `..`-traversal / empty-prefix-fail-closed unit
+  test** (`crustcore-backend::integrate`) that the P10 hardening had left only
+  indirectly covered. No behavior change; `cargo xtask verify` green; nano 412.0 KiB.
+  (Contract-file status drift — `CLAUDE.md`'s stale `~296 KiB`/`~300 tests`/"Track A in
+  progress" — is handled in a separate serialized contract PR.)
 - Set the project license to **Apache-2.0** (was TBD): updated `README.md`,
   `CONTRIBUTING.md` (inbound=outbound contribution terms), and crate metadata.
 - Updated status in `README.md` and `CLAUDE.md` from "documentation-first /

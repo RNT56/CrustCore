@@ -12,8 +12,9 @@
 //! The git wrappers run a **fixed** subcommand set with hooks and external config
 //! disabled (`core.hooksPath=/dev/null`, `GIT_CONFIG_*`, scrubbed env), so a
 //! repository cannot execute hooks or have the model's written config influence
-//! the command (Phase 3 acceptance). Phase 4 will additionally route these
-//! through the sandbox runner.
+//! the command (Phase 3 acceptance). They run hardened directly (scrubbed env, no
+//! hooks/pager/external config) rather than under the sandbox runner; the verify and
+//! external-worker *execution* paths are what run under the sandbox profile.
 
 use std::io::Read;
 use std::path::Path;

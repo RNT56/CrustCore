@@ -3,8 +3,9 @@
 //!
 //! `cargo xtask <command>` (alias in `.cargo/config.toml`):
 //!
-//! - `verify` — the full gate: fmt, clippy, test, nano build, size gate, and the
-//!   forbidden-dependency check (CLAUDE.md §9.1).
+//! - `verify` — the full gate: fmt, clippy (+ the feature-gated clippy), test (+ the
+//!   feature-gated tests), the forbidden-dependency check, and the nano size gate
+//!   (CLAUDE.md §9.1).
 //! - `size-check` — build `crustcore-nano` and fail if it exceeds the budget
 //!   (invariant 19, `docs/nano-size-budget.md`).
 //! - `forbidden-deps` — fail if a banned crate is linked into the nano build.
@@ -90,7 +91,7 @@ fn print_help() {
     println!(
         "cargo xtask <command>\n\n\
          COMMANDS:\n\
-         \x20 verify          fmt + clippy + test + nano build + size gate + forbidden-deps\n\
+         \x20 verify          fmt + clippy(+features) + test(+features) + forbidden-deps + size gate\n\
          \x20 fmt             cargo fmt --check\n\
          \x20 clippy          cargo clippy --workspace -- -D warnings\n\
          \x20 test            cargo test --workspace\n\
