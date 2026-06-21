@@ -9,13 +9,16 @@
 //! Status: the **Telegram runtime channel** logic ([`telegram`]), the **subagent
 //! execution control plane** ([`exec`], P11-exec: scheduler/budget/blackboard/no-user/
 //! verifier-owned acceptance over a [`SubagentExecutor`](crate::exec::SubagentExecutor)
-//! trait), and the **model-backed advisor** ([`advisor`], P12-native:
+//! trait), the **model-backed advisor** ([`advisor`], P12-native:
 //! [`NativeAdvisor`](crate::advisor::NativeAdvisor) over an injected consult fn,
-//! advisory-not-policy preserved, untrusted response redacted) are implemented and
-//! CI-tested. The Bot API HTTP long-polling/send (`TODO(P9-net)`), the GitHub loop, the
-//! live `WorktreeSubagentExecutor` (`TODO(P11-exec-live)`), the live advisor routing +
-//! advisor-note log append (`TODO(P12-native-live)`), and supervision land in later
-//! phases.
+//! advisory-not-policy preserved, untrusted response redacted), and the **hardened
+//! webhook ingestion** ([`webhook`], B2-gh-app: HMAC-SHA256 constant-time signature
+//! verification + size-bound + replay-dedup → a redacted, bounded `GitHubEnvelope`) are
+//! implemented and CI-tested. The Bot API HTTP long-polling/send (`TODO(P9-net)`), the
+//! GitHub loop, the live `WorktreeSubagentExecutor` (`TODO(P11-exec-live)`), the live
+//! advisor routing + advisor-note log append (`TODO(P12-native-live)`), the live webhook
+//! HTTP listener + GitHub App JWT/RS256 auth (`TODO(B2-webhook-live)`/`TODO(B2-gh-app-live)`),
+//! and supervision land in later phases.
 #![forbid(unsafe_code)]
 
 pub mod advisor;
@@ -24,6 +27,7 @@ pub mod github;
 pub mod selfimprove;
 pub mod supervisor;
 pub mod telegram;
+pub mod webhook;
 
 /// Surfaces the daemon supervises. Marker enum so the crate is real.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
