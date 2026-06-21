@@ -37,6 +37,7 @@ members = [
     "crates/crustcore-daemon",
     "crates/crustcore-mcp",
     "crates/crustcore-index",
+    "crates/crustcore-index-rag",
     "crates/crustcore-telemetry",
     "crates/crustcore-session",
     "crates/crustcore-eval",
@@ -77,6 +78,7 @@ crustcore-net = { path = "crates/crustcore-net", version = "0.1.0" }
 crustcore-daemon = { path = "crates/crustcore-daemon", version = "0.1.0" }
 crustcore-mcp = { path = "crates/crustcore-mcp", version = "0.1.0" }
 crustcore-index = { path = "crates/crustcore-index", version = "0.1.0" }
+crustcore-index-rag = { path = "crates/crustcore-index-rag", version = "0.1.0" }
 crustcore-telemetry = { path = "crates/crustcore-telemetry", version = "0.1.0" }
 crustcore-session = { path = "crates/crustcore-session", version = "0.1.0" }
 crustcore-eval = { path = "crates/crustcore-eval", version = "0.1.0" }

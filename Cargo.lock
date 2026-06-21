@@ -212,6 +212,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crustcore-index-rag"
+version = "0.1.0"
+dependencies = [
+ "crustcore-index",
+ "crustcore-secrets",
+ "crustcore-types",
+]
+
+[[package]]
 name = "crustcore-kernel"
 version = "0.1.0"
 dependencies = [

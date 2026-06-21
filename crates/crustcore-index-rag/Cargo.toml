@@ -1,0 +1,36 @@
+[package]
+name = "crustcore-index-rag"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Optional RAG layer for CrustCore: pluggable vector-store adapter, repo chunker, symbol-aware chunk metadata, and a bounded query planner. Off-nano; memory is never authority."
+
+[dependencies]
+# DEFAULT build links NO heavy third-party dep: the local backend reuses
+# crustcore-index's dependency-free `VectorMemory`/`cosine`/`HashEmbedder`, and the
+# redact-then-bound boundary is `crustcore-index::{select_context, build_bundle,
+# semantic_select}` + `crustcore-secrets::Redactor`. Every external-store SDK and the
+# tree-sitter `ast` backend live behind their own off-by-default cargo feature, so the
+# nano graph (first-party only) never selects them — proven by `cargo xtask forbidden-deps`.
+crustcore-index = { workspace = true }
+crustcore-secrets = { workspace = true }
+crustcore-types = { workspace = true }
+
+[features]
+default = []
+# Live text->vector embedding via B3's net-helper seam (`TODO(B3-embed-live)`); the
+# deterministic core uses `HashEmbedder` and never enables this in CI.
+live = []
+# Persistent local store snapshot (reuses crustcore-index's dependency-free snapshot);
+# the seam is `TODO(C5-persist)`, off by default.
+persist = []
+# Tree-sitter / AST symbol spans for chunk boundaries (`TODO(C5-ast)`); the default is the
+# conservative grep/line-chunk fallback, so this is off by default and not in CI.
+ast = []
+# External vector-store backends, each a thin adapter routing auth via `CredentialProxy`.
+# The real network client is `TODO(C5-<backend>-live)`; off by default, never in nano.
+qdrant = []
+lancedb = []
