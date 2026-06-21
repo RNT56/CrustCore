@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/crustcore_header.png" alt="CrustCore — a sub-800 kB Rust coding-agent verifier kernel" width="820">
+
 # CrustCore
 
 ### The coding agent that can’t mark its own homework.
