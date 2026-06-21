@@ -300,14 +300,37 @@ fn nano_build_into(target_dir: Option<&Path>) -> Result<PathBuf, String> {
 /// (`rust-toolchain.toml`), the nano binary builds reproducibly — verify with
 /// `cargo xtask reproduce`.
 fn reproducible_env(root: &Path) -> Vec<(String, String)> {
-    let cargo_home = std::env::var("CARGO_HOME").ok().unwrap_or_else(|| {
-        std::env::var("HOME")
-            .map(|h| format!("{h}/.cargo"))
-            .unwrap_or_default()
-    });
+    let home = std::env::var("HOME").unwrap_or_default();
+    let cargo_home = std::env::var("CARGO_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            if home.is_empty() {
+                String::new()
+            } else {
+                format!("{home}/.cargo")
+            }
+        });
+    let rustup_home = std::env::var("RUSTUP_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            if home.is_empty() {
+                String::new()
+            } else {
+                format!("{home}/.rustup")
+            }
+        });
+    // Strip every absolute path that would otherwise embed a machine-specific prefix:
+    // the workspace, the cargo registry/source cache, and the rustup toolchain sysroot
+    // (whose std source paths leak into a build). Remapping all three is what lets a
+    // build on a *different* machine (same platform + toolchain) reproduce the bytes.
     let mut rustflags = format!("--remap-path-prefix={}=/crustcore", root.display());
     if !cargo_home.is_empty() {
         rustflags.push_str(&format!(" --remap-path-prefix={cargo_home}=/cargo"));
+    }
+    if !rustup_home.is_empty() {
+        rustflags.push_str(&format!(" --remap-path-prefix={rustup_home}=/rustup"));
     }
     vec![
         ("RUSTFLAGS".to_string(), rustflags),
