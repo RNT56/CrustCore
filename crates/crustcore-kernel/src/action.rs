@@ -9,11 +9,10 @@
 
 use crustcore_types::{ApprovalId, JobId, TaskId};
 
-/// A bounded instruction from the kernel to an adapter.
-///
-/// TODO(P1.3): flesh out variants with typed payloads (tool spec, command spec,
-/// approval prompt, model request) and keep the list bounded
-/// (`SmallVec<[Action; 4]>` once `smallvec` is admitted).
+/// A bounded instruction from the kernel to an adapter. The variants carry typed
+/// payloads (job/task/approval ids); the per-step list stays bounded via the
+/// [`ActionVec`](crate::ActionVec) alias (a heap `Vec` today, swappable to
+/// `SmallVec<[Action; 4]>` if `smallvec` is admitted — see its doc).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     /// Append an event to the hash-chained log (`crustcore-eventlog`).
@@ -42,6 +41,4 @@ pub enum Action {
         /// The finished task.
         task_id: TaskId,
     },
-    /// No operation (e.g. an event that requires no outward action).
-    Noop,
 }
