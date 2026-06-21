@@ -45,10 +45,14 @@ agent/PR/role/size/invariant audit trail.
   handler error string is redacted+bounded too, so a path/secret never leaks through an
   error. CI-tested with canned JSON-RPC requests incl. a **hostile-client red-team**
   (a client asking for `read_secret`/`approve_merge`/`kernel_step` is default-denied; a
-  leaky handler's secret is redacted before the response). 5 tests. No new deps (reuses
-  P13-net's `serde_json`; mcp sidecar, never in nano). The live serving transport
-  (stdio/HTTP) is `TODO(B1-mcp-modes-live)`; client/registry admission (B1.3) is already
-  the §3 `McpRegistry`. `docs/mcp.md` §9 added. nano unchanged at 412.0 KiB.
+  leaky handler's secret is redacted before the response). **Adversarial review: 2
+  findings, 0 confirmed** (both refuted — the JSON-RPC id-echo is correct, and binding
+  *raw* inbound args into the receipt is actually *more* correct in server mode since an
+  untrusted client holds no CrustCore secret and the receipt stores only `sha256(args)`);
+  an id-echo test was added as optional hardening. 6 tests. No new deps (reuses P13-net's
+  `serde_json`; mcp sidecar, never in nano). The live serving transport (stdio/HTTP) is
+  `TODO(B1-mcp-modes-live)`; client/registry admission (B1.3) is already the §3
+  `McpRegistry`. `docs/mcp.md` §9 added. nano unchanged at 412.0 KiB.
 - **v0.2 P12-native — model-backed advisor.** The `crustcore-daemon::advisor` gains a
   `NativeAdvisor` (P12.3): it implements the same `Advisor` trait as `SimulatedAdvisor`
   (so it drops into `consult_before` unchanged) and consults a model in the advisor role

@@ -403,4 +403,28 @@ mod tests {
         );
         assert_eq!(bad["error"]["code"].as_i64().unwrap(), ERR_TOOL_NOT_EXPOSED);
     }
+
+    #[test]
+    fn response_echoes_the_request_id_faithfully() {
+        let s = server();
+        let mut receipts = ReceiptChain::new(MacKey::new([0x11; 32]));
+        // A string id is echoed verbatim (JSON-RPC requires the id be returned as-is).
+        let resp = s.handle_request(
+            &serde_json::json!({"jsonrpc":"2.0","id":"req-abc","method":"tools/list"}),
+            &EchoHandler,
+            &Redactor::new(),
+            &mut receipts,
+            &ids(),
+        );
+        assert_eq!(resp["id"], serde_json::json!("req-abc"));
+        // An absent id collapses to null per convention — a clean response, not a panic.
+        let resp2 = s.handle_request(
+            &serde_json::json!({"jsonrpc":"2.0","method":"tools/list"}),
+            &EchoHandler,
+            &Redactor::new(),
+            &mut receipts,
+            &ids(),
+        );
+        assert_eq!(resp2["id"], serde_json::Value::Null);
+    }
 }
