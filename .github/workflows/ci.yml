@@ -15,8 +15,14 @@ env:
 
 jobs:
   verify:
-    name: verify (fmt, clippy, test, forbidden-deps, nano size gate)
-    runs-on: ubuntu-latest
+    name: verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Run both platforms to completion — a macOS failure must not cancel Linux
+      # (or vice versa). CrustCore runs on Linux and macOS; CI proves both.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -30,7 +36,10 @@ jobs:
       # Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor by
       # default; relax it best-effort so bwrap can set up its namespaces. The
       # tests degrade gracefully (gate-only) if bwrap is still non-functional.
-      - name: Install bubblewrap (sandbox backend)
+      # macOS needs no install step — it uses the built-in /usr/bin/sandbox-exec
+      # (Seatbelt) backend, so its live confinement tests run unconditionally.
+      - name: Install bubblewrap (sandbox backend, Linux only)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq bubblewrap
@@ -56,8 +65,10 @@ jobs:
         run: cargo xtask verify
 
       # Reportable size breakdown. Best-effort: needs network to install, and the
-      # gate itself already ran in `verify`.
+      # gate itself already ran in `verify`. Linux only — the flagship size claim
+      # is the Linux nano binary.
       - name: cargo-bloat report (nano)
+        if: runner.os == 'Linux'
         continue-on-error: true
         run: |
           cargo install cargo-bloat --locked || true
