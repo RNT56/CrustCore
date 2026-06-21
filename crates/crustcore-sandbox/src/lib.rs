@@ -461,6 +461,187 @@ impl SandboxBackend for BubblewrapBackend {
     }
 }
 
+// ---------------------------------------------------------------------------
+// macOS backend v1: sandbox-exec / Seatbelt (`docs/sandbox.md` §3 "macOS")
+// ---------------------------------------------------------------------------
+
+/// Escapes a path for embedding inside an SBPL double-quoted string literal.
+/// Backslashes and double quotes are the only characters that terminate or
+/// re-interpret a Scheme/SBPL string, so escaping them defensively prevents a
+/// crafted worktree/TMPDIR path from breaking out of the `(subpath "...")` form
+/// and injecting rules. Returns the escaped contents (without surrounding quotes).
+///
+/// Compiled on macOS (the only platform that uses Seatbelt) and under `test` (the
+/// deterministic profile-shape test runs on every platform); elided elsewhere so
+/// a non-macOS release build sees no unused code.
+#[cfg(any(target_os = "macos", test))]
+#[must_use]
+fn sbpl_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c == '\\' || c == '"' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Builds the Seatbelt (SBPL) profile string that confines a run: deny-all
+/// network egress and writes confined to the worktree + temp dirs. Pure (no I/O),
+/// so the deterministic profile-shape test runs on every platform.
+///
+/// `worktree` and `tmpdir` MUST already be **canonical** (real, symlink-resolved)
+/// absolute paths — SBPL `subpath` matches the kernel's resolved path, and macOS
+/// symlinks `/tmp`→`/private/tmp`, `/var`→`/private/var`, and worktrees under
+/// `/var/folders/...`. Embedding an unresolved path would either fail open (a
+/// rule that never matches) or block legitimate worktree writes. Canonicalization
+/// (and the fail-closed-on-error policy) happens in [`SeatbeltBackend::profile_for`].
+///
+/// The recipe is "allow-all, then deny the two load-bearing classes, then
+/// re-allow the writable surface" (later SBPL rules override earlier ones):
+/// `(deny network*)` is the deny-all-egress guarantee (mirrors bubblewrap's
+/// `--unshare-all`); `(deny file-write*)` followed by re-allowing only the
+/// worktree + temp dirs is the write-confinement guarantee.
+///
+/// Compiled on macOS and under `test` (see [`sbpl_escape`]); elided on a non-macOS
+/// release build where nothing references it.
+#[cfg(any(target_os = "macos", test))]
+#[must_use]
+fn build_seatbelt_profile(worktree: &Path, tmpdir: &Path) -> String {
+    let wt = sbpl_escape(&worktree.to_string_lossy());
+    let tmp = sbpl_escape(&tmpdir.to_string_lossy());
+    format!(
+        "(version 1)\n\
+         (allow default)\n\
+         (deny network*)\n\
+         (deny file-write*)\n\
+         (allow file-write*\n\
+         \x20   (subpath \"{wt}\")\n\
+         \x20   (subpath \"{tmp}\")\n\
+         \x20   (subpath \"/private/tmp\")\n\
+         \x20   (subpath \"/private/var/tmp\")\n\
+         \x20   (literal \"/dev/null\") (literal \"/dev/zero\")\n\
+         \x20   (literal \"/dev/stdout\") (literal \"/dev/stderr\") (literal \"/dev/tty\")\n\
+         \x20   (literal \"/dev/dtracehelper\") (literal \"/dev/urandom\"))\n"
+    )
+}
+
+/// The macOS `sandbox-exec` (Seatbelt) backend (`docs/sandbox.md` §3 "macOS"):
+/// wraps the command under an SBPL profile that **denies all network egress** and
+/// **confines writes to the worktree** (plus the system temp dirs and a few
+/// harmless `/dev` nodes), matching the bubblewrap backend's security posture
+/// (Tier 2). Like bubblewrap, network is never re-enabled here in v1 — an
+/// `Allowlist` profile is **refused** by [`run_command`] rather than granting raw
+/// unproxied host networking.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone)]
+pub struct SeatbeltBackend {
+    sandbox_exec: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+impl SeatbeltBackend {
+    /// Detects `sandbox-exec` on this host, returning `None` if it is missing.
+    /// It ships at `/usr/bin/sandbox-exec` on every macOS, but we probe rather
+    /// than assume so a stripped host refuses (no silent unsandboxed degrade).
+    #[must_use]
+    pub fn detect() -> Option<Self> {
+        let path = Path::new("/usr/bin/sandbox-exec");
+        if path.is_file() {
+            return Some(SeatbeltBackend {
+                sandbox_exec: path.to_path_buf(),
+            });
+        }
+        // Fall back to the standard search path (Homebrew etc.) for unusual hosts.
+        find_executable("sandbox-exec").map(|sandbox_exec| SeatbeltBackend { sandbox_exec })
+    }
+
+    /// Resolves the canonical worktree + TMPDIR and builds the SBPL profile for a
+    /// run rooted at `cwd`. **Fail-closed:** if a path cannot be canonicalized we
+    /// return [`SandboxError::Setup`] rather than embedding an unresolved path
+    /// (which would either fail open or block legitimate worktree writes — see
+    /// [`build_seatbelt_profile`]). The TMPDIR is taken from the *sanitized* env
+    /// when present, else the process `TMPDIR`, else `/private/tmp`.
+    fn profile_for(cwd: &str, env: &BTreeMap<String, String>) -> Result<String, SandboxError> {
+        let worktree = std::fs::canonicalize(cwd).map_err(|e| {
+            SandboxError::Setup(format!("cannot canonicalize worktree '{cwd}': {e}"))
+        })?;
+        // Prefer the sanitized env's TMPDIR (what the child will actually see),
+        // then the ambient one, then the macOS default.
+        let tmp_raw = env
+            .get("TMPDIR")
+            .cloned()
+            .or_else(|| std::env::var("TMPDIR").ok())
+            .unwrap_or_else(|| "/private/tmp".to_string());
+        let tmpdir = std::fs::canonicalize(&tmp_raw).map_err(|e| {
+            SandboxError::Setup(format!("cannot canonicalize TMPDIR '{tmp_raw}': {e}"))
+        })?;
+        Ok(build_seatbelt_profile(&worktree, &tmpdir))
+    }
+
+    /// Builds the `sandbox-exec`-wrapped [`CommandSpec`] for `inner` under
+    /// `profile_str`. Runs `sandbox-exec -p '<profile>' -- <program> <args...>`
+    /// with `cwd` preserved so the child starts in the worktree, forwarding the
+    /// (already-sanitized) env, stdin, timeout, and output cap.
+    fn wrap(&self, inner: &CommandSpec, profile_str: &str) -> CommandSpec {
+        let mut args: Vec<String> = vec![
+            "-p".into(),
+            profile_str.to_string(),
+            "--".into(),
+            inner.program.clone(),
+        ];
+        args.extend(inner.args.iter().cloned());
+        CommandSpec {
+            program: self.sandbox_exec.to_string_lossy().into_owned(),
+            args,
+            // Preserve the worktree cwd so the child process starts there.
+            cwd: inner.cwd.clone(),
+            env: inner.env.clone(),
+            stdin: inner.stdin.clone(),
+            timeout: inner.timeout,
+            max_output_bytes: inner.max_output_bytes,
+        }
+    }
+
+    /// The `sandbox-exec` argv this backend would use for `inner` (exposed for
+    /// tests/inspection, mirroring [`BubblewrapBackend::wrapped_spec`]). Requires a
+    /// worktree `cwd` to build the confinement profile.
+    ///
+    /// # Errors
+    /// [`SandboxError::Setup`] if `inner` has no `cwd`, or a path cannot be
+    /// canonicalized (fail-closed).
+    pub fn wrapped_spec(&self, inner: &CommandSpec) -> Result<CommandSpec, SandboxError> {
+        let cwd = inner.cwd.as_deref().ok_or_else(|| {
+            SandboxError::Setup("seatbelt backend requires a worktree cwd".to_string())
+        })?;
+        let profile_str = Self::profile_for(cwd, &inner.env)?;
+        Ok(self.wrap(inner, &profile_str))
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl SandboxBackend for SeatbeltBackend {
+    fn run(
+        &self,
+        profile: &SandboxProfile,
+        spec: CommandSpec,
+    ) -> Result<CommandResult, SandboxError> {
+        // Sanitize the environment at the launch boundary (not just one layer up),
+        // so invoking the backend directly cannot fail open — same as bubblewrap.
+        let worktree = spec.cwd.clone().map(PathBuf::from);
+        let cwd = spec.cwd.clone().ok_or_else(|| {
+            SandboxError::Setup("seatbelt backend requires a worktree cwd".to_string())
+        })?;
+        let env = sanitize_env(&spec.env, profile, worktree.as_deref())?;
+        // Build the SBPL confinement from the canonical worktree + (sanitized)
+        // TMPDIR; fail closed if either cannot be resolved.
+        let profile_str = Self::profile_for(&cwd, &env)?;
+        let wrapped = self.wrap(&CommandSpec { env, ..spec }, &profile_str);
+        run(&wrapped).map_err(|e| SandboxError::Setup(e.to_string()))
+    }
+}
+
 /// Runs `spec` under `profile`, gated by a [`SandboxExecCap`] (invariant 9: no
 /// capability, no execution). The environment is sanitized (§5), path-list vars
 /// validated (§5.2), and the strongest available backend selected; if no backend
@@ -496,13 +677,21 @@ pub fn run_command(
         ));
     }
 
-    // Assemble the backends built on this host. Today only the Linux bubblewrap Tier-2
-    // backend is compiled; the Firecracker Tier-3 (`TODO(B4-firecracker-live)`) and
-    // Windows-native (`TODO(B4-windows-live)`) backends append here behind their features.
+    // Assemble the backends built on this host. The Linux bubblewrap Tier-2 backend
+    // (`detect()` returns `None` off Linux) and the macOS Seatbelt Tier-2 backend
+    // (`#[cfg(target_os = "macos")]`) are compiled in; the Firecracker Tier-3
+    // (`TODO(B4-firecracker-live)`) and Windows-native (`TODO(B4-windows-live)`)
+    // backends append here behind their features.
     let bwrap = BubblewrapBackend::detect();
+    #[cfg(target_os = "macos")]
+    let seatbelt = SeatbeltBackend::detect();
     let mut backends: Vec<&dyn SandboxBackend> = Vec::new();
     if let Some(b) = bwrap.as_ref() {
         backends.push(b);
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(s) = seatbelt.as_ref() {
+        backends.push(s);
     }
 
     // Select a backend that MEETS the required tier, or refuse. A Tier-3 (hostile) task
@@ -674,6 +863,57 @@ mod tests {
     }
 
     #[test]
+    fn seatbelt_profile_denies_network_confines_writes_and_escapes_paths() {
+        // Deterministic on every platform: `build_seatbelt_profile` is pure. It must
+        // emit the two load-bearing deny rules, allow writes only inside the
+        // (canonical) worktree, and NOT grant write to an arbitrary outside path.
+        let worktree = Path::new("/private/tmp/cc-worktree-abc");
+        let tmpdir = Path::new("/private/var/folders/xx/cc-tmp");
+        let profile = build_seatbelt_profile(worktree, tmpdir);
+
+        // Deny-all egress (mirrors bwrap --unshare-all).
+        assert!(
+            profile.contains("(deny network*)"),
+            "must deny all network egress"
+        );
+        // Write confinement: deny-all-writes then re-allow the worktree.
+        assert!(
+            profile.contains("(deny file-write*)"),
+            "must deny all writes by default"
+        );
+        assert!(
+            profile.contains("(subpath \"/private/tmp/cc-worktree-abc\")"),
+            "must allow writes inside the canonical worktree"
+        );
+        assert!(
+            profile.contains("(subpath \"/private/var/folders/xx/cc-tmp\")"),
+            "must allow writes inside the canonical TMPDIR"
+        );
+        // An arbitrary outside path is NOT granted write.
+        assert!(
+            !profile.contains("/Users/someone/.ssh"),
+            "must not grant write to an arbitrary outside path"
+        );
+        // The deny rules precede the re-allow (later SBPL rules override earlier).
+        let deny_at = profile.find("(deny file-write*)").unwrap();
+        let allow_at = profile.find("(allow file-write*").unwrap();
+        assert!(deny_at < allow_at, "deny must precede the re-allow");
+    }
+
+    #[test]
+    fn seatbelt_profile_escapes_quotes_and_backslashes_in_paths() {
+        // A crafted path with a quote/backslash must not break out of the SBPL
+        // string literal — both are backslash-escaped.
+        let worktree = Path::new("/tmp/a\"b\\c");
+        let tmpdir = Path::new("/private/tmp");
+        let profile = build_seatbelt_profile(worktree, tmpdir);
+        assert!(
+            profile.contains("(subpath \"/tmp/a\\\"b\\\\c\")"),
+            "quote and backslash must be escaped in the embedded path: {profile}"
+        );
+    }
+
+    #[test]
     fn allowlist_profile_is_refused_until_proxy_exists() {
         // Until the trusted egress proxy is built, an allowlist profile must be
         // refused rather than granting raw, unproxied host networking.
@@ -708,12 +948,27 @@ mod tests {
         }
     }
 
+    /// Whether *any* real Tier-2 backend is available on this host (bubblewrap on
+    /// Linux, Seatbelt on macOS). The refusal test only holds on a backend-less host.
+    fn any_real_backend_available() -> bool {
+        if BubblewrapBackend::detect().is_some() {
+            return true;
+        }
+        #[cfg(target_os = "macos")]
+        if SeatbeltBackend::detect().is_some() {
+            return true;
+        }
+        false
+    }
+
     #[test]
     fn refuses_when_no_backend_available() {
-        // On a host without bwrap (e.g. macOS dev box), a sandboxed run is refused
-        // rather than downgraded to unsandboxed execution.
-        if BubblewrapBackend::detect().is_some() {
-            return; // bwrap present (Linux CI w/ bubblewrap); skip the refusal check
+        // On a host with NO sandbox backend, a sandboxed run is refused rather than
+        // downgraded to unsandboxed execution. Skip when any real backend is present
+        // (Linux w/ bubblewrap, or macOS w/ sandbox-exec) — the refusal can't be
+        // observed there.
+        if any_real_backend_available() {
+            return;
         }
         let cap = SandboxExecCap {
             profile: ScopeId(1),
@@ -816,5 +1071,146 @@ mod tests {
                 .provided_tier(),
             ExecutionTier::Hostile
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // macOS live confinement (proves the Seatbelt backend actually confines on
+    // this host). Skips if `sandbox-exec` is missing. These run a real child
+    // through the backend and assert: writes inside the worktree succeed, writes
+    // outside are DENIED, network egress is DENIED, and env is sanitized.
+    // -----------------------------------------------------------------------
+    #[cfg(target_os = "macos")]
+    mod macos_live {
+        use super::*;
+
+        /// Runs `/bin/sh -c <script>` through the Seatbelt backend in `worktree`,
+        /// with the given extra env merged onto a minimal base.
+        fn run_in_seatbelt(
+            worktree: &Path,
+            script: &str,
+            extra_env: &[(&str, &str)],
+        ) -> CommandResult {
+            let backend = SeatbeltBackend::detect().expect("sandbox-exec present");
+            let mut env: BTreeMap<String, String> = BTreeMap::new();
+            env.insert("PATH".to_string(), "/usr/bin:/bin".to_string());
+            for (k, v) in extra_env {
+                env.insert((*k).to_string(), (*v).to_string());
+            }
+            let mut spec = CommandSpec::new("/bin/sh");
+            spec.args = vec!["-c".to_string(), script.to_string()];
+            spec.cwd = Some(worktree.to_string_lossy().into_owned());
+            spec.env = env;
+            spec.timeout = std::time::Duration::from_secs(15);
+            backend
+                .run(&SandboxProfile::default_sandboxed(), spec)
+                .expect("seatbelt run set up")
+        }
+
+        #[test]
+        fn write_inside_worktree_succeeds() {
+            if SeatbeltBackend::detect().is_none() {
+                return; // sandbox-exec missing; skip
+            }
+            let tmp = std::env::temp_dir().join(format!("cc-sbx-in-{}", std::process::id()));
+            std::fs::create_dir_all(&tmp).unwrap();
+            let canon = std::fs::canonicalize(&tmp).unwrap();
+
+            let r = run_in_seatbelt(&canon, "echo hi > inside.txt && echo DONE", &[]);
+            assert!(
+                r.is_success(),
+                "writing inside the worktree must succeed: {r:?}"
+            );
+            assert!(
+                canon.join("inside.txt").exists(),
+                "the file must be created"
+            );
+
+            std::fs::remove_dir_all(&tmp).ok();
+        }
+
+        #[test]
+        fn write_outside_worktree_is_denied() {
+            if SeatbeltBackend::detect().is_none() {
+                return; // sandbox-exec missing; skip
+            }
+            let tmp = std::env::temp_dir().join(format!("cc-sbx-out-{}", std::process::id()));
+            std::fs::create_dir_all(&tmp).unwrap();
+            let canon = std::fs::canonicalize(&tmp).unwrap();
+
+            // Target a path OUTSIDE the worktree (the user's HOME).
+            let escape = format!(
+                "{}/.crustcore-sbx-escape-test-{}",
+                std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()),
+                std::process::id()
+            );
+            let escape_path = PathBuf::from(&escape);
+            // Best-effort pre-clean.
+            std::fs::remove_file(&escape_path).ok();
+
+            let script = format!("echo pwned > '{escape}'");
+            let r = run_in_seatbelt(&canon, &script, &[]);
+            assert!(
+                !r.is_success(),
+                "writing OUTSIDE the worktree must be denied (non-zero exit): {r:?}"
+            );
+            assert!(
+                !escape_path.exists(),
+                "the out-of-worktree file must NOT have been created"
+            );
+
+            std::fs::remove_file(&escape_path).ok();
+            std::fs::remove_dir_all(&tmp).ok();
+        }
+
+        #[test]
+        fn network_egress_is_denied() {
+            if SeatbeltBackend::detect().is_none() {
+                return; // sandbox-exec missing; skip
+            }
+            if !Path::new("/usr/bin/nc").exists() {
+                return; // nc missing; skip the live network probe
+            }
+            let tmp = std::env::temp_dir().join(format!("cc-sbx-net-{}", std::process::id()));
+            std::fs::create_dir_all(&tmp).unwrap();
+            let canon = std::fs::canonicalize(&tmp).unwrap();
+
+            // A TCP connect to a public resolver must fail under deny-all egress.
+            let r = run_in_seatbelt(&canon, "/usr/bin/nc -z -G1 1.1.1.1 53", &[]);
+            assert!(
+                !r.is_success(),
+                "network egress must be denied (nc must fail): {r:?}"
+            );
+
+            std::fs::remove_dir_all(&tmp).ok();
+        }
+
+        #[test]
+        fn env_is_sanitized_inside_the_sandbox() {
+            if SeatbeltBackend::detect().is_none() {
+                return; // sandbox-exec missing; skip
+            }
+            let tmp = std::env::temp_dir().join(format!("cc-sbx-env-{}", std::process::id()));
+            std::fs::create_dir_all(&tmp).unwrap();
+            let canon = std::fs::canonicalize(&tmp).unwrap();
+
+            // A credential-looking var must be stripped before reaching the child;
+            // a benign var must survive. Print both so we can assert on the output.
+            let r = run_in_seatbelt(
+                &canon,
+                "printf '[%s][%s]' \"$MY_SECRET_TOKEN\" \"$CC_BENIGN\"",
+                &[
+                    ("MY_SECRET_TOKEN", "ghp_should_be_stripped"),
+                    ("CC_BENIGN", "ok"),
+                ],
+            );
+            assert!(r.is_success(), "the probe command must run: {r:?}");
+            let out = String::from_utf8_lossy(&r.stdout);
+            assert_eq!(
+                out, "[][ok]",
+                "the credential var must be stripped and the benign var preserved: {out:?}"
+            );
+
+            std::fs::remove_dir_all(&tmp).ok();
+        }
     }
 }

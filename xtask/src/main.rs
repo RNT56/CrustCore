@@ -333,6 +333,15 @@ fn reproducible_env(root: &Path) -> Vec<(String, String)> {
     if !rustup_home.is_empty() {
         rustflags.push_str(&format!(" --remap-path-prefix={rustup_home}=/rustup"));
     }
+    // macOS: the Mach-O linker stamps an `LC_UUID` derived from the input object
+    // paths/content, so two builds in different target dirs (e.g. `release` in
+    // `target/` vs `reproduce` in a temp dir) produce different bytes even with the
+    // path remaps above. `-no_uuid` omits it, making the Mach-O reproducible. ELF on
+    // Linux has no equivalent field under these flags, so this is macOS-only. (`xtask`
+    // always builds for the host, so the host's `cfg` is the build target.)
+    if cfg!(target_os = "macos") {
+        rustflags.push_str(" -C link-arg=-Wl,-no_uuid");
+    }
     vec![
         ("RUSTFLAGS".to_string(), rustflags),
         ("SOURCE_DATE_EPOCH".to_string(), "0".to_string()),
