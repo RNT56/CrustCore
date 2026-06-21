@@ -94,7 +94,7 @@ impl ChatAllowlist {
     pub fn authorized_user(&self, chat: ChatId) -> Option<AuthorizedUser> {
         if self.allows(chat) {
             // Chat ids are i64; map to the u64 identity space.
-            Some(AuthorizedUser(chat.0 as u64))
+            Some(AuthorizedUser::bind(chat.0 as u64))
         } else {
             None
         }
@@ -1039,7 +1039,7 @@ mod tests {
         );
         match out {
             ApprovalOutcome::Approved(token) => {
-                assert_eq!(token.value.op_hash, nonce.op_hash);
+                assert_eq!(token.value().op_hash, nonce.op_hash);
                 assert!(token.is_valid_at(ts(1001)));
             }
             other => panic!("expected Approved, got {other:?}"),

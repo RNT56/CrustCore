@@ -58,13 +58,38 @@ pub struct SandboxExecCap {
 }
 
 /// A user authorized to grant approvals (e.g. an allowlisted Telegram chat).
-/// The model is never an `AuthorizedUser` (invariant 4). Instances exist only
-/// where the runtime binds an authorized identity at setup; model/worker output
-/// never becomes one.
+/// The model is never an `AuthorizedUser` (invariant 4). The inner id is **private**
+/// so an `AuthorizedUser` can be minted only through [`AuthorizedUser::bind`] — there
+/// is no struct-literal / tuple-field path by which model/worker/comment data could
+/// become one (mirrors the seal on `VerifiedPatch`). Since `AuthorizedUser` is required
+/// to call [`AuthorizedUser::approve`] (the only mint path for an [`Approved`]), this seal
+/// transitively protects invariants 4 and 14.
+///
+/// The seal is enforced by the type system — a tuple-struct literal does not compile:
+/// ```compile_fail
+/// // error[E0603]: tuple struct constructor `AuthorizedUser` is private
+/// let _forged = crustcore_policy::AuthorizedUser(42);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct AuthorizedUser(pub u64);
+pub struct AuthorizedUser(u64);
 
 impl AuthorizedUser {
+    /// Binds a runtime-authorized identity (e.g. the numeric id of an allowlisted
+    /// Telegram chat resolved by `ChatAllowlist`). Call this **only** at the trusted
+    /// setup boundary where an authorized identity is established — never from
+    /// model/worker output or an untrusted comment author id (invariant 4). It is a
+    /// named, greppable mint path so every `AuthorizedUser` is auditable.
+    #[must_use]
+    pub fn bind(id: u64) -> Self {
+        AuthorizedUser(id)
+    }
+
+    /// The bound identity id (for audit/equality).
+    #[must_use]
+    pub fn id(self) -> u64 {
+        self.0
+    }
+
     /// Mints an [`Approved`] token for `value`. This is the **only** public path
     /// to an `Approved<T>`, and it structurally requires an `AuthorizedUser`
     /// (`&self`): there is no path from model/worker output to this call
@@ -84,18 +109,16 @@ impl AuthorizedUser {
 
 /// Wraps a value (capability or action) together with the human approval that
 /// unlocked it. Irreversible operations take `Approved<T>`, never bare `T`
-/// (invariant 14). Only the approval engine constructs this; there is no path
-/// from model output to an `Approved<T>`.
+/// (invariant 14). The fields are **private** so the only way to obtain one is
+/// [`AuthorizedUser::approve`] — there is no struct-literal path from model/worker
+/// output to an `Approved<T>` (mirrors the seal on `VerifiedPatch`; read via the
+/// accessors below).
 #[derive(Debug)]
 pub struct Approved<T> {
-    /// The approved value.
-    pub value: T,
-    /// The approval that authorized it.
-    pub approval_id: ApprovalId,
-    /// Who approved it.
-    pub approved_by: AuthorizedUser,
-    /// When the approval expires.
-    pub expires_at: Timestamp,
+    value: T,
+    approval_id: ApprovalId,
+    approved_by: AuthorizedUser,
+    expires_at: Timestamp,
 }
 
 impl<T> Approved<T> {
@@ -115,6 +138,30 @@ impl<T> Approved<T> {
             approved_by,
             expires_at,
         }
+    }
+
+    /// The approved value.
+    #[must_use]
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+
+    /// The approval that authorized it.
+    #[must_use]
+    pub fn approval_id(&self) -> ApprovalId {
+        self.approval_id
+    }
+
+    /// Who approved it.
+    #[must_use]
+    pub fn approved_by(&self) -> AuthorizedUser {
+        self.approved_by
+    }
+
+    /// When the approval expires.
+    #[must_use]
+    pub fn expires_at(&self) -> Timestamp {
+        self.expires_at
     }
 
     /// Whether the approval is still valid at `now`.
@@ -142,7 +189,7 @@ mod tests {
 
     #[test]
     fn authorized_user_is_the_only_mint_path() {
-        let user = AuthorizedUser(7);
+        let user = AuthorizedUser::bind(7);
         let approved = user.approve(42u32, ApprovalId(1), Timestamp::from_millis(1_000));
         assert_eq!(approved.value, 42);
         assert_eq!(approved.approved_by, user);
@@ -151,7 +198,7 @@ mod tests {
 
     #[test]
     fn approval_validity_respects_expiry() {
-        let user = AuthorizedUser(7);
+        let user = AuthorizedUser::bind(7);
         let approved = user.approve((), ApprovalId(1), Timestamp::from_millis(1_000));
         assert!(approved.is_valid_at(Timestamp::from_millis(1_000)));
         assert!(approved.is_valid_at(Timestamp::from_millis(999)));
