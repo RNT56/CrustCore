@@ -9,7 +9,7 @@
 **A sub-800 kB Rust core that owns completion, integration, secrets, and approvals — so a patch ships because your verify command passed in a clean sandbox, not because a model said it was done.**
 
 [![CI](https://github.com/RNT56/CrustCore/actions/workflows/ci.yml/badge.svg)](https://github.com/RNT56/CrustCore/actions/workflows/ci.yml)
-&nbsp;![nano size](https://img.shields.io/badge/nano-412.0_KiB_%2F_800_KiB-2ea44f)
+&nbsp;![nano size](https://img.shields.io/badge/nano-412.0_KiB-2ea44f)
 &nbsp;![tests](https://img.shields.io/badge/tests-657_passing-2ea44f)
 &nbsp;![invariants](https://img.shields.io/badge/invariants-20_enforced-1f6feb)
 &nbsp;![kernel](https://img.shields.io/badge/kernel-std--only_%C2%B7_no_async%2Fnet%2Fdb-8957e5)
@@ -82,8 +82,8 @@ proof, not a vibe.
 **Tiny by architecture, not by flag**
 
 The trusted binary is **412.0 KiB stripped** and *refuses* to link Tokio, TLS, a
-database, an MCP SDK, or any provider SDK. A CI size gate fails the build if it
-creeps over 800 kB. Small enough to read end to end in an afternoon.
+database, an MCP SDK, or any provider SDK — a CI size gate keeps it that way.
+Small enough to read end to end in an afternoon.
 
 </td>
 </tr>
@@ -175,64 +175,36 @@ Full design: **[docs/architecture.md](./docs/architecture.md)** &nbsp;·&nbsp; s
 
 ---
 
-## The promise, stated plainly
-
-CrustCore is finished when a maintainer can say all six of these and mean them.
-Today, they hold:
-
-```text
-✓ I can read the kernel.
-✓ I can prove what is allowed.
-✓ I can replay what happened.
-✓ I can verify a patch shipped because tests passed.
-✓ I can show secrets did not enter prompts.
-✓ I can disable every optional surface and keep the harness tiny.
-```
-
----
-
-## Status
-
-The entire build is implemented and merged: the **v0.1 trusted core** (Phases
-0–16, all 12 [definition-of-done](./ROADMAP.md) criteria), the **v0.2 "light it
-up" (Track A)** and **v0.3 "expand" (Track B)** live surfaces, and the **v0.4
-"compose & adopt" (Track C)** ergonomics layer.
+## What's inside
 
 | | |
 | --- | --- |
-| **Nano binary** | **412.0 KiB** stripped — 51.5 % of the 800 kB budget (CI-gated) |
-| **Tests** | **657** green across the workspace — property tests, no-panic fuzzes, tamper tests, red-team fixtures, goldens |
-| **Trusted core** | kernel · hash-chained event log + receipts · symlink-safe path confinement · runner + sandbox · worktree verify loop · type-sealed `VerifiedPatch` |
-| **Capability packs (A/B)** | model transport · secret broker + vault · Telegram · GitHub REST + webhooks · subagent supervisor + executor · advisor · MCP gateway + server · repo / semantic memory · self-improvement — **std-only, fully-tested decision cores** with live adapters behind a `live` feature |
-| **Ergonomics (Track C)** | unified multi-modal provider registry · `#[crust_tool]` authoring macro · typed workflow graph · session / artifact service · RAG + vector-store pack · OpenTelemetry / GenAI export · loopback developer UI — seven new **non-nano** crates, deterministic cores merged |
-| **Red-team** | prompt-injection, path-escape, fake-tool-result, secret-leak, MCP-hidden-instruction, memory-as-authority, silent-weakening, hostile-MCP-client, forged/replayed webhook, and hostile-embedded-doc fixtures all pass |
-
-> **Honest scope.** The *trust, policy, and decision logic* of every layer is
-> built and tested. The remaining work is the handful of seams that genuinely
-> cannot run in CI without real network, secrets, a sandbox backend, a microVM,
-> or an embedding provider — each marked with a clear `TODO(*-live)` and dropping
-> into an already-verified, transport-agnostic core — plus the irreversible,
-> maintainer-owned release steps (signing keys, CI publish).
+| **Footprint** | the trusted binary is **412.0 KiB** stripped — std-only, with no async runtime, network, or database linked in |
+| **Trusted core** | the kernel · a hash-chained event log + tool receipts · symlink-safe path confinement · a sandboxed command runner · the worktree verify loop · the type-sealed `VerifiedPatch` |
+| **Model & secrets** | a unified multi-modal provider registry — completion, embedding, and rerank — reached through a *spawned* helper · a secret broker with an encrypted vault and a redaction / taint boundary |
+| **Integrations** | a Telegram control channel · GitHub REST + hardened webhooks · an MCP gateway / client / server · subagent supervision & execution · a second-opinion advisor · repo & semantic memory |
+| **Compose & build** | a typed workflow graph · a session / artifact service · the `#[crust_tool]` authoring macro · RAG + vector-store adapters · OpenTelemetry / GenAI export · a loopback developer UI |
+| **Verified quality** | **657 tests** — property tests, no-panic fuzzes, tamper tests, goldens — plus red-team fixtures for prompt-injection, path-escape, fake tool results, secret-leak, hidden-MCP-instructions, memory-as-authority, and forged / replayed webhooks |
 
 ---
 
 ## Product tiers
 
-| Tier | Size target | Purpose |
+| Tier | Size | Purpose |
 | --- | --- | --- |
-| **`crustcore` / `crustcore-nano`** | **< 800 kB** *(stretch < 600 kB)* | the trusted local verifier harness — the flagship |
+| **`crustcore` / `crustcore-nano`** | **412.0 KiB** | the trusted local verifier harness — the flagship |
 | `crustcore-net` | 3–8 MB | network + provider sidecar (Tokio/TLS/providers) — a *spawned* helper, never linked into nano |
 | `crustcore-daemon` | 4–10 MB | long-running runtime: Telegram/GitHub loops, supervision |
 | `crustcore-mcp` | 3–10 MB | MCP gateway/client/server + code-mode |
 | `crustcore-index` | 2–8 MB | repo memory / code intelligence |
 | `crustcore-full` | 8–25 MB+ | convenience all-in-one (never the size-claim binary) |
 
-**Track C ergonomics packs** layer on top, each non-nano and feature-gated for
-zero nano impact: `crustcore-flow` (typed workflow graph), `crustcore-session`
-(sessions / artifacts), `crustcore-toolkit` + `crustcore-tool-macro`
-(`#[crust_tool]`), `crustcore-index-rag` (RAG / vector stores),
-`crustcore-telemetry` (OTel / GenAI export), and `crustcore-dev` (a loopback-only
-developer / inspector UI). Plan: **[docs/roadmap-v0.2.md](./docs/roadmap-v0.2.md)**.
+Higher-level packs build on these — each non-nano and feature-gated, so they
+never touch the flagship binary: `crustcore-flow` (typed workflow graph),
+`crustcore-session` (sessions & artifacts), `crustcore-toolkit` +
+`crustcore-tool-macro` (the `#[crust_tool]` authoring macro), `crustcore-index-rag`
+(RAG & vector stores), `crustcore-telemetry` (OpenTelemetry / GenAI export), and
+`crustcore-dev` (a loopback developer / inspector UI).
 
 ---
 
@@ -243,8 +215,8 @@ developer / inspector UI). Plan: **[docs/roadmap-v0.2.md](./docs/roadmap-v0.2.md
 #    + forbidden-dependency check + the nano size gate.
 cargo xtask verify
 
-# 2. Build the flagship and print size vs. budget.
-cargo xtask size-check          # crustcore-nano: 412.0 KiB / 800 KiB (51.5%)
+# 2. Build the flagship and print its size.
+cargo xtask size-check          # crustcore-nano: 412.0 KiB
 
 # 3. Is this host ready to run verified tasks?
 cargo run -p crustcore --no-default-features --features nano -- doctor
@@ -257,7 +229,7 @@ crustcore run -dir . -goal "fix the failing test" -verify "cargo test"
 crustcore inspect ./events.log      # → INTACT, with a task summary
 crustcore export  ./events.log      # → JSONL
 
-# 6. Cut a checksummed release artifact (size-gated).
+# 6. Cut a checksummed release artifact.
 cargo xtask release                 # → SHA256SUMS + release-manifest.txt
 ```
 
@@ -303,15 +275,13 @@ tests, or both, and catalogued in **[INVARIANTS.md](./INVARIANTS.md)**.
 
 ---
 
-## Where to start
+## Documentation
 
 | If you are… | Read |
 | --- | --- |
-| An agent / subagent working on the project | **[CLAUDE.md](./CLAUDE.md)** — the single source of truth |
-| Understanding the full plan | [ROADMAP.md](./ROADMAP.md) (v0.1) · [docs/roadmap-v0.2.md](./docs/roadmap-v0.2.md) (v0.2+: light up · expand · compose) |
-| Wanting the rules that can never break | [INVARIANTS.md](./INVARIANTS.md) |
+| Building on or contributing to CrustCore | **[CLAUDE.md](./CLAUDE.md)** — the single source of truth · [CONTRIBUTING.md](./CONTRIBUTING.md) |
 | Reviewing security posture | [SECURITY.md](./SECURITY.md) · [THREAT_MODEL.md](./THREAT_MODEL.md) · [docs/security-model.md](./docs/security-model.md) |
-| Contributing | [CONTRIBUTING.md](./CONTRIBUTING.md) |
+| Wanting the rules that can never break | [INVARIANTS.md](./INVARIANTS.md) |
 | Going deep on a subsystem | [`docs/`](./docs) — [architecture](./docs/architecture.md) · [sandbox](./docs/sandbox.md) · [secrets](./docs/secrets.md) · [policy](./docs/policy.md) · [event log](./docs/event-log.md) · [receipts](./docs/receipts.md) · [releasing](./docs/releasing.md) |
 
 ---
