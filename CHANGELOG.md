@@ -45,10 +45,15 @@ agent/PR/role/size/invariant audit trail.
   the broker, never model/sandbox-visible; the struct is deliberately not `Debug`/`Clone`,
   invariant 3). 7 tests incl. a red-team (forged/near-miss/malformed signature, oversized
   body, empty delivery, replay all rejected; a hostile signed payload comes back inert +
-  redacted). No new deps. The live inbound **HTTP listener** + richer JSON field
-  extraction are `TODO(B2-webhook-live)`; the GitHub **App** JWT/RS256 token minting
-  (B2.1) needs an RSA signer and is `TODO(B2-gh-app-live)`. `docs/github.md` updated.
-  Daemon is a sidecar (not in nano); nano unchanged at 412.0 KiB.
+  redacted). **Adversarial review: 1 finding, confirmed and fixed** (the crypto crux —
+  HMAC, constant-time compare, fail-closed ordering, redaction — was confirmed correct;
+  the gap was that the replay guard stored the raw delivery id unbounded, the one
+  attacker-influenced value escaping the "bound before storing" rule → added a cheap
+  `MAX_DELIVERY_ID` length check before storage, giving the guard a true fixed memory
+  ceiling). No new deps. The live inbound **HTTP listener** + richer JSON field extraction
+  are `TODO(B2-webhook-live)`; the GitHub **App** JWT/RS256 token minting (B2.1) needs an
+  RSA signer and is `TODO(B2-gh-app-live)`. `docs/github.md` updated. Daemon is a sidecar
+  (not in nano); nano unchanged at 412.0 KiB.
 - **v0.3 B1-mcp-modes — MCP server mode.** The first Track-B (expand) surface: a new
   `crustcore-mcp::server` lets CrustCore **be** an MCP server (the inverse of the P13-net
   gateway, which gates CrustCore *calling* others). `McpServer` exposes a **curated**

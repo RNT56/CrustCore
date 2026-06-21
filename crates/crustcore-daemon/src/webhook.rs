@@ -26,8 +26,13 @@ use crustcore_types::{hmac_sha256, BoundedText};
 pub const MAX_WEBHOOK_BODY: usize = 1024 * 1024;
 /// Cap on the redacted payload snippet kept in an envelope (bounded context exposure).
 pub const MAX_WEBHOOK_SUMMARY: usize = 8 * 1024;
-/// How many recent delivery ids the replay guard remembers (bounded memory).
+/// How many recent delivery ids the replay guard remembers (bounded count).
 pub const MAX_SEEN_DELIVERIES: usize = 4096;
+/// Cap on a delivery id (bounded — real GitHub delivery ids are UUIDs). Bounding it
+/// before it is stored gives the replay guard a true fixed memory ceiling
+/// (`MAX_SEEN_DELIVERIES` × `MAX_DELIVERY_ID`), completing the "bound before storing"
+/// rule on the one attacker-influenced field (invariant 11, §6.5).
+pub const MAX_DELIVERY_ID: usize = 128;
 
 /// A raw inbound webhook request — exactly what the (deferred) live HTTP listener hands
 /// the verifier. GitHub computes [`signature`](Self::signature) as an HMAC-SHA256 over
@@ -51,6 +56,9 @@ pub enum WebhookReject {
     TooLarge,
     /// No delivery id — cannot dedup, so refuse.
     EmptyDelivery,
+    /// The delivery id exceeds [`MAX_DELIVERY_ID`] (so the replay guard cannot store an
+    /// unbounded string).
+    DeliveryIdTooLong,
     /// The HMAC signature is missing, malformed, or does not match (forgery/tamper).
     BadSignature,
     /// This delivery id was already processed (a replay).
@@ -125,6 +133,11 @@ impl WebhookVerifier {
         if req.delivery_id.is_empty() {
             return Err(WebhookReject::EmptyDelivery);
         }
+        // Bound the delivery id *before* it can be stored in the replay guard, so the
+        // guard's per-entry size — and thus its total memory — is a true fixed bound.
+        if req.delivery_id.len() > MAX_DELIVERY_ID {
+            return Err(WebhookReject::DeliveryIdTooLong);
+        }
         if !self.signature_ok(req.signature, req.body) {
             return Err(WebhookReject::BadSignature);
         }
@@ -139,7 +152,7 @@ impl WebhookVerifier {
         let payload = BoundedText::truncated(redacted.as_str(), MAX_WEBHOOK_SUMMARY);
         Ok(GitHubEnvelope {
             kind,
-            delivery_id: BoundedText::truncated(req.delivery_id, 128),
+            delivery_id: BoundedText::truncated(req.delivery_id, MAX_DELIVERY_ID),
             payload,
         })
     }
@@ -339,14 +352,27 @@ mod tests {
     }
 
     #[test]
-    fn empty_delivery_is_rejected() {
+    fn empty_or_overlong_delivery_is_rejected_before_storage() {
         let mut v = WebhookVerifier::new(SECRET.to_vec());
         let body = b"{}";
         let sig = sig_for(body);
+        // Empty delivery id → refused (cannot dedup).
         assert_eq!(
             v.verify(&req("issues", "", &sig, body), &Redactor::new()),
             Err(WebhookReject::EmptyDelivery)
         );
+        // An over-long delivery id is rejected before it can be stored unbounded in the
+        // replay guard — even before the HMAC is computed (denied cheaply).
+        let long = "d".repeat(MAX_DELIVERY_ID + 1);
+        assert_eq!(
+            v.verify(&req("issues", &long, &sig, body), &Redactor::new()),
+            Err(WebhookReject::DeliveryIdTooLong)
+        );
+        // A delivery id exactly at the cap is accepted.
+        let at_cap = "d".repeat(MAX_DELIVERY_ID);
+        assert!(v
+            .verify(&req("issues", &at_cap, &sig, body), &Redactor::new())
+            .is_ok());
     }
 
     #[test]
