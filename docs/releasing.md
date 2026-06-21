@@ -73,9 +73,9 @@ sha256sum -c SHA256SUMS                   # bytes match the signed digest
 **"Reproducible enough for audit"** means: the manifest records exactly what was
 built (package, profile, feature set) and its SHA-256, and the build is
 dependency-pinned by `Cargo.lock`, so an auditor can rebuild and compare the digest.
-A fully bit-reproducible build (pinned toolchain + `--remap-path-prefix` +
-`SOURCE_DATE_EPOCH`) is a stretch goal tracked in `ROADMAP.md`; the checksum +
-manifest + lockfile is the v0.1 audit floor.
+The deterministic-build pieces (`--remap-path-prefix` + `SOURCE_DATE_EPOCH` + a pinned
+toolchain) are now implemented and **same-machine verified** — see §9; the checksum +
+manifest + lockfile remain the audit floor.
 
 > The **GitHub Actions release workflow** that runs `cargo xtask release` and uploads
 > signed artifacts is an *irreversible, CI-credentialed* change (`CLAUDE.md` §6.3) and
@@ -208,3 +208,46 @@ bump `FRAME_VERSION` ship with explicit reader/writer handling and a regression 
 [ ] SHA256SUMS signed out-of-band (maintainer) and .sig published
 [ ] docs reflect the shipped surface
 ```
+
+## 9. Reproducible builds (v0.3 B6.2)
+
+The nano binary builds **deterministically**: on a fixed platform + toolchain, a
+rebuild reproduces the same bytes, so the released digest can be re-derived rather
+than taken on trust.
+
+`cargo xtask` builds nano under a **deterministic env** (`reproducible_env`):
+
+- `--remap-path-prefix` strips every machine-specific absolute prefix — the
+  workspace path, the cargo home (registry/source cache), and the rustup toolchain
+  sysroot — so the binary embeds none of the builder's `$HOME`/install paths;
+- `SOURCE_DATE_EPOCH=0` pins any embedded build timestamp;
+- `CARGO_INCREMENTAL=0` disables the non-deterministic incremental cache.
+
+Combined with the `nano` profile (`codegen-units = 1`, `lto = "fat"`,
+`strip = "symbols"`, `panic = "abort"`) and the pinned toolchain
+(`rust-toolchain.toml`), the build is deterministic, and `size-check`, `release`,
+and `reproduce` all measure the **same** binary.
+
+**Verify it:**
+
+```sh
+cargo xtask reproduce   # builds nano twice into independent target dirs; the
+                        # two SHA-256 digests must match, else it fails
+```
+
+**What `reproduce` proves, and what it doesn't.** It runs two builds on the *same
+machine* (different target dirs), so it verifies **same-machine determinism** — the
+build does not depend on the incremental cache or the target directory. Full
+**cross-machine** bit-identity additionally requires that the *exact same* compiler
+build is used (note `rust-toolchain.toml` pins the `stable` **channel**, not a fixed
+version — a `1.x.y` pin is the remaining step) and the same target triple (the nano
+size claim is for `x86_64-unknown-linux-gnu`). With those held equal, the path
+remapping above removes the known machine-specific variance; cross-machine parity is
+not yet machine-independently verified. So: a maintainer or auditor on the same
+platform/toolchain can rebuild a tagged release and match the signed `SHA256SUMS` —
+moving from "trust the signer" toward "verify the bytes."
+
+(The signed GitHub Actions release workflow and the `cargo-bloat`/fuzz CI jobs
+(B6.1/B6.3) edit `.github/workflows/**` — an irreversible, CI-credentialed,
+**maintainer-owned** step (`CLAUDE.md` §6.3) — and are wired by the maintainer, not
+the agent.)

@@ -8,14 +8,21 @@
 //! - `size-check` — build `crustcore-nano` and fail if it exceeds the budget
 //!   (invariant 19, `docs/nano-size-budget.md`).
 //! - `forbidden-deps` — fail if a banned crate is linked into the nano build.
+//! - `release` — build nano, enforce size, emit `SHA256SUMS` + a manifest.
+//! - `reproduce` — build nano twice (independent target dirs) and verify the digest
+//!   reproduces bit-for-bit (B6.2 reproducible builds).
 //! - `fmt` / `clippy` / `test` / `nano-build` — individual steps.
+//!
+//! The nano build uses a deterministic env (path remapping, fixed `SOURCE_DATE_EPOCH`,
+//! no incremental) so `size-check`, `release`, and `reproduce` all measure the **same**
+//! reproducible binary (`reproducible_env`).
 //!
 //! This runner is std-only so it works in minimal/offline environments. Where a
 //! step needs network (e.g. `cargo bloat`), it is best-effort and skipped with a
 //! warning if unavailable.
 #![forbid(unsafe_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 /// Nano size budget in bytes (800 KiB hard target; stretch 600 KiB).
@@ -56,6 +63,7 @@ fn main() -> ExitCode {
         "nano-build" => nano_build().map(|_| ()),
         "size-check" => size_check(),
         "release" => release(),
+        "reproduce" => reproduce(),
         "forbidden-deps" => forbidden_deps(),
         "help" | "--help" | "-h" => {
             print_help();
@@ -89,6 +97,7 @@ fn print_help() {
          \x20 nano-build      build crustcore-nano (profile nano)\n\
          \x20 size-check      build nano and enforce the size budget\n\
          \x20 release         build nano, enforce size, emit SHA256SUMS + manifest\n\
+         \x20 reproduce       build nano twice and verify the digest reproduces\n\
          \x20 forbidden-deps  fail if a banned crate is linked into nano\n"
     );
 }
@@ -250,7 +259,23 @@ fn test() -> Result<(), String> {
 
 /// Builds the nano binary and returns its path.
 fn nano_build() -> Result<PathBuf, String> {
-    run(
+    nano_build_into(None)
+}
+
+/// Builds the nano binary with the deterministic (reproducible) env. With `target_dir`
+/// set, builds into that `CARGO_TARGET_DIR` (so [`reproduce`] can build twice
+/// independently); otherwise the default `target/`.
+fn nano_build_into(target_dir: Option<&Path>) -> Result<PathBuf, String> {
+    let root = workspace_root();
+    let mut envs = reproducible_env(&root);
+    let out_root = match target_dir {
+        Some(td) => {
+            envs.push(("CARGO_TARGET_DIR".to_string(), td.display().to_string()));
+            td.to_path_buf()
+        }
+        None => root.join("target"),
+    };
+    run_env(
         "cargo",
         &[
             "build",
@@ -262,8 +287,107 @@ fn nano_build() -> Result<PathBuf, String> {
             "--features",
             "nano",
         ],
+        &envs,
     )?;
-    Ok(workspace_root().join("target/nano/crustcore"))
+    Ok(out_root.join("nano/crustcore"))
+}
+
+/// The deterministic build env for reproducible nano builds (B6.2): strip absolute build
+/// paths so the binary never embeds the builder's workspace path or cargo home
+/// (`--remap-path-prefix`), pin the build timestamp (`SOURCE_DATE_EPOCH`), and disable the
+/// non-deterministic incremental cache. Combined with the nano profile
+/// (`codegen-units=1`, `lto=fat`, `strip`, `panic=abort`) and the pinned toolchain
+/// (`rust-toolchain.toml`), the nano binary builds reproducibly — verify with
+/// `cargo xtask reproduce`.
+fn reproducible_env(root: &Path) -> Vec<(String, String)> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let cargo_home = std::env::var("CARGO_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            if home.is_empty() {
+                String::new()
+            } else {
+                format!("{home}/.cargo")
+            }
+        });
+    let rustup_home = std::env::var("RUSTUP_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            if home.is_empty() {
+                String::new()
+            } else {
+                format!("{home}/.rustup")
+            }
+        });
+    // Strip every absolute path that would otherwise embed a machine-specific prefix:
+    // the workspace, the cargo registry/source cache, and the rustup toolchain sysroot
+    // (whose std source paths leak into a build). Remapping all three is what lets a
+    // build on a *different* machine (same platform + toolchain) reproduce the bytes.
+    let mut rustflags = format!("--remap-path-prefix={}=/crustcore", root.display());
+    if !cargo_home.is_empty() {
+        rustflags.push_str(&format!(" --remap-path-prefix={cargo_home}=/cargo"));
+    }
+    if !rustup_home.is_empty() {
+        rustflags.push_str(&format!(" --remap-path-prefix={rustup_home}=/rustup"));
+    }
+    vec![
+        ("RUSTFLAGS".to_string(), rustflags),
+        ("SOURCE_DATE_EPOCH".to_string(), "0".to_string()),
+        ("CARGO_INCREMENTAL".to_string(), "0".to_string()),
+    ]
+}
+
+/// Like [`run`], but with extra environment variables (for the deterministic build).
+fn run_env(program: &str, args: &[&str], envs: &[(String, String)]) -> Result<(), String> {
+    println!("  $ {program} {}", args.join(" "));
+    let mut cmd = Command::new(program);
+    cmd.args(args).current_dir(workspace_root());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let status = cmd
+        .status()
+        .map_err(|e| format!("failed to spawn `{program}`: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{program} {}` exited with {status}",
+            args.join(" ")
+        ))
+    }
+}
+
+/// Verifies the nano build is **bit-reproducible** (B6.2): builds the nano binary twice
+/// into two independent target directories with the deterministic env, and asserts the
+/// two SHA-256 digests match. A mismatch means a non-determinism source leaked into the
+/// build (e.g. an unmapped absolute path).
+fn reproduce() -> Result<(), String> {
+    let base = std::env::temp_dir();
+    let dir_a = base.join("crustcore-repro-a");
+    let dir_b = base.join("crustcore-repro-b");
+    println!("  building nano twice (independent target dirs) to compare digests…");
+    let digest_a = digest_of(&nano_build_into(Some(&dir_a))?)?;
+    let digest_b = digest_of(&nano_build_into(Some(&dir_b))?)?;
+    let _ = std::fs::remove_dir_all(&dir_a);
+    let _ = std::fs::remove_dir_all(&dir_b);
+    if digest_a == digest_b {
+        println!("  nano build is reproducible — sha256 {digest_a}");
+        Ok(())
+    } else {
+        Err(format!(
+            "nano build is NOT reproducible:\n    build A: {digest_a}\n    build B: {digest_b}\n  \
+             a non-determinism source leaked in (check the --remap-path-prefix coverage)."
+        ))
+    }
+}
+
+/// The lowercase-hex SHA-256 of a file's contents.
+fn digest_of(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    Ok(hex_lower(&crustcore_types::hash::sha256(&bytes)))
 }
 
 /// Enforces the nano size budget (invariant 19).
