@@ -233,10 +233,13 @@ crustcore export  ./events.log      # → JSONL
 cargo xtask release                 # → SHA256SUMS + release-manifest.txt
 ```
 
-The workspace is **std-only and builds offline**; heavy dependencies live only in
-the sidecar packs. Requires a stable Rust toolchain (≥ 1.85) with `rustfmt` and
-`clippy`, pinned in [`rust-toolchain.toml`](./rust-toolchain.toml). Release &
-operations: **[docs/releasing.md](./docs/releasing.md)**.
+Runs on **Linux and macOS** — sandboxed execution uses `bubblewrap` on Linux and
+`sandbox-exec` (Seatbelt) on macOS, with the same deny-all-egress, writes-confined-to-
+the-worktree posture; the nano build is reproducible on both. The workspace is
+**std-only and builds offline**; heavy dependencies live only in the sidecar packs.
+Requires a stable Rust toolchain (≥ 1.85) with `rustfmt` and `clippy`, pinned in
+[`rust-toolchain.toml`](./rust-toolchain.toml). Release & operations:
+**[docs/releasing.md](./docs/releasing.md)**.
 
 ---
 
