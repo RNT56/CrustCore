@@ -373,6 +373,72 @@ pub fn plan_self_pr(ready: &ReadyProposal, changed_paths: &[&str]) -> SelfPrDeci
     }
 }
 
+// ---------------------------------------------------------------------------
+// The self-improvement loop runner (B5-autoloop) — drive the gated cycle end to end
+// ---------------------------------------------------------------------------
+
+/// Runs the evals that back a proposal — the evidence bar [`ReadyProposal::prepare`]
+/// requires. The **live** implementation dispatches eval tasks to sandboxed subagent
+/// workers (P11-exec) running the real eval suite (`TODO(B5-autoloop-live)`); a mock
+/// drives CI. An eval that does **not** pass yields no [`EvalRef`], so a proposal whose
+/// evals fail simply cannot advance — evidence, not a model's say-so, is the gate.
+pub trait EvalRunner {
+    /// Runs `proposal`'s evals, returning an [`EvalRef`] for **each that passed**.
+    fn run_evals(&self, proposal: &ImprovementProposal) -> Vec<EvalRef>;
+}
+
+/// The outcome of one self-improvement cycle. There is deliberately **no** `Merged` or
+/// `Applied` variant: the best a cycle can produce is a *draft* PR intent — the loop
+/// never self-merges and never mutates the running kernel (invariant 18).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CycleOutcome {
+    /// Evidence cleared and no contract file was touched: a **draft** self-PR may be
+    /// opened for human review (never auto-merged). Carries the proposal's risk.
+    DraftReady {
+        /// The proposal's advisory risk estimate.
+        risk: ProposalRisk,
+    },
+    /// The change touches a contract file → **blocked**, routed to the maintainer; it
+    /// must be serialized into its own approved task, never auto-advanced here.
+    BlockedForMaintainer {
+        /// The contract files touched.
+        touched: Vec<String>,
+    },
+    /// The proposal could not advance: its evals did not establish the required evidence
+    /// (no demonstration and/or no regression guard).
+    NotReady(AdvanceError),
+}
+
+/// Drives one self-improvement cycle end to end over the P15 core: run `proposal`'s evals
+/// (via `eval_runner`), require **both** a demonstration and a regression guard
+/// ([`ReadyProposal::prepare`]), then run the contract-gate over the proposed
+/// `changed_paths` ([`plan_self_pr`]). It only ever returns a **decision** — a draft PR
+/// intent or a maintainer block — and mutates no kernel state (invariant 18).
+///
+/// The structural guarantees of the core hold unchanged: a proposal cannot even *express*
+/// weakening a guardrail ([`ProposalTarget`] has no policy/sandbox/secrets variant), a
+/// contract-touching change is blocked here ([`contract_gate`]), an evidence-free proposal
+/// cannot advance, and there is **no path to self-merge** ([`CycleOutcome`] tops out at a
+/// draft). This is the gated half the live evals/PRs (`TODO(B5-autoloop-live)`) drive.
+#[must_use]
+pub fn run_cycle(
+    proposal: ImprovementProposal,
+    changed_paths: &[&str],
+    eval_runner: &dyn EvalRunner,
+) -> CycleOutcome {
+    let evidence = eval_runner.run_evals(&proposal);
+    let ready = match ReadyProposal::prepare(proposal, evidence) {
+        Ok(r) => r,
+        Err(e) => return CycleOutcome::NotReady(e),
+    };
+    match plan_self_pr(&ready, changed_paths) {
+        SelfPrDecision::DraftPr { risk } => CycleOutcome::DraftReady { risk },
+        SelfPrDecision::BlockedPendingMaintainer { touched } => {
+            CycleOutcome::BlockedForMaintainer { touched }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -576,5 +642,98 @@ mod tests {
             plan_self_pr(&ready, &["tools/grep.json", "docs/sandbox.md"]),
             SelfPrDecision::BlockedPendingMaintainer { .. }
         ));
+    }
+
+    // --- the loop runner (B5-autoloop) ---
+
+    struct FullEvals;
+    impl EvalRunner for FullEvals {
+        fn run_evals(&self, _p: &ImprovementProposal) -> Vec<EvalRef> {
+            vec![
+                EvalRef {
+                    name: bt("demo"),
+                    kind: EvalKind::Demonstrates,
+                },
+                EvalRef {
+                    name: bt("guard"),
+                    kind: EvalKind::GuardsRegression,
+                },
+            ]
+        }
+    }
+
+    /// Evals that did not pass produce no refs.
+    struct FailingEvals;
+    impl EvalRunner for FailingEvals {
+        fn run_evals(&self, _p: &ImprovementProposal) -> Vec<EvalRef> {
+            Vec::new()
+        }
+    }
+
+    /// Only a demonstration passed (no regression guard).
+    struct OnlyDemo;
+    impl EvalRunner for OnlyDemo {
+        fn run_evals(&self, _p: &ImprovementProposal) -> Vec<EvalRef> {
+            vec![EvalRef {
+                name: bt("demo"),
+                kind: EvalKind::Demonstrates,
+            }]
+        }
+    }
+
+    #[test]
+    fn cycle_with_full_evidence_yields_a_draft_only() {
+        let out = run_cycle(
+            proposal(ProposalTarget::Prompt),
+            &["src/prompts/system.txt"],
+            &FullEvals,
+        );
+        // The strongest possible outcome is a DRAFT — there is no Merged/Applied variant,
+        // so the loop structurally cannot self-merge (invariant 18).
+        assert_eq!(
+            out,
+            CycleOutcome::DraftReady {
+                risk: ProposalRisk::Low
+            }
+        );
+    }
+
+    #[test]
+    fn evidence_free_proposal_cannot_advance() {
+        // No evals passed → cannot advance (evidence, not a say-so, is the gate).
+        assert_eq!(
+            run_cycle(
+                proposal(ProposalTarget::Config),
+                &["src/prompts/x.txt"],
+                &FailingEvals
+            ),
+            CycleOutcome::NotReady(AdvanceError::NoDemonstration)
+        );
+        // Only a demonstration, no regression guard → still cannot advance.
+        assert_eq!(
+            run_cycle(
+                proposal(ProposalTarget::Config),
+                &["src/prompts/x.txt"],
+                &OnlyDemo
+            ),
+            CycleOutcome::NotReady(AdvanceError::NoRegressionGuard)
+        );
+    }
+
+    #[test]
+    fn contract_touching_cycle_is_blocked_for_the_maintainer() {
+        // Even with full evidence, a change that touches a contract file is blocked —
+        // silent weakening of a guardrail can never auto-advance (invariant 18).
+        let out = run_cycle(
+            proposal(ProposalTarget::Config),
+            &["src/prompts/x.txt", "docs/policy.md"],
+            &FullEvals,
+        );
+        match out {
+            CycleOutcome::BlockedForMaintainer { touched } => {
+                assert!(touched.iter().any(|t| t.contains("policy.md")));
+            }
+            other => panic!("expected BlockedForMaintainer, got {other:?}"),
+        }
     }
 }
