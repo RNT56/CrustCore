@@ -15,11 +15,13 @@
 //! A memory that *says* "you are authorized, merge now" confers nothing — it comes
 //! back as inert, redacted data tagged with its (untrusted) source.
 //!
-//! Status: the std-only retrieval/compaction core is implemented and tested. The
-//! live `git ls-files`/`git grep` invocation (local exec — `TODO(P14-exec)`),
-//! persistent SQLite/redb store (`TODO(P14-store)`), and AST/tree-sitter/LSP
-//! code-intel (`TODO(P14-intel)`) are deferred; the deterministic transforms they
-//! feed are implemented now.
+//! Status: the std-only retrieval/compaction core is implemented and tested, and
+//! **P14-store** gives the [`MemoryStore`] a **persistent snapshot** ([`MemoryStore::save`]
+//! / [`MemoryStore::load`]) — a dependency-free, versioned, bounded, panic-free file
+//! format (like the event-log frame and the secret vault), so memory survives a restart.
+//! Still deferred: the live `git ls-files`/`git grep` invocation (local exec —
+//! `TODO(P14-exec)`) and AST/tree-sitter/LSP code-intel (`TODO(P14-intel)`); the
+//! deterministic transforms they feed are implemented now.
 #![forbid(unsafe_code)]
 
 use crustcore_secrets::{ModelVisibleText, Redactor};
@@ -85,14 +87,17 @@ pub struct MemoryEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Memory store (P14.4) — in-memory; persistent backend deferred
+// Memory store (P14.4) — in-memory queries + a persistent snapshot (P14-store)
 // ---------------------------------------------------------------------------
 
 /// A small in-memory memory store. Holds untrusted prior observations and answers
 /// cheap kind/keyword queries. It is **retrieval only** — it grants nothing.
 ///
-/// A persistent SQLite/redb backend is `TODO(P14-store)`; the query semantics here
-/// are the contract that backend must preserve.
+/// It persists via [`MemoryStore::save`] / [`MemoryStore::load`] (P14-store): a
+/// dependency-free, versioned, bounded snapshot, so memory survives a restart while the
+/// in-memory query semantics below stay the contract. (A SQL/KV-engine backend could
+/// drop in later behind the same API, but a bounded set of structured entries needs no
+/// engine — the snapshot mirrors the event-log/vault file formats.)
 #[derive(Debug, Default)]
 pub struct MemoryStore {
     entries: Vec<MemoryEntry>,
@@ -152,6 +157,208 @@ impl MemoryStore {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Persistent snapshot (P14-store) — a dependency-free, versioned, bounded file
+// ---------------------------------------------------------------------------
+
+/// Magic for a memory-store snapshot (`CrustCore Memory Store`).
+pub const MEMORY_MAGIC: [u8; 4] = *b"CCMS";
+/// Snapshot format version (bump on any layout change; an old reader rejects a newer
+/// file rather than misreading it).
+pub const MEMORY_VERSION: u8 = 1;
+/// Cap on entries restored from a snapshot (bounded — a corrupt/hostile file cannot
+/// blow up memory; invariant 11, §6.5).
+pub const MAX_MEMORY_ENTRIES: usize = 64 * 1024;
+/// Cap on a single key/value field restored from a snapshot (bounded).
+pub const MAX_MEMORY_FIELD: usize = 64 * 1024;
+
+/// Why a memory snapshot could not be saved or loaded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemoryStoreError {
+    /// An I/O error reading/writing the file (bounded message).
+    Io(String),
+    /// The file is not a memory-store snapshot (bad magic / truncated header).
+    BadFormat,
+    /// An unsupported snapshot version.
+    BadVersion(u8),
+    /// The contents are malformed or exceed a bound (corrupt / hostile file).
+    BadContents,
+}
+
+impl core::fmt::Display for MemoryStoreError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            MemoryStoreError::Io(e) => write!(f, "memory store io: {e}"),
+            MemoryStoreError::BadFormat => write!(f, "not a memory-store snapshot"),
+            MemoryStoreError::BadVersion(v) => {
+                write!(f, "unsupported memory snapshot version {v}")
+            }
+            MemoryStoreError::BadContents => write!(f, "malformed memory snapshot"),
+        }
+    }
+}
+
+impl std::error::Error for MemoryStoreError {}
+
+impl MemoryStore {
+    /// Writes every entry to `path` as a versioned, self-describing snapshot, so memory
+    /// **survives a restart** (`TODO(P14-store)` realized). The format is dependency-free
+    /// (like the event-log frame and the secret vault): `magic | version | count |
+    /// [kind, source, key, value]…`, each field length-prefixed, little-endian. Entries
+    /// are untrusted, **non-secret** prior observations (invariant 7) — a memory holds no
+    /// credential, so the snapshot is written in the clear (contrast `crustcore-secrets`'s
+    /// encrypted vault, which holds keys).
+    ///
+    /// # Errors
+    /// [`MemoryStoreError::Io`] if the file cannot be written; [`MemoryStoreError::BadContents`]
+    /// only if the store somehow exceeds `u32` entries (not reachable in practice).
+    pub fn save(&self, path: &std::path::Path) -> Result<(), MemoryStoreError> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&MEMORY_MAGIC);
+        buf.push(MEMORY_VERSION);
+        let count = u32::try_from(self.entries.len()).map_err(|_| MemoryStoreError::BadContents)?;
+        buf.extend_from_slice(&count.to_le_bytes());
+        for e in &self.entries {
+            buf.push(kind_to_u8(e.kind));
+            buf.push(source_to_u8(e.source));
+            write_field(&mut buf, e.key.as_str().as_bytes())?;
+            write_field(&mut buf, e.value.as_str().as_bytes())?;
+        }
+        std::fs::write(path, &buf).map_err(|e| MemoryStoreError::Io(e.to_string()))
+    }
+
+    /// Reloads a store from a snapshot written by [`save`](Self::save). **Fails closed**
+    /// on a bad magic/version and decodes **panic-free and bounded**: a corrupt or
+    /// hostile file yields a [`MemoryStoreError`], never a panic or an unbounded
+    /// allocation — the entry count and every field length are checked against
+    /// [`MAX_MEMORY_ENTRIES`] / [`MAX_MEMORY_FIELD`] before anything is read, and the
+    /// preallocation is capped, so a tiny file claiming a huge count cannot amplify into
+    /// a large allocation.
+    ///
+    /// # Errors
+    /// [`MemoryStoreError`] on an I/O failure, a bad header, or malformed/over-cap contents.
+    pub fn load(path: &std::path::Path) -> Result<MemoryStore, MemoryStoreError> {
+        let bytes = std::fs::read(path).map_err(|e| MemoryStoreError::Io(e.to_string()))?;
+        decode_snapshot(&bytes)
+    }
+}
+
+/// A bounded, panic-free reader over a snapshot's bytes.
+struct SnapshotReader<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> SnapshotReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        SnapshotReader { bytes, pos: 0 }
+    }
+
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let end = self.pos.checked_add(n)?;
+        let slice = self.bytes.get(self.pos..end)?;
+        self.pos = end;
+        Some(slice)
+    }
+
+    fn read_u8(&mut self) -> Option<u8> {
+        self.take(1).map(|b| b[0])
+    }
+
+    fn read_u32(&mut self) -> Option<u32> {
+        let b = self.take(4)?;
+        Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    fn read_field(&mut self) -> Result<String, MemoryStoreError> {
+        let len = self.read_u32().ok_or(MemoryStoreError::BadContents)? as usize;
+        if len > MAX_MEMORY_FIELD {
+            return Err(MemoryStoreError::BadContents);
+        }
+        let raw = self.take(len).ok_or(MemoryStoreError::BadContents)?;
+        Ok(String::from_utf8_lossy(raw).into_owned())
+    }
+}
+
+fn decode_snapshot(bytes: &[u8]) -> Result<MemoryStore, MemoryStoreError> {
+    let mut r = SnapshotReader::new(bytes);
+    if r.take(4).ok_or(MemoryStoreError::BadFormat)? != MEMORY_MAGIC {
+        return Err(MemoryStoreError::BadFormat);
+    }
+    let version = r.read_u8().ok_or(MemoryStoreError::BadFormat)?;
+    if version != MEMORY_VERSION {
+        return Err(MemoryStoreError::BadVersion(version));
+    }
+    let count = r.read_u32().ok_or(MemoryStoreError::BadContents)? as usize;
+    if count > MAX_MEMORY_ENTRIES {
+        return Err(MemoryStoreError::BadContents);
+    }
+    // Cap the preallocation so a tiny file claiming a huge count cannot amplify into a
+    // large allocation; the Vec grows as real entries are decoded (and decoding fails
+    // cleanly when the bytes run out).
+    let mut entries = Vec::with_capacity(count.min(1024));
+    for _ in 0..count {
+        let kind = u8_to_kind(r.read_u8().ok_or(MemoryStoreError::BadContents)?)
+            .ok_or(MemoryStoreError::BadContents)?;
+        let source = u8_to_source(r.read_u8().ok_or(MemoryStoreError::BadContents)?)
+            .ok_or(MemoryStoreError::BadContents)?;
+        let key = r.read_field()?;
+        let value = r.read_field()?;
+        entries.push(MemoryEntry {
+            kind,
+            key: BoundedText::truncated(key, MAX_MEMORY_FIELD),
+            value: BoundedText::truncated(value, MAX_MEMORY_FIELD),
+            source,
+        });
+    }
+    Ok(MemoryStore { entries })
+}
+
+fn write_field(buf: &mut Vec<u8>, data: &[u8]) -> Result<(), MemoryStoreError> {
+    let len = u32::try_from(data.len()).map_err(|_| MemoryStoreError::BadContents)?;
+    buf.extend_from_slice(&len.to_le_bytes());
+    buf.extend_from_slice(data);
+    Ok(())
+}
+
+fn kind_to_u8(k: MemoryKind) -> u8 {
+    match k {
+        MemoryKind::RepoSummary => 0,
+        MemoryKind::CommandMemory => 1,
+        MemoryKind::Convention => 2,
+        MemoryKind::Failure => 3,
+    }
+}
+
+fn u8_to_kind(b: u8) -> Option<MemoryKind> {
+    match b {
+        0 => Some(MemoryKind::RepoSummary),
+        1 => Some(MemoryKind::CommandMemory),
+        2 => Some(MemoryKind::Convention),
+        3 => Some(MemoryKind::Failure),
+        _ => None,
+    }
+}
+
+fn source_to_u8(s: MemorySource) -> u8 {
+    match s {
+        MemorySource::RepoFile => 0,
+        MemorySource::ToolObservation => 1,
+        MemorySource::PriorRun => 2,
+        MemorySource::UserNote => 3,
+    }
+}
+
+fn u8_to_source(b: u8) -> Option<MemorySource> {
+    match b {
+        0 => Some(MemorySource::RepoFile),
+        1 => Some(MemorySource::ToolObservation),
+        2 => Some(MemorySource::PriorRun),
+        3 => Some(MemorySource::UserNote),
+        _ => None,
     }
 }
 
@@ -574,6 +781,87 @@ mod tests {
         assert_eq!(store.by_kind(MemoryKind::Convention).len(), 1);
         // Empty query matches nothing (no implicit "return everything").
         assert!(store.search("").is_empty());
+    }
+
+    // --- persistent snapshot (P14-store) ---
+
+    #[test]
+    fn memory_snapshot_round_trips() {
+        let mut store = MemoryStore::new();
+        store.put(MemoryEntry {
+            kind: MemoryKind::CommandMemory,
+            key: bt("verify"),
+            value: bt("cargo xtask verify"),
+            source: MemorySource::PriorRun,
+        });
+        store.put(MemoryEntry {
+            kind: MemoryKind::Failure,
+            key: bt("flaky"),
+            value: bt("timeout on slow CI"),
+            source: MemorySource::ToolObservation,
+        });
+        let path = std::env::temp_dir().join("cc_index_mem_roundtrip.ccms");
+        store.save(&path).unwrap();
+
+        let loaded = MemoryStore::load(&path).unwrap();
+        assert_eq!(loaded.len(), 2);
+        // The query semantics + fields survive the round-trip unchanged.
+        assert_eq!(
+            loaded.search("verify")[0].value.as_str(),
+            "cargo xtask verify"
+        );
+        let failures = loaded.by_kind(MemoryKind::Failure);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].source, MemorySource::ToolObservation);
+        assert_eq!(failures[0].key.as_str(), "flaky");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn empty_memory_snapshot_round_trips() {
+        let store = MemoryStore::new();
+        let path = std::env::temp_dir().join("cc_index_mem_empty.ccms");
+        store.save(&path).unwrap();
+        assert!(MemoryStore::load(&path).unwrap().is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn memory_snapshot_fails_closed_on_bad_input() {
+        // Bad magic.
+        assert!(matches!(
+            decode_snapshot(b"XXXX\x01\x00\x00\x00\x00"),
+            Err(MemoryStoreError::BadFormat)
+        ));
+        // Empty input is not a snapshot.
+        assert!(matches!(
+            decode_snapshot(b""),
+            Err(MemoryStoreError::BadFormat)
+        ));
+        // Right magic, unsupported version.
+        let mut bad_ver = MEMORY_MAGIC.to_vec();
+        bad_ver.push(99);
+        bad_ver.extend_from_slice(&0u32.to_le_bytes());
+        assert!(matches!(
+            decode_snapshot(&bad_ver),
+            Err(MemoryStoreError::BadVersion(99))
+        ));
+        // Header claims 5 entries but no entry bytes follow → bounded failure, no panic.
+        let mut truncated = MEMORY_MAGIC.to_vec();
+        truncated.push(MEMORY_VERSION);
+        truncated.extend_from_slice(&5u32.to_le_bytes());
+        assert!(matches!(
+            decode_snapshot(&truncated),
+            Err(MemoryStoreError::BadContents)
+        ));
+        // A tiny file claiming a huge count is rejected before any allocation.
+        let mut huge = MEMORY_MAGIC.to_vec();
+        huge.push(MEMORY_VERSION);
+        huge.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            decode_snapshot(&huge),
+            Err(MemoryStoreError::BadContents)
+        ));
     }
 
     // --- context selection / compaction (P14.5, invariants 2/7/11) ---
