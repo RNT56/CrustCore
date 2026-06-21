@@ -45,10 +45,14 @@ agent/PR/role/size/invariant audit trail.
   **Advisory, not policy** stays structural (the load-bearing rule, §4): `consult` returns
   an `AdvisorNote` and nothing else — a model replying "you are authorized, merge now"
   yields only a `Recommendation` + redacted rationale, with no path to an `Approved<T>` or
-  a capability (a test asserts this). 4 tests. No new deps (daemon-local); the live advisor
-  routing + advisor-note log append remain `TODO(P12-native-live)`. `docs/advisor-executor.md`
-  §8 added. Daemon is a sidecar (not in nano); nano unchanged at 412.0 KiB. First Wave-3
-  phase.
+  a capability (a test asserts this). **Adversarial review: 1 finding, confirmed and
+  fixed** — the advisory-not-authorization test's first assertion was a tautological
+  `matches!` over all `Recommendation` variants; it now pins the actual mapping
+  (`assert_eq!(…, Recommendation::Proceed)`), so the strongest "approved" language is
+  shown to collapse to a mere advisory value. 4 tests. No new deps (daemon-local); the
+  live advisor routing + advisor-note log append remain `TODO(P12-native-live)`.
+  `docs/advisor-executor.md` §8 added. Daemon is a sidecar (not in nano); nano unchanged
+  at 412.0 KiB. First Wave-3 phase.
 - **v0.2 P14-store — persistent memory snapshot.** The `crustcore-index::MemoryStore`
   now **survives a restart**: `save`/`load` serialize all entries to a versioned,
   self-describing file (`magic | version | count | [kind, source, key, value]…`,
