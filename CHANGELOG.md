@@ -28,6 +28,15 @@ agent/PR/role/size/invariant audit trail.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.4.0] - 2026-06-21
+
+First tagged release. Bundles the trusted verifier core, the live capability
+surfaces, and the higher-level ergonomics packs accumulated since the project
+began. The flagship `crustcore-nano` binary is **412.0 KiB** stripped and the
+build is reproducible (`cargo xtask reproduce`).
+
 ### Added
 
 - **v0.4 Track C C7-devui — `crustcore-dev`: a loopback-only, read-only-by-default local

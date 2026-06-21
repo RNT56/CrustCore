@@ -178,7 +178,7 @@ dependencies = [
 
 [[package]]
 name = "crustcore"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-backend",
  "crustcore-cli",
@@ -200,7 +200,7 @@ dependencies = [
 
 [[package]]
 name = "crustcore-backend"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-path",
  "crustcore-policy",
@@ -213,14 +213,14 @@ dependencies = [
 
 [[package]]
 name = "crustcore-cli"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-types",
 ]
 
 [[package]]
 name = "crustcore-daemon"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-kernel",
  "crustcore-net",
@@ -231,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "crustcore-dev"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "axum",
  "crustcore-daemon",
@@ -250,7 +250,7 @@ dependencies = [
 
 [[package]]
 name = "crustcore-eval"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-backend",
  "crustcore-daemon",
@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "crustcore-eventlog"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-kernel",
  "crustcore-types",
@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "crustcore-flow"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-backend",
  "crustcore-daemon",
@@ -293,7 +293,7 @@ dependencies = [
 
 [[package]]
 name = "crustcore-full"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-backend",
  "crustcore-daemon",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "crustcore-index"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-secrets",
  "crustcore-types",
@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "crustcore-index-rag"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-index",
  "crustcore-secrets",
@@ -331,7 +331,7 @@ dependencies = [
 
 [[package]]
 name = "crustcore-kernel"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-policy",
  "crustcore-types",
@@ -339,7 +339,7 @@ dependencies = [
 
 [[package]]
 name = "crustcore-mcp"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-receipts",
  "crustcore-secrets",
@@ -349,7 +349,7 @@ dependencies = [
 
 [[package]]
 name = "crustcore-net"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-netproto",
  "crustcore-types",
@@ -359,21 +359,21 @@ dependencies = [
 
 [[package]]
 name = "crustcore-netproto"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-types",
 ]
 
 [[package]]
 name = "crustcore-path"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-types",
 ]
 
 [[package]]
 name = "crustcore-policy"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-path",
  "crustcore-types",
@@ -381,21 +381,21 @@ dependencies = [
 
 [[package]]
 name = "crustcore-receipts"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-types",
 ]
 
 [[package]]
 name = "crustcore-runner"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-types",
 ]
 
 [[package]]
 name = "crustcore-sandbox"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-path",
  "crustcore-policy",
@@ -405,7 +405,7 @@ dependencies = [
 
 [[package]]
 name = "crustcore-secrets"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "aes-gcm",
  "crustcore-types",
@@ -415,7 +415,7 @@ dependencies = [
 
 [[package]]
 name = "crustcore-session"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-eventlog",
  "crustcore-index",
@@ -429,7 +429,7 @@ dependencies = [
 
 [[package]]
 name = "crustcore-telemetry"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-eventlog",
  "crustcore-kernel",
@@ -440,7 +440,7 @@ dependencies = [
 
 [[package]]
 name = "crustcore-tool-macro"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-policy",
  "crustcore-receipts",
@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "crustcore-toolkit"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-policy",
  "crustcore-receipts",
@@ -465,11 +465,11 @@ dependencies = [
 
 [[package]]
 name = "crustcore-types"
-version = "0.1.0"
+version = "0.4.0"
 
 [[package]]
 name = "crustcore-worktree"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-path",
  "crustcore-policy",
@@ -1545,7 +1545,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "crustcore-types",
 ]
