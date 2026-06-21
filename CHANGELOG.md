@@ -28,7 +28,14 @@ agent/PR/role/size/invariant audit trail.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **CI now runs on Linux and macOS.** The `verify` job is a matrix over
+  `ubuntu-latest` + `macos-latest` (`fail-fast: false`), so `cargo xtask verify`
+  (fmt, clippy `-D warnings`, the full test suite, forbidden-deps, the size gate)
+  runs on both — and the macOS live `sandbox-exec` confinement tests run in CI. The
+  bubblewrap install and the `cargo-bloat` size report stay Linux-only (macOS uses
+  the built-in `sandbox-exec`; the flagship size claim is the Linux nano binary).
 
 ## [0.4.0] - 2026-06-21
 
