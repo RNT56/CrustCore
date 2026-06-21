@@ -429,3 +429,32 @@ failure modes the maintainer agent must internalize:
 - **`cargo xtask verify` (§1):** every PR is gated on build/test/clippy/fmt + nano
   size gate + forbidden-dep check + red-team fixtures
   ([`CLAUDE.md` §9.1](../CLAUDE.md)); nano stays under budget (invariant 19).
+
+## 11. Implementation status (v0.2 P11-exec)
+
+The supervisor model above (§4–§6) is realized by `crustcore-daemon::supervisor`
+(roles, registry, budgets, scheduler, blackboard, integration gate). **P11-exec**
+adds the **execution control plane** — `crustcore-daemon::exec::run_subagent` — that
+runs one subagent and folds its result back onto the blackboard, enforcing the
+trust rules of §4–§6 in one place:
+
+- **Registry-bound identity.** Role and budget come from the `AgentRegistry` by id;
+  an unregistered agent is refused, and the posted `from_role` is the registry's
+  value, never a worker-supplied claim (the §6 "self-asserted role grants no
+  authority" rule, made structural).
+- **Bounded fan-out + budget (invariant 11, §4.3).** A `Scheduler` slot is reserved
+  and **always released** — even on executor error or an over-budget run — and the
+  run's reported usage is charged against the agent's `AgentBudget`; an over-budget
+  run is refused.
+- **Verifier-owned acceptance (invariants 6, 13, §5).** `accepted` is set only from
+  the executor's verifier evidence; a worker's `self_claimed_done` is recorded for
+  contrast but never completes the task.
+- **No outward channel (invariant 5).** The outcome posts to the blackboard
+  addressed to `AgentTarget::Supervisor` — there is no user target to name.
+
+Execution is abstracted behind a `SubagentExecutor` trait so the orchestration is
+CI-tested over a mock (no sandbox needed). The live `WorktreeSubagentExecutor` —
+`crustcore_backend::worker::run_external_worker` then
+`crustcore_backend::verify::run_verify` in a sandboxed throwaway worktree, exactly
+as the `crustcore` harness chains them — is the `TODO(P11-exec-live)` seam that lands
+with the daemon runtime, behind the same trait, so the orchestration never changes.

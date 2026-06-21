@@ -312,8 +312,9 @@ pub struct AgentMessage {
     /// The sender's role, **for display only**. It is self-asserted and grants no
     /// authority: the supervisor (the trusted actor) acts on a message only after
     /// reconciling the sender against [`AgentRegistry`] by `from` id — never by
-    /// trusting this field. When real execution is wired (`TODO(P11-exec)`), bind
-    /// privilege to the registry role, not to this claim.
+    /// trusting this field. The subagent execution path does exactly this — see
+    /// [`crate::exec::run_subagent`], which sets `from_role` from the registry spec,
+    /// not from any worker-supplied value.
     pub from_role: Role,
     /// The destination (never the user — see [`AgentTarget`]).
     pub target: AgentTarget,
