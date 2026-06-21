@@ -41,6 +41,7 @@ members = [
     "crates/crustcore-index-rag",
     "crates/crustcore-telemetry",
     "crates/crustcore-session",
+    "crates/crustcore-dev",
     "crates/crustcore-eval",
     "crates/crustcore-toolkit",
     "crates/crustcore-tool-macro",
@@ -83,6 +84,7 @@ crustcore-index = { path = "crates/crustcore-index", version = "0.1.0" }
 crustcore-index-rag = { path = "crates/crustcore-index-rag", version = "0.1.0" }
 crustcore-telemetry = { path = "crates/crustcore-telemetry", version = "0.1.0" }
 crustcore-session = { path = "crates/crustcore-session", version = "0.1.0" }
+crustcore-dev = { path = "crates/crustcore-dev", version = "0.1.0" }
 crustcore-eval = { path = "crates/crustcore-eval", version = "0.1.0" }
 crustcore-toolkit = { path = "crates/crustcore-toolkit", version = "0.1.0" }
 crustcore-tool-macro = { path = "crates/crustcore-tool-macro", version = "0.1.0" }
