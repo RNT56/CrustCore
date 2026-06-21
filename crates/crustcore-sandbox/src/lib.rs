@@ -16,8 +16,11 @@
 
 use crustcore_runner::{CommandResult, CommandSpec};
 
-/// Execution tiers (`ROADMAP.md` §10.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Execution tiers (`ROADMAP.md` §10.1). Ordered by **isolation strength** (the variant
+/// order): `None` < `StructuredHost` < `Sandboxed` < `Hostile`, so a higher tier means
+/// stronger isolation. [`select_backend`] uses this order to refuse rather than downgrade
+/// (a Tier-3 task never runs in a Tier-2 backend).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ExecutionTier {
     /// Tier 0: no execution (planning, review, summarization).
     None,
@@ -140,6 +143,38 @@ pub trait SandboxBackend {
         profile: &SandboxProfile,
         spec: CommandSpec,
     ) -> Result<CommandResult, SandboxError>;
+
+    /// The highest [`ExecutionTier`] this backend can **safely** provide. [`select_backend`]
+    /// refuses to run a task whose required tier exceeds every available backend's
+    /// `provided_tier` — there is **no downgrade** (a Tier-3 hostile task never falls back
+    /// to a Tier-2 sandbox). Defaults to [`ExecutionTier::Sandboxed`] (Tier 2 — the
+    /// bubblewrap level); a microVM/container backend (Firecracker, `TODO(B4-firecracker-live)`)
+    /// or a Windows-native backend (`TODO(B4-windows-live)`) overrides this.
+    fn provided_tier(&self) -> ExecutionTier {
+        ExecutionTier::Sandboxed
+    }
+}
+
+/// Selects the backend to run a task at `required` tier from the `backends` available on
+/// this host: the **least-over-isolating** backend whose [`provided_tier`](SandboxBackend::provided_tier)
+/// still **meets** `required` (meeting the tier is sufficient; a microVM for a Tier-2
+/// build is wasteful). If no available backend can provide `required`, execution is
+/// **refused** ([`SandboxError::NoBackend`]) — there is no downgrade path (invariant 9;
+/// `docs/sandbox.md` §3). This is the seam the Firecracker (Tier-3) and Windows-native
+/// backends plug into as they land.
+///
+/// # Errors
+/// [`SandboxError::NoBackend`] if no available backend provides `required`.
+pub fn select_backend<'a>(
+    required: ExecutionTier,
+    backends: &[&'a dyn SandboxBackend],
+) -> Result<&'a dyn SandboxBackend, SandboxError> {
+    backends
+        .iter()
+        .filter(|b| b.provided_tier() >= required)
+        .min_by_key(|b| b.provided_tier())
+        .copied()
+        .ok_or(SandboxError::NoBackend)
 }
 
 /// Errors from sandbox setup/execution.
@@ -461,14 +496,20 @@ pub fn run_command(
         ));
     }
 
-    // Tier 3 (hostile) requires a microVM (Firecracker), out of scope for v0.1:
-    // refuse rather than downgrade to bwrap.
-    if profile.tier == ExecutionTier::Hostile {
-        return Err(SandboxError::NoBackend);
+    // Assemble the backends built on this host. Today only the Linux bubblewrap Tier-2
+    // backend is compiled; the Firecracker Tier-3 (`TODO(B4-firecracker-live)`) and
+    // Windows-native (`TODO(B4-windows-live)`) backends append here behind their features.
+    let bwrap = BubblewrapBackend::detect();
+    let mut backends: Vec<&dyn SandboxBackend> = Vec::new();
+    if let Some(b) = bwrap.as_ref() {
+        backends.push(b);
     }
 
-    // The backend sanitizes the environment at the launch boundary (§5).
-    let backend = BubblewrapBackend::detect().ok_or(SandboxError::NoBackend)?;
+    // Select a backend that MEETS the required tier, or refuse. A Tier-3 (hostile) task
+    // with only the Tier-2 bubblewrap backend is refused — never downgraded (the
+    // microVM requirement is enforced by `select_backend`, not a special case here). The
+    // chosen backend sanitizes the environment at the launch boundary (§5).
+    let backend = select_backend(profile.tier, &backends)?;
     backend.run(profile, spec)
 }
 
@@ -698,5 +739,82 @@ mod tests {
             run_command(&cap, &profile, CommandSpec::new("/bin/echo")),
             Err(SandboxError::NoBackend)
         ));
+    }
+
+    /// A mock backend that declares a tier but does not execute — exercises the tier
+    /// selection (`select_backend` never calls `run`).
+    struct MockBackend {
+        tier: ExecutionTier,
+    }
+    impl SandboxBackend for MockBackend {
+        fn run(
+            &self,
+            _profile: &SandboxProfile,
+            _spec: CommandSpec,
+        ) -> Result<CommandResult, SandboxError> {
+            Err(SandboxError::Setup("mock backend does not execute".into()))
+        }
+        fn provided_tier(&self) -> ExecutionTier {
+            self.tier
+        }
+    }
+
+    #[test]
+    fn select_backend_meets_the_tier_or_refuses_without_downgrade() {
+        let t2 = MockBackend {
+            tier: ExecutionTier::Sandboxed,
+        };
+        let t3 = MockBackend {
+            tier: ExecutionTier::Hostile,
+        };
+
+        // A Tier-2 task: a Tier-2 backend suffices.
+        assert_eq!(
+            select_backend(ExecutionTier::Sandboxed, &[&t2])
+                .unwrap()
+                .provided_tier(),
+            ExecutionTier::Sandboxed
+        );
+        // A Tier-3 (hostile) task with only a Tier-2 backend → refused, never downgraded.
+        assert!(matches!(
+            select_backend(ExecutionTier::Hostile, &[&t2]),
+            Err(SandboxError::NoBackend)
+        ));
+        // A Tier-3 task with a Tier-3 backend available → selected.
+        assert_eq!(
+            select_backend(ExecutionTier::Hostile, &[&t2, &t3])
+                .unwrap()
+                .provided_tier(),
+            ExecutionTier::Hostile
+        );
+        // No backends at all → refuse.
+        assert!(matches!(
+            select_backend(ExecutionTier::Sandboxed, &[]),
+            Err(SandboxError::NoBackend)
+        ));
+    }
+
+    #[test]
+    fn select_backend_prefers_the_least_over_isolating_sufficient_backend() {
+        let t2 = MockBackend {
+            tier: ExecutionTier::Sandboxed,
+        };
+        let t3 = MockBackend {
+            tier: ExecutionTier::Hostile,
+        };
+        // A Tier-2 task with BOTH available → the Tier-2 backend (don't over-isolate).
+        assert_eq!(
+            select_backend(ExecutionTier::Sandboxed, &[&t3, &t2])
+                .unwrap()
+                .provided_tier(),
+            ExecutionTier::Sandboxed
+        );
+        // A Tier-2 task with ONLY a Tier-3 backend → the Tier-3 backend (it is sufficient).
+        assert_eq!(
+            select_backend(ExecutionTier::Sandboxed, &[&t3])
+                .unwrap()
+                .provided_tier(),
+            ExecutionTier::Hostile
+        );
     }
 }
