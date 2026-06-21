@@ -183,6 +183,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "crustcore-flow"
+version = "0.1.0"
+dependencies = [
+ "crustcore-backend",
+ "crustcore-daemon",
+ "crustcore-path",
+ "crustcore-policy",
+ "crustcore-receipts",
+ "crustcore-runner",
+ "crustcore-sandbox",
+ "crustcore-secrets",
+ "crustcore-types",
+ "crustcore-worktree",
+]
+
+[[package]]
 name = "crustcore-full"
 version = "0.1.0"
 dependencies = [
