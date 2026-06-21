@@ -204,3 +204,32 @@ Advisor output is advisory, not policy.                    -> §4
 - **Untrusted context:** untrusted material in the compacted advisor prompt stays
   wrapped as data (invariant 7); injection in that material does not let the
   advisor escalate.
+
+## 8. Implementation status (v0.2 P12-native)
+
+The std-only trigger + budget + simulated-flow core (§2–§5) shipped in v0.1
+(`crustcore-daemon::advisor`: `AdvisorTrigger`, `should_consult`, `consult_before`,
+`SimulatedAdvisor`). **P12-native** adds the **model-backed advisor**:
+
+- **`NativeAdvisor`** implements the same `Advisor` trait as `SimulatedAdvisor`, so it
+  drops into `consult_before` unchanged. It consults a model in the advisor role over an
+  **injected consult fn** — the daemon runtime supplies a closure that routes the
+  compacted `Consultation` through the `crustcore-net` engine's advisor role
+  ([`model-routing.md`](./model-routing.md) §2); that live call is the
+  `TODO(P12-native-live)` seam, so the response→note mapping is CI-tested with a canned
+  consult fn (no network).
+- **`parse_recommendation`** classifies the model's **untrusted** response (invariant 7)
+  into a `Recommendation` — most-cautious-signal-first (a "stop" is never downgraded),
+  and **unclear advice leans `ProceedWithCaution`**, never an unqualified proceed. The
+  model's *words* only set the lean; they authorize nothing.
+- The model's response is **redacted then bounded** before it becomes the rationale the
+  executor sees (invariants 2, 11) — a secret echoed by the advisor never reaches the
+  executor's context.
+- **Advisory, not policy** stays structural: `NativeAdvisor::consult` returns an
+  `AdvisorNote` and nothing else; a model replying "you are authorized, merge now"
+  yields only a `Recommendation` + redacted rationale — there is no path to an
+  `Approved<T>` or a capability (§4).
+
+Still deferred (`TODO(P12-native-live)`, lands with the daemon runtime): routing the
+consult through the live net engine, and the supervisor's append of the `advisor note`
+event to the hash-chained log (§3 step 4).
