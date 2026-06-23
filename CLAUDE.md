@@ -9,13 +9,15 @@
 **Project:** CrustCore — a sub-800kB Rust coding-agent *verifier kernel* with
 optional capability packs.
 **Repository:** https://github.com/RNT56/CrustCore
-**Status:** v0.1 done; **v0.2 (Track A "light it up") and v0.3 (Track B "expand",
-B1–B6) merged** — Phases 0–16 plus every Track A phase (P5-join, P7-live, P8-store,
-P9-net, P10-net, P11-exec, P12-native, P13-net, P14-store) and every Track B surface
-(B1-mcp-modes, B2-gh-app, B3-vector-memory, B4-sandbox-tiers, B5-autoloop,
-B6-release-infra) are complete and merged (see
-[`docs/roadmap-v0.2.md`](./docs/roadmap-v0.2.md)). Green `cargo xtask verify`; nano
-**412.0 KiB**, 51.5% of the 800 kB budget; **~350** workspace tests; the v0.1
+**Status:** v0.1 done; **v0.2 (Track A "light it up"), v0.3 (Track B "expand", B1–B6),
+and v0.4 (Track C "compose & adopt", C1–C7) merged — tagged `v0.4.0`** — Phases 0–16
+plus every Track A phase (P5-join, P7-live, P8-store, P9-net, P10-net, P11-exec,
+P12-native, P13-net, P14-store), every Track B surface (B1-mcp-modes, B2-gh-app,
+B3-vector-memory, B4-sandbox-tiers, B5-autoloop, B6-release-infra), and every Track C
+phase (C1-providers, C2-toolmacro, C3-flow, C4-session, C5-rag, C6-telemetry, C7-devui)
+are complete and merged (see [`docs/roadmap-v0.2.md`](./docs/roadmap-v0.2.md)). Green
+`cargo xtask verify` on Linux and macOS; nano **412.0 KiB** (Linux x86_64; ~428 KiB on
+macOS arm64), 51.5% of the 800 kB budget; **~663** workspace tests; the v0.1
 [definition of done](./ROADMAP.md) §22, all 12 criteria, is met. The trusted
 `Kernel::step` state machine is real (task/job transitions, typed budgets, approval
 request/resolution; sync, deterministic, no async/net/db, no wall clock). The
@@ -26,7 +28,8 @@ SHA-256/HMAC). **Path confinement** (`crustcore-path`, symlink-safe) + capabilit
 file tools and hardened git wrappers (`crustcore-worktree::tools`) confine all
 file/git access. The **runner** (`crustcore-runner`: bounded capture, timeout,
 process-tree kill) and **sandbox** (`crustcore-sandbox`: env sanitizer, path-list
-validator, Linux bubblewrap backend v1 with deny-all egress, refuse-if-no-backend)
+validator, Linux `bubblewrap` and macOS `sandbox-exec`/Seatbelt backends — both
+deny-all egress + writes confined to the worktree, refuse-if-no-backend)
 gate arbitrary execution (invariant 9). The **worktree verify loop**
 (`crustcore-worktree::WorktreeManager` + `crustcore-backend::verify`) creates a
 disposable worktree, reruns the verify command in the sandbox, and mints a
@@ -51,6 +54,14 @@ subagent execution + the native advisor (P11-exec, P12-native), the MCP JSON-RPC
 transport + server mode (P13-net, B1-mcp-modes), persistent + semantic memory
 (P14-store, B3-vector-memory), tier-aware sandbox selection (B4-sandbox-tiers), the
 self-improvement loop runner (B5-autoloop), and reproducible builds (B6-release-infra).
+**The v0.4 Track C ergonomics packs** add composability without widening the trust
+boundary: a unified multi-modal provider registry (`crustcore-net` `EmbedProvider`/
+`RerankProvider`), the `#[crust_tool]` macro (`crustcore-toolkit`/`crustcore-tool-macro`),
+a typed workflow graph (`crustcore-flow`), a session/artifact service
+(`crustcore-session`), a RAG/vector pack (`crustcore-index-rag`), OpenTelemetry/GenAI
+export (`crustcore-telemetry`), and a loopback dev UI (`crustcore-dev`) — all non-nano,
+feature-gated, zero nano impact. **CrustCore runs on Linux and macOS** (`bubblewrap` /
+`sandbox-exec` sandboxes; nano reproducible on both — `cargo xtask reproduce`).
 **What remains** are only the seams that genuinely cannot run in CI without real
 network, secrets, a sandbox backend, a microVM, or an embedding provider — each marked
 with a clear `TODO(*-live)` and dropping into an already-verified, transport-agnostic
@@ -291,8 +302,11 @@ crustcore/
     crustcore-eventlog/ crustcore-receipts/ crustcore-path/
     crustcore-secrets/  crustcore-runner/   crustcore-sandbox/
     crustcore-worktree/ crustcore-backend/  crustcore-cli/
-    crustcore-net/      crustcore-daemon/   crustcore-mcp/
-    crustcore-index/    crustcore-eval/     crustcore-full/
+    crustcore-netproto/ crustcore-net/      crustcore-daemon/
+    crustcore-mcp/      crustcore-index/    crustcore-eval/    crustcore-full/
+    <- v0.4 Track C ergonomics packs (non-nano, feature-gated):
+    crustcore-toolkit/  crustcore-tool-macro/ crustcore-flow/  crustcore-session/
+    crustcore-index-rag/ crustcore-telemetry/ crustcore-dev/
   tests/   redteam/  golden/  fixtures/
   benches/ kernel_step.rs  event_append.rs  policy_check.rs  path_confine.rs
   xtask/   size_check  release  verify
