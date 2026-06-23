@@ -221,7 +221,12 @@ than taken on trust.
   workspace path, the cargo home (registry/source cache), and the rustup toolchain
   sysroot — so the binary embeds none of the builder's `$HOME`/install paths;
 - `SOURCE_DATE_EPOCH=0` pins any embedded build timestamp;
-- `CARGO_INCREMENTAL=0` disables the non-deterministic incremental cache.
+- `CARGO_INCREMENTAL=0` disables the non-deterministic incremental cache;
+- on **macOS**, `-C link-arg=-Wl,-no_uuid` (macOS-only, via `cfg!(target_os)`) omits the
+  linker-stamped Mach-O `LC_UUID` — derived from input object paths, so it otherwise
+  differs between build dirs — making the Mach-O reproducible the same way the path
+  remaps make the Linux ELF reproducible. The Linux ELF has no equivalent field under
+  these flags, so the flag is macOS-only.
 
 Combined with the `nano` profile (`codegen-units = 1`, `lto = "fat"`,
 `strip = "symbols"`, `panic = "abort"`) and the pinned toolchain
