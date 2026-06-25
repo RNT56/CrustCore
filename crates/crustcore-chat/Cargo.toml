@@ -1,0 +1,30 @@
+[package]
+name = "crustcore-chat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Conversational front door (intent routing, persona, converse, queue/steer) for CrustCore — non-nano, invariant-preserving."
+
+# NON-NANO sidecar crate (CLAUDE.md §5.1). This is the conversational "front door"
+# — the NilCore-parity chat surface — built as a std-only, deterministic DECISION
+# CORE (no network in the core): intent classification, persona/system-preamble
+# assembly, the converse-render boundary (model answer -> Redactor ->
+# ModelVisibleText), and the queue/steer state machine. The live model transport is
+# the spawned `crustcore-net` helper (over the std-only `crustcore-netproto`
+# protocol), reached behind the `terminal` feature — never linked into nano. The
+# nano feature graph never includes this crate (proven by `cargo xtask
+# forbidden-deps`).
+[dependencies]
+crustcore-types = { workspace = true }
+crustcore-netproto = { workspace = true }
+crustcore-secrets = { workspace = true }
+
+[features]
+default = []
+# Live front-door channels (terminal REPL + Telegram converse wiring) that spawn the
+# net helper for real model calls. The deterministic core needs none of it; the live
+# integration tests behind this feature are `#[ignore]`d and never run in CI.
+terminal = []

@@ -181,6 +181,7 @@ name = "crustcore"
 version = "0.4.0"
 dependencies = [
  "crustcore-backend",
+ "crustcore-chat",
  "crustcore-cli",
  "crustcore-daemon",
  "crustcore-eventlog",
@@ -209,6 +210,15 @@ dependencies = [
  "crustcore-sandbox",
  "crustcore-types",
  "crustcore-worktree",
+]
+
+[[package]]
+name = "crustcore-chat"
+version = "0.4.0"
+dependencies = [
+ "crustcore-netproto",
+ "crustcore-secrets",
+ "crustcore-types",
 ]
 
 [[package]]

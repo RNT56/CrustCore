@@ -28,6 +28,51 @@ agent/PR/role/size/invariant audit trail.
 
 ## [Unreleased]
 
+### Added
+
+- **Conversational front door — `crustcore-chat` (new non-nano capability pack).**
+  A NilCore-parity chat surface built as a std-only, deterministic **decision core**
+  (no network in the core; the live model transport is the spawned `crustcore-net`
+  helper, behind the `terminal` feature — never linked into nano). Pieces:
+  - `route` — a non-authoritative intent **classifier** (`ChatRoute`:
+    quickfix / feature / project / converse / continue) with a model-backed path that
+    is *honored as-is when parseable* and a pure-function heuristic fallback otherwise
+    (no retry). A route grants nothing; it only selects which kernel flow starts.
+  - `persona` — a `Persona` (default "terse senior engineer" voice) + `OperatorSteering`
+    (`CRUSTCORE.md`/`AGENTS.md`) assembled into the model-role **system preamble**. A
+    fixed `SAFETY_PREAMBLE` always leads and overrides the persona/steering, which are
+    scoped *below* the safety core. Neither type has any method yielding a capability,
+    `Approved<T>`, or secret — persona shapes tone, never authority (red-team tested).
+  - `converse` — the `ConverseRenderer` boundary: a model answer is **redacted then
+    bounded then re-sealed** as `ModelVisibleText` (the sole `Redactor`-minted type), so
+    a converse turn is redacted/bounded/attributable and a secret split by the byte
+    bound still cannot leak. Optional `reveal_reasoning` (owner-authorized, off by
+    default) streams reasoning, still redacted.
+  - `steer` — the queue/steer state machine: plain message queues (FIFO, bounded); a
+    `!`/`/steer` cancels the in-flight **model** call and jumps to the front; a steer
+    arriving while a **tool** runs is *buffered* and never kills the tool; `/cancel`
+    aborts. Mirrors NilCore's exact hard safety rule.
+  - `session` — `ChatSession`, the single front door tying it together over an injected
+    model consult; produces typed `Turn`s (`Answer`/`StartTask`/`Notice`), never raw
+    model text. Plus a `Principal` channel trust line: only an authorized principal's
+    message becomes a user turn (else dropped).
+  - `terminal` — a CI-testable REPL (`run_repl`, generic over streams + the model
+    consult) + a `complete_text` adapter over the std-only `NetHelper`, plus
+    `run_terminal` which spawns the `crustcore-net` helper. The local operator is an
+    authorized principal; a converse answer is redacted+bounded before it prints. A
+    full-pipeline red-team test proves a secret in the model's answer is redacted in
+    the REPL output.
+- **Runnable `crustcore chat` subcommand (binary, `chat` feature).** Mirrors the
+  `net` subcommand: gated on a new `chat` feature (`dep:crustcore-chat`), dispatched
+  before CLI parse, with a stub in the base/nano build. Loads an optional `persona.md`
+  + `CRUSTCORE.md`/`AGENTS.md` steering from the project root, spawns the net helper,
+  and runs the terminal REPL. **Zero nano impact** — `cargo xtask verify` green; nano
+  unchanged at 412.0 KiB (Linux) / 428.1 KiB (macOS); forbidden-deps clean (the chat
+  pack links only the std-only protocol, no HTTP/TLS). 39 chat-pack tests + the binary
+  feature build all green. Remaining for full parity: the Telegram converse channel,
+  and the contract amendment of invariants 15/16 + `docs/telegram.md` §8 (owner-
+  authorized) with new `docs/chat.md` / `docs/persona.md`.
+
 ### Changed
 
 - **CI now runs on Linux and macOS.** The `verify` job is a matrix over

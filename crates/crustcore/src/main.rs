@@ -43,6 +43,12 @@ fn main() -> ExitCode {
         return net_subcommand(&args[1..]);
     }
 
+    // The conversational front door (`crustcore chat`). Gated on the `chat` feature;
+    // the base nano build carries only a tiny stub (invariants 16, 19, 20).
+    if args.first().map(String::as_str) == Some("chat") {
+        return chat_subcommand(&args[1..]);
+    }
+
     match crustcore_cli::parse(&args) {
         Command::Version => {
             println!("crustcore {}", crustcore_cli::VERSION);
@@ -602,6 +608,64 @@ fn net_subcommand(args: &[String]) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// The conversational front door: `crustcore chat`. Loads an optional `persona.md`
+/// and `CRUSTCORE.md`/`AGENTS.md` operator steering from the project root, spawns the
+/// `crustcore-net` helper, and runs the terminal REPL. The model transport is the
+/// spawned helper (no HTTP/TLS linked here); a converse answer is redacted+bounded by
+/// the chat pack before it reaches the terminal (CLAUDE.md §16 — the CLI front door is
+/// a typed, redacted control plane, not a raw model pipe).
+#[cfg(feature = "chat")]
+fn chat_subcommand(_args: &[String]) -> ExitCode {
+    use crustcore_chat::{run_terminal, ChatConfig, OperatorSteering, Persona};
+    use crustcore_secrets::Redactor;
+
+    let helper =
+        std::env::var("CRUSTCORE_NET_HELPER").unwrap_or_else(|_| "crustcore-net".to_string());
+
+    // Persona + operator steering from the trusted project root (both optional). These
+    // shape TONE/guidance only and are scoped below the fixed safety preamble.
+    let persona = std::fs::read_to_string("persona.md")
+        .map(|s| Persona::from_markdown(&s))
+        .unwrap_or_default();
+    let steering = ["CRUSTCORE.md", "AGENTS.md"]
+        .iter()
+        .find_map(|f| std::fs::read_to_string(f).ok())
+        .map(|s| OperatorSteering::from_content(&s))
+        .unwrap_or_default();
+    let config = ChatConfig {
+        persona,
+        steering,
+        ..ChatConfig::default()
+    };
+
+    // Standalone front door: no secret broker is wired here, so the redactor has no
+    // registered secrets. When the daemon hosts the chat surface, it passes the
+    // broker's pre-loaded redactor instead so stored secrets are scrubbed.
+    let redactor = Redactor::new();
+
+    println!("crustcore chat — type a message; `!text` steers, `/cancel` aborts, Ctrl-D exits.");
+    match run_terminal(&helper, &[], &redactor, config) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("crustcore chat: {e}");
+            eprintln!("set CRUSTCORE_NET_HELPER to the crustcore-net binary path.");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Stub when the `chat` capability is not built in (the base nano binary). Keeps the
+/// chat pack out of nano (invariants 16, 19, 20).
+#[cfg(not(feature = "chat"))]
+fn chat_subcommand(_args: &[String]) -> ExitCode {
+    eprintln!(
+        "crustcore: the 'chat' capability is not built into this binary \
+         (rebuild with --features chat). The conversational front door is a non-nano \
+         pack; nano stays a CLI verifier harness."
+    );
+    ExitCode::from(2)
 }
 
 /// Stub when the `net` capability is not built in (the base nano binary). Keeps
