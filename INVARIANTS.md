@@ -123,19 +123,48 @@ passes.
 `Reversibility` is a typed enum gating which operations need approval.
 **Tested by:** policy tests for each irreversible operation class.
 
-### 15. Runtime user communication goes through Telegram only by default
+### 15. Runtime user communication goes through authorized, redacted channels (Telegram by default)
 
-**Why:** one auditable runtime channel; no hidden side channels.
-**Enforcement:** the runtime user channel capability is Telegram-bound by
-default; other channels require explicit policy.
-**Tested by:** channel-routing tests. See [`docs/telegram.md`](./docs/telegram.md).
+**Why:** every runtime message — inbound or outbound — must cross **one auditable,
+redacted, principal-authenticated boundary**; no hidden or unredacted side channels.
+**Enforcement:** the runtime user-channel capability is bound to **authorized,
+allowlisted principals** — a Telegram chat id by default; the local operator on the
+`crustcore chat` terminal; any other channel requires explicit policy. *Inbound:* only
+an authorized principal's message becomes a user turn (`crustcore_chat::accept` /
+the Telegram allowlist); model/tool/file/peer content never can. *Outbound:* every
+message is rendered through the `Redactor` as `ModelVisibleText` — supervisory messages
+from typed events, and a **converse answer** as model-authored text passed through the
+same redact→bound boundary (the model never holds a raw `send_message` tool). See
+[`docs/telegram.md`](./docs/telegram.md) §8 and [`docs/chat.md`](./docs/chat.md).
+**Tested by:** channel-routing + principal-trust tests; the converse-redaction red-team
+(a secret in a model answer is redacted before the user sees it).
 
-### 16. CLI is setup/admin/emergency, not a hidden second chat channel
+> **Amendment (v0.4.x, owner-authorized).** This law previously read "Telegram only by
+> default." It is broadened to **any authorized, redacted channel** so a sanctioned
+> conversational front door (`crustcore chat`; a future Telegram converse mode) can
+> exist. The security property is unchanged and *strengthened* by being stated
+> generally: one redacted, principal-authenticated boundary — the *channel* widened, the
+> *boundary* did not.
 
-**Why:** avoids an ungoverned parallel control plane.
-**Enforcement:** CLI surfaces setup/admin/inspect/emergency commands only; it is
-not a conversational runtime channel.
-**Tested by:** CLI surface review + tests.
+### 16. The CLI is setup/admin/emergency; the only sanctioned conversational surface is `crustcore chat`
+
+**Why:** avoids an *ungoverned* parallel control plane — the risk is *unaudited*
+conversation, not conversation as such.
+**Enforcement:** the base/nano CLI surfaces setup/admin/inspect/emergency commands only.
+The conversational front door is the **explicit, feature-gated `crustcore chat`**
+subcommand (non-nano `chat` feature; a stub in nano), which routes through the *same*
+redact / principal-trust / policy / approval boundary as Telegram. It is a sanctioned,
+typed channel — not a hidden one — and it cannot mint authority, approve a side effect,
+or complete a task: the classifier grants nothing, persona/steering mint no authority,
+and completion stays with the verifier and the human approval gate.
+**Tested by:** CLI surface review; the chat pack's principal-trust, non-authoritative-
+classifier, persona-cannot-authorize, and converse-redaction tests.
+
+> **Amendment (v0.4.x, owner-authorized).** This law previously read "not a hidden
+> second chat channel." A `crustcore chat` front door is now sanctioned — but it is the
+> *opposite* of hidden: explicit, feature-gated, and routed through the same redacted,
+> principal-trust, policy-gated boundary as every other surface. "No *ungoverned*
+> parallel control plane" still holds.
 
 ### 17. Model/provider names are config and capability-probed, not permanent assumptions
 

@@ -1,9 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Tiny CLI argument parsing for the nano binary (`ROADMAP.md` §2.1, Phase 0/2).
 //!
-//! The CLI is **setup/admin/emergency only**, not a hidden chat channel
-//! (invariant 16). It deliberately avoids `clap` to stay within the nano size
-//! budget; this is a minimal, allocation-light hand-rolled parser.
+//! This nano CLI surfaces **setup/admin/emergency** commands only
+//! (`version`/`help`/`run`/`inspect`/`export`/`doctor`). It is **not** a hidden or
+//! ungoverned chat channel: the *sanctioned* conversational front door is the explicit,
+//! feature-gated `crustcore chat` subcommand (non-nano `chat` feature; see
+//! [`docs/chat.md`]), which is dispatched in the binary before this parser and routes
+//! through the redact / principal-trust / policy boundary (invariant 16, amended
+//! v0.4.x). It deliberately avoids `clap` to stay within the nano size budget; this is
+//! a minimal, allocation-light hand-rolled parser.
+//!
+//! [`docs/chat.md`]: https://github.com/RNT56/CrustCore/blob/main/docs/chat.md
 //!
 //! Status: implemented. `version`/`help`/`run`/`inspect`/`export`/`doctor` are
 //! all parsed here and routed by the nano binary; the `DoctorReport` render and

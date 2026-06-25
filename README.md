@@ -266,8 +266,8 @@ tests, or both, and catalogued in **[INVARIANTS.md](./INVARIANTS.md)**.
 12. Every long-running job has lease, heartbeat, cancellation, and recovery.
 13. Every shippable patch is a VerifiedPatch.
 14. Irreversible actions require an approval token.
-15. Runtime user communication goes through Telegram only by default.
-16. The CLI is setup/admin/emergency, not a hidden second chat channel.
+15. Runtime user communication goes through authorized, redacted channels (Telegram by default; the sanctioned `crustcore chat` front door).
+16. The CLI is setup/admin/emergency; the only sanctioned conversational surface is the explicit, redacted `crustcore chat` front door.
 17. Model/provider names are config and capability-probed, not permanent assumptions.
 18. Self-improvement happens through PRs/evals, not live mutation of the running kernel.
 19. The nano build must remain below the configured size budget.

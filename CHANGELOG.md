@@ -75,6 +75,20 @@ agent/PR/role/size/invariant audit trail.
 
 ### Changed
 
+- **Invariants 15 & 16 amended (owner-authorized) to sanction the chat front door.**
+  Invariant 15 broadens from "Telegram only by default" to "**authorized, redacted
+  channels** (Telegram by default; the `crustcore chat` front door)" — the *channel*
+  widened, the *boundary* (one redacted, principal-authenticated path) did not.
+  Invariant 16 changes from "not a hidden second chat channel" to "the only sanctioned
+  conversational surface is the **explicit, redacted, policy-gated** `crustcore chat`" —
+  no *ungoverned* parallel control plane. Updated in [`INVARIANTS.md`](./INVARIANTS.md)
+  (canonical, with amendment notes), [`CLAUDE.md`](./CLAUDE.md) §4, [`README.md`](./README.md),
+  [`docs/telegram.md`](./docs/telegram.md) §8.1 (the converse-turn carve-out), and the
+  `crustcore-cli` doc framing. New specs: [`docs/chat.md`](./docs/chat.md) and
+  [`docs/persona.md`](./docs/persona.md). The security properties are unchanged and, by
+  being stated generally, strengthened — verified by the chat pack's principal-trust,
+  non-authoritative-classifier, persona-cannot-authorize, and converse-redaction tests.
+
 - **CI now runs on Linux and macOS.** The `verify` job is a matrix over
   `ubuntu-latest` + `macos-latest` (`fail-fast: false`), so `cargo xtask verify`
   (fmt, clippy `-D warnings`, the full test suite, forbidden-deps, the size gate)
