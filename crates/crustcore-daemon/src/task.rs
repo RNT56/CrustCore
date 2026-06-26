@@ -22,6 +22,8 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
+use crustcore_policy::{Approved, GitHubWriteCap};
+
 use crate::telegram::ChatId;
 
 /// Maximum verify output we fold into a final status line (bounded — invariant 11,
@@ -43,10 +45,27 @@ pub enum TaskBackend {
     Cmd(String, Vec<String>),
 }
 
+/// Where a verified chat task may open a **draft** PR (`--open-pr`/`--repo`/`--base`/
+/// `--branch-prefix`). Present only when the operator enabled PR mode; the daemon gates
+/// every launch on a human approval (invariant 14) and mints the `Approved<GitHubWriteCap>`
+/// the verified task consumes. The strings are config (not model/comment input;
+/// invariant 17): `repo` is `owner/name`, `base_branch` the PR target, `branch_prefix`
+/// the prefix the head branch is confined under.
+#[derive(Debug, Clone)]
+pub struct PrTarget {
+    /// `owner/name` of the repository to open the PR against.
+    pub repo: String,
+    /// The base branch the PR targets (e.g. `main`).
+    pub base_branch: String,
+    /// The branch prefix the head branch is confined under (e.g. `crustcore`).
+    pub branch_prefix: String,
+}
+
 /// What a chat-launched task runs against: the repo, the verify command (split into
 /// program + literal args, **no shell** — invariant 7; empty means "detect from the
-/// repo shape"), and the coding backend. Bound at runtime startup from `--dir` /
-/// `--verify` / `--backend`, then cloned per launch.
+/// repo shape"), the coding backend, and (optionally) the draft-PR target. Bound at
+/// runtime startup from `--dir` / `--verify` / `--backend` / `--open-pr`, then cloned
+/// per launch.
 #[derive(Debug, Clone)]
 pub struct TaskSpec {
     /// The repository root the task operates on.
@@ -55,6 +74,10 @@ pub struct TaskSpec {
     pub verify: Vec<String>,
     /// The coding backend that produces the candidate change.
     pub backend: TaskBackend,
+    /// Where a verified task may open a draft PR. `None` = verify-and-complete only (no
+    /// PR, no approval gate). `Some` = the launch is gated on approval and a verified
+    /// patch opens a draft PR.
+    pub pr: Option<PrTarget>,
 }
 
 /// A running chat-launched task: one OS thread streaming bounded status lines back to
@@ -76,10 +99,21 @@ impl TaskHandle {
     /// `chat`. Runs [`run_one_task`] on a dedicated thread, streaming bounded status
     /// lines over the channel. The thread is the generic [`spawn_with`](Self::spawn_with)
     /// core; the work closure simply runs the verified flow.
+    ///
+    /// `pr_cap` is the human-approved GitHub write authority (`Some` only when the
+    /// operator enabled PR mode and the launch was approved — invariant 14). It moves
+    /// into the task thread (it is `Send` data), so the `VerifiedPatch` is produced and
+    /// consumed by `open_pr` in the same place — it never has to outlive the approval or
+    /// cross a thread boundary.
     #[must_use]
-    pub fn spawn(spec: TaskSpec, goal: String, chat: ChatId) -> TaskHandle {
+    pub fn spawn(
+        spec: TaskSpec,
+        goal: String,
+        chat: ChatId,
+        pr_cap: Option<Approved<GitHubWriteCap>>,
+    ) -> TaskHandle {
         Self::spawn_with(chat, move |cancel, tx| {
-            run_one_task(&spec, &goal, cancel, tx)
+            run_one_task(&spec, &goal, cancel, tx, pr_cap.as_ref())
         })
     }
 
@@ -170,7 +204,13 @@ impl Drop for TaskHandle {
 /// Returns a single bounded summary line. Progress lines are streamed over `tx` as the
 /// flow advances. This function never redacts; the runtime renders each line through the
 /// redactor before it leaves the process (invariants 2, 15).
-fn run_one_task(spec: &TaskSpec, goal: &str, cancel: &AtomicBool, tx: &Sender<String>) -> String {
+fn run_one_task(
+    spec: &TaskSpec,
+    goal: &str,
+    cancel: &AtomicBool,
+    tx: &Sender<String>,
+    pr_cap: Option<&Approved<GitHubWriteCap>>,
+) -> String {
     use crustcore_backend::verify::{run_verify, VerifyIds, VerifyOutcome};
     use crustcore_backend::{complete_task, PatchRef};
     use crustcore_policy::SandboxExecCap;
@@ -265,12 +305,22 @@ fn run_one_task(spec: &TaskSpec, goal: &str, cancel: &AtomicBool, tx: &Sender<St
 
     let summary = match outcome {
         VerifyOutcome::Verified(verified) => {
-            // The ONLY path to completion — verifier evidence (invariant 13).
-            let _completion = complete_task(*verified);
-            format!(
-                "✅ VERIFIED — '{}' passed; task completed.",
-                verify_spec.display()
-            )
+            // A verifier-minted patch (invariant 13). Two terminal paths:
+            //  - PR mode (an approved cap): mint a *draft* PR intent from the verifier
+            //    evidence under the human-approved capability (invariant 14). The intent
+            //    is the completion for this task; the actual git push + GitHub REST POST
+            //    are the reduced live socket (`TODO(P10-net-live)`).
+            //  - otherwise: complete the task from the evidence (the original behavior).
+            match pr_cap {
+                Some(cap) => open_draft_pr(cap, *verified, spec, &verify_spec),
+                None => {
+                    let _completion = complete_task(*verified);
+                    format!(
+                        "✅ VERIFIED — '{}' passed; task completed.",
+                        verify_spec.display()
+                    )
+                }
+            }
         }
         VerifyOutcome::Failed { status, output } => {
             format!(
@@ -286,6 +336,43 @@ fn run_one_task(spec: &TaskSpec, goal: &str, cancel: &AtomicBool, tx: &Sender<St
     // Tear down the disposable worktree on every path (best-effort).
     let _ = manager.remove(&worktree);
     summary
+}
+
+/// Opens a **draft** PR intent from a verifier-minted [`VerifiedPatch`] under the
+/// human-approved `GitHubWriteCap` (invariants 13 + 14). The head branch is confined to
+/// the cap's branch prefix; [`open_pr`](crustcore_backend::integrate::open_pr) re-checks
+/// that and the approval expiry (defense-in-depth). The returned line reports the prepared
+/// draft PR (title + branches); the actual git push of the head branch and the GitHub REST
+/// `create_pull` are the reduced live socket (`TODO(P10-net-live)`) — they need real
+/// credentials and a pushed branch, so they cannot run in CI.
+fn open_draft_pr(
+    cap: &Approved<GitHubWriteCap>,
+    verified: crustcore_backend::VerifiedPatch,
+    spec: &TaskSpec,
+    verify_spec: &crustcore_backend::verify::VerifySpec,
+) -> String {
+    use crustcore_backend::integrate::open_pr;
+
+    // Head branch is confined under the approved cap's prefix (open_pr re-checks it).
+    let prefix = cap.value().branch_prefix.0.as_str();
+    let head_branch = format!("{prefix}/chat-task");
+    let base_branch = spec
+        .pr
+        .as_ref()
+        .map(|p| p.base_branch.clone())
+        .unwrap_or_else(|| "main".to_string());
+
+    match open_pr(cap, verified, &head_branch, &base_branch, now_ts()) {
+        Ok(intent) => format!(
+            "✅ VERIFIED — '{}' passed. 📝 Draft PR prepared: {} → {} (\"{}\"). \
+             The push + GitHub REST open is the live socket.",
+            verify_spec.display(),
+            intent.head_branch,
+            intent.base_branch,
+            intent.title
+        ),
+        Err(e) => format!("⛔ verified, but PR refused: {e}"),
+    }
 }
 
 /// Resolves the verify spec for a task: explicit program + literal args (no shell —
@@ -479,6 +566,7 @@ mod tests {
             repo_root: std::path::PathBuf::from("/tmp/repo"),
             verify: vec!["cargo".to_string(), "test".to_string()],
             backend: TaskBackend::Cmd("worker".to_string(), vec!["--go".to_string()]),
+            pr: None,
         };
         let clone = spec.clone();
         assert_eq!(clone.verify, spec.verify);
@@ -503,16 +591,18 @@ mod tests {
             repo_root: std::path::PathBuf::from(&repo),
             verify: vec!["true".to_string()],
             backend: TaskBackend::Native,
+            pr: None,
         };
-        let line = run_one_task(&pass, "goal", &cancel, &tx);
+        let line = run_one_task(&pass, "goal", &cancel, &tx, None);
         assert!(line.starts_with("✅ VERIFIED"), "got: {line}");
 
         let fail = TaskSpec {
             repo_root: std::path::PathBuf::from(&repo),
             verify: vec!["false".to_string()],
             backend: TaskBackend::Native,
+            pr: None,
         };
-        let line = run_one_task(&fail, "goal", &cancel, &tx);
+        let line = run_one_task(&fail, "goal", &cancel, &tx, None);
         assert!(line.starts_with("❌ VERIFY FAILED"), "got: {line}");
     }
 }

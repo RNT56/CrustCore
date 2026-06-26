@@ -102,6 +102,27 @@ aborts; `/approve <id>`/`/deny <id>` (or the inline buttons) resolve approvals. 
 allowlist is deny-all (the bot ignores everyone); the bot token rides only in the URL
 path and is never logged.
 
+## 5.2 Chat → draft PR (opt-in, approval-gated)
+
+Add `--open-pr --repo <owner/name> [--base main] [--branch-prefix crustcore]` to have a
+verified chat task open a **draft** PR. Opening a PR is irreversible (invariant 14), so the
+flow is **approve-first**:
+
+1. You ask for work ("add a `--json` flag"). The bot replies with the operation and the
+   **✅ approve / 🚫 deny** buttons — it has *not* started yet.
+2. On approve, CrustCore mints an `Approved<GitHubWriteCap>` (only an allowlisted chat →
+   `AuthorizedUser` can; invariant 4) and launches the task **with** that capability.
+3. The task runs the normal worktree → sandbox → verifier flow. **Only** on a verifier-minted
+   `VerifiedPatch` does it call `open_pr`, producing a draft PR confined to the cap's branch
+   prefix, with the verifier evidence as the body (invariant 13). A failed verify opens
+   nothing.
+
+Approving *before* the run means the `VerifiedPatch` never has to outlive the approval — the
+capability (plain data) moves into the task thread, where the patch is produced and consumed
+in one place. The git push of the head branch and the GitHub REST `create_pull` are the
+reduced live socket (`TODO(P10-net-live)`); everything up to the verifier-evidenced
+`PrIntent` is exercised in CI.
+
 ## 6. Reasoning streaming
 
 By default the converse answer is rendered after redaction (a secret cannot straddle a
