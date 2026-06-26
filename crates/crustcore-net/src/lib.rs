@@ -11,9 +11,13 @@
 //! What is implemented (deterministic, no network, fully tested):
 //! - a [`Provider`] trait (the provider-agnostic request/response model — P7.2),
 //! - a **dynamic registry** built by probing providers (invariant 17 — P7.4),
-//! - the three meta-provider behaviors — [`select_candidates`] (RouterProvider,
-//!   P7.6), [`apply_budget`] (BudgetProvider, P7.7), [`run_reliable`]
-//!   (ReliableProvider fallback, P7.5) — composed by [`Engine::complete`],
+//! - the meta-provider behaviors, realized as composable functions (not wrapper
+//!   structs): [`select_candidates`] (RouterProvider, P7.6), [`apply_budget`]
+//!   (BudgetProvider, P7.7), [`run_reliable`] (ReliableProvider fallback, P7.5) —
+//!   composed by [`Engine::complete`] — plus two opt-in behaviors:
+//!   [`ensure_local_fallback`] (LocalFallbackProvider — degrade to local last;
+//!   [`Engine::complete_with_local_fallback`]) and [`run_fusion`] (FusionProvider —
+//!   a deliberate multi-model panel for high-risk steps; [`Engine::fusion_panel`]),
 //! - **streaming** chunks through a sink (P7.3),
 //! - **budget accounting** ([`BudgetLedger`], P7.7),
 //! - the [`serve`] loop the helper binary runs.
@@ -277,31 +281,89 @@ impl Engine {
         req: &CompleteRequest,
         sink: &mut dyn FnMut(&str),
     ) -> Result<Final, RouteError> {
+        self.complete_inner(req, sink, false)
+    }
+
+    /// Like [`complete`](Self::complete) but with a **local-model last-resort
+    /// fallback** appended ([`ensure_local_fallback`], the `LocalFallbackProvider`
+    /// behavior; `docs/model-routing.md` §4). Remote candidates are tried first; if
+    /// every one is down or over budget, the chain degrades to a healthy local model
+    /// rather than failing — the privacy/offline resilience path. A `local_only`
+    /// request already routes local, so this changes nothing for it.
+    ///
+    /// # Errors
+    /// [`RouteError`] when no model (remote or local) satisfies the constraints/budget,
+    /// or all of them fail.
+    pub fn complete_with_local_fallback(
+        &mut self,
+        req: &CompleteRequest,
+        sink: &mut dyn FnMut(&str),
+    ) -> Result<Final, RouteError> {
+        self.complete_inner(req, sink, true)
+    }
+
+    /// Shared completion path: Router → Budget → (optional LocalFallback) → Reliable,
+    /// then success accounting. `complete` and `complete_with_local_fallback` differ
+    /// only in whether the local last-resort candidates are appended.
+    fn complete_inner(
+        &mut self,
+        req: &CompleteRequest,
+        sink: &mut dyn FnMut(&str),
+        local_fallback: bool,
+    ) -> Result<Final, RouteError> {
+        let registry = self.registry_indexed();
+        let candidates = select_candidates(&registry, req)?;
+        let mut candidates = apply_budget(candidates, req)?;
+        if local_fallback {
+            candidates = ensure_local_fallback(candidates);
+        }
+        let fin = run_reliable(&self.providers, candidates, req, sink)?;
+        self.account(&fin.usage, fin.fallbacks.len());
+        Ok(fin)
+    }
+
+    /// **FusionProvider** (`docs/model-routing.md` §4): a deliberate multi-model path
+    /// for high-risk planning/review. Runs the top-`n` constraint+budget-satisfying
+    /// candidates and returns each one's result as a [`PanelEntry`] panel (highest-
+    /// ranked first); the caller — e.g. the advisor — fuses/compares them. This is
+    /// **not** the default path (cost discipline); reserve it for high-leverage steps.
+    /// Each successful panelist meters into the shared [`BudgetLedger`] (invariant 11).
+    /// Streaming is suppressed so panelists' outputs do not interleave.
+    ///
+    /// # Errors
+    /// [`RouteError`] when no model satisfies the constraints/budget. A panel of size 0
+    /// (no candidate ran) is impossible — that surfaces as the routing error.
+    pub fn fusion_panel(
+        &mut self,
+        req: &CompleteRequest,
+        n: usize,
+    ) -> Result<Vec<PanelEntry>, RouteError> {
         let registry = self.registry_indexed();
         let candidates = select_candidates(&registry, req)?;
         let candidates = apply_budget(candidates, req)?;
-        let fin = run_reliable(&self.providers, candidates, req, sink)?;
-        // Account on success (invariant 11).
-        // Saturating accumulation — monotonic counters never wrap (matching the
-        // kernel's convention for `next_approval`/event-seq/lease counters).
+        let panel = run_fusion(&self.providers, candidates, req, n);
+        for entry in &panel {
+            if let Ok(c) = &entry.completion {
+                self.account(&c.usage, 0);
+            }
+        }
+        Ok(panel)
+    }
+
+    /// Success accounting into the shared ledger (invariant 11). Saturating — monotonic
+    /// counters never wrap (matching the kernel's counter convention).
+    fn account(&mut self, usage: &Usage, fallbacks: usize) {
         self.ledger.requests = self.ledger.requests.saturating_add(1);
         self.ledger.input_tokens = self
             .ledger
             .input_tokens
-            .saturating_add(u64::from(fin.usage.input_tokens));
+            .saturating_add(u64::from(usage.input_tokens));
         self.ledger.output_tokens = self
             .ledger
             .output_tokens
-            .saturating_add(u64::from(fin.usage.output_tokens));
-        self.ledger.cost_micros = self
-            .ledger
-            .cost_micros
-            .saturating_add(fin.usage.cost_micros);
-        self.ledger.fallbacks = self
-            .ledger
-            .fallbacks
-            .saturating_add(fin.fallbacks.len() as u64);
-        Ok(fin)
+            .saturating_add(u64::from(usage.output_tokens));
+        self.ledger.cost_micros = self.ledger.cost_micros.saturating_add(usage.cost_micros);
+        self.ledger.fallbacks = self.ledger.fallbacks.saturating_add(fallbacks as u64);
     }
 
     fn registry_indexed(&self) -> Vec<Candidate> {
@@ -460,6 +522,61 @@ pub fn run_reliable(
         }
     }
     Err(RouteError::AllProvidersFailed(last_err))
+}
+
+/// One model's contribution to a [`fusion_panel`](Engine::fusion_panel): its identity
+/// and its success-or-failure result. Streaming is suppressed in fusion, so a
+/// successful `completion` carries the whole text.
+#[derive(Debug)]
+pub struct PanelEntry {
+    /// The provider that produced this entry.
+    pub provider: String,
+    /// The model that produced this entry.
+    pub model: String,
+    /// The model's result (full completion on success, or the typed error).
+    pub completion: Result<Completion, ProviderError>,
+}
+
+/// **LocalFallbackProvider** behavior (`docs/model-routing.md` §4): reorder the
+/// already constraint+budget-filtered `candidates` so **local** models are tried
+/// **last** — remote first, local as a true last resort, so [`run_reliable`] degrades
+/// to a local model only after every remote candidate is exhausted (the privacy/offline
+/// resilience net). It operates only on candidates that already passed
+/// [`select_candidates`] + [`apply_budget`], so it can never introduce a model that
+/// violates a hard constraint or the budget. Order within each group is preserved.
+#[must_use]
+pub fn ensure_local_fallback(candidates: Vec<Candidate>) -> Vec<Candidate> {
+    let (mut remote, local): (Vec<Candidate>, Vec<Candidate>) =
+        candidates.into_iter().partition(|c| !c.card.local);
+    remote.extend(local);
+    remote
+}
+
+/// **FusionProvider** behavior (`docs/model-routing.md` §4): run the top-`n` candidates
+/// and collect each result as a [`PanelEntry`]. `n` is clamped to the candidate count
+/// (`n == 0` → empty panel). Streaming is suppressed (a no-op sink) so panelists do not
+/// interleave. The candidates arrive already constraint+budget-filtered and ordered
+/// strongest-first by [`select_candidates`], so the panel is the strongest `n` available.
+#[must_use]
+pub fn run_fusion(
+    providers: &[Box<dyn Provider>],
+    candidates: Vec<Candidate>,
+    req: &CompleteRequest,
+    n: usize,
+) -> Vec<PanelEntry> {
+    let take = n.min(candidates.len());
+    let mut panel = Vec::with_capacity(take);
+    for cand in candidates.into_iter().take(take) {
+        let provider = &providers[cand.provider_idx];
+        let mut sink = |_: &str| {};
+        let completion = provider.complete(&cand.card.model, req, &mut sink);
+        panel.push(PanelEntry {
+            provider: cand.provider_id,
+            model: cand.card.model,
+            completion,
+        });
+    }
+    panel
 }
 
 /// The sidecar request loop: read [`Request`]s from `r`, drive `engine`, write
@@ -1108,6 +1225,79 @@ mod tests {
         let mut sink = |_: &str| {};
         let fin = engine.complete(&r, &mut sink).unwrap();
         assert_eq!(fin.provider, "mock-local");
+    }
+
+    // ---- LocalFallbackProvider + FusionProvider (docs/model-routing.md §4) ----
+
+    #[test]
+    fn ensure_local_fallback_moves_local_to_the_end() {
+        let cands = vec![
+            cand(0, "local", card("l1", 8000, 0, false, true, true)),
+            cand(1, "remote", card("r1", 8000, 100, false, false, true)),
+            cand(0, "local", card("l2", 8000, 0, false, true, true)),
+        ];
+        let out = ensure_local_fallback(cands);
+        // Remote first, both locals after (each group keeps its order).
+        assert_eq!(out[0].card.model, "r1");
+        assert!(out[1].card.local && out[2].card.local);
+        // Idempotent.
+        let again = ensure_local_fallback(out.clone());
+        assert_eq!(
+            again
+                .iter()
+                .map(|c| c.card.model.clone())
+                .collect::<Vec<_>>(),
+            out.iter().map(|c| c.card.model.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn complete_with_local_fallback_degrades_to_local_when_remote_fails() {
+        // Remote always fails; a healthy local Echo model is the last resort.
+        let providers: Vec<Box<dyn Provider>> = vec![
+            Box::new(MockProvider::new(
+                "mock-remote",
+                vec![card("r1", 32000, 1000, false, false, true)],
+                MockBehavior::AlwaysFail("503".into()),
+            )),
+            Box::new(MockProvider::new(
+                "mock-local",
+                vec![card("l1", 16000, 0, false, true, true)],
+                MockBehavior::Echo,
+            )),
+        ];
+        let mut engine = Engine::new(providers);
+        let mut sink = |_: &str| {};
+        let fin = engine
+            .complete_with_local_fallback(&req(Role::Implementation, "hi"), &mut sink)
+            .unwrap();
+        assert_eq!(fin.provider, "mock-local");
+        assert!(fin.fallbacks.contains(&"mock-remote".to_string()));
+        assert_eq!(engine.ledger().requests, 1);
+    }
+
+    #[test]
+    fn fusion_panel_runs_top_n_and_meters_each() {
+        let mut engine = default_mock_engine();
+        // The default engine has 3 models (2 remote + 1 local); a panel of 2 runs the
+        // strongest two for an advisor-role request.
+        let panel = engine.fusion_panel(&req(Role::Advisor, "plan"), 2).unwrap();
+        assert_eq!(panel.len(), 2);
+        assert!(panel.iter().all(|e| e.completion.is_ok()));
+        // Each successful panelist metered into the shared ledger (invariant 11).
+        assert_eq!(engine.ledger().requests, 2);
+    }
+
+    #[test]
+    fn fusion_panel_clamps_n_to_candidate_count() {
+        let mut engine = default_mock_engine();
+        let panel = engine
+            .fusion_panel(&req(Role::Advisor, "plan"), 99)
+            .unwrap();
+        // Never more than the available candidates; n==0 yields an empty panel.
+        assert!(!panel.is_empty() && panel.len() <= 3);
+        let empty = engine.fusion_panel(&req(Role::Advisor, "plan"), 0).unwrap();
+        assert!(empty.is_empty());
     }
 
     // ---- End-to-end over the protocol (caller <-> serve), in-process pipe ----

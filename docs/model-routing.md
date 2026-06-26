@@ -175,10 +175,16 @@ privacy-must-stay-local request never routes to a remote provider).
 
 ## 4. Meta-providers
 
-CrustCore composes routing behavior from **meta-provider** types — each wraps
-inner providers and adds one policy ([`ROADMAP.md` §13.2](../ROADMAP.md)). They
-compose (a `BudgetProvider` over a `RouterProvider` over a `ReliableProvider`,
-etc.).
+CrustCore composes routing behavior from **meta-provider behaviors** — each adds one
+policy ([`ROADMAP.md` §13.2](../ROADMAP.md)). They are realized as **composable
+functions over the candidate list** (not wrapper structs), so they compose by
+sequencing: `Engine::complete` runs Router → Budget → Reliable
+(`select_candidates` → `apply_budget` → `run_reliable`). Two further behaviors are
+**opt-in engine methods**: `LocalFallbackProvider` (`ensure_local_fallback`, via
+`Engine::complete_with_local_fallback`) reorders the already-filtered candidates so a
+local model is tried *last* — a true last-resort degrade; `FusionProvider`
+(`run_fusion`, via `Engine::fusion_panel`) runs the strongest *n* candidates and
+returns each result as a panel for the caller (e.g. the advisor) to fuse.
 
 | Meta-provider | Behavior | Primary concern |
 | --- | --- | --- |
