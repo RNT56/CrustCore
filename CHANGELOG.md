@@ -30,6 +30,18 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **`P8-store` OS keychain loaders (`crustcore-secrets`, `macos-keychain` /
+  `linux-keyring` features).** Dependency-free loaders that fetch secrets from the
+  macOS Keychain (`security find-generic-password -w`) or Linux Secret Service
+  (`secret-tool lookup`) **into an `InMemoryStore`** the broker reads — the same
+  decrypt-into pattern as the encrypted-file vault. The argv-building, output-parsing
+  (macOS trailing-newline strip; empty→not-found), and fail-closed store population
+  (one failed entry fails the whole load) are tested over an injected `CommandRunner`
+  mock; the real shell-out (`SystemCommandRunner`, `env_clear`ed) is the only
+  `TODO(P8-store-live)` part. No secret bytes appear in errors. Off by default, never
+  in nano (`forbidden-deps` confirms); xtask gates `macos-keychain`. 7 tests. First
+  Tier-B item.
+
 - **Conversational front door — `crustcore-chat` (new non-nano capability pack).**
   A NilCore-parity chat surface built as a std-only, deterministic **decision core**
   (no network in the core; the live model transport is the spawned `crustcore-net`

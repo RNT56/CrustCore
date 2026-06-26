@@ -24,3 +24,11 @@ getrandom = { version = "0.2", optional = true }
 # Enables the encrypted-file vault `SecretStore` backend ([`store`]). Off by
 # default; the nano build never enables it, so nano links no crypto.
 vault-file = ["dep:aes-gcm", "dep:scrypt", "dep:getrandom"]
+
+# OS keychain loaders (P8-store), behind their own features. Dependency-free: they
+# shell out to the system tool (`security` on macOS, `secret-tool` on Linux) and load
+# secrets INTO an `InMemoryStore` the broker reads (the decrypt-into pattern). Off by
+# default; never in nano. The command-building/parsing logic is tested over a mock; the
+# real shell-out is `TODO(P8-store-live)`.
+macos-keychain = []
+linux-keyring = []
