@@ -24,6 +24,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use crustcore_net::telegram::InlineKeyboard;
 use crustcore_policy::{Approved, AuthorizedUser};
 use crustcore_secrets::{ModelVisibleText, Redactor};
 use crustcore_types::hash::sha256;
@@ -260,6 +261,8 @@ pub enum EnvelopeKind {
     Text,
     /// An inline-button approval callback.
     Callback(CallbackData),
+    /// The 🛑 Steer inline button was pressed (arms the next message as a steer).
+    SteerButton,
 }
 
 /// A normalized, allowlist-checked, deduped inbound message (`docs/telegram.md`
@@ -320,15 +323,19 @@ pub fn normalize(
         return Err(RejectReason::NotAllowlisted);
     }
 
-    // Callback (inline approval button) path.
+    // Callback path: the 🛑 Steer button, or an approval inline button.
     if let Some(cb) = &raw.callback_data {
-        let data = CallbackData::parse(cb).ok_or(RejectReason::BadCallback)?;
+        let kind = if cb == crate::chat::STEER_BUTTON_DATA {
+            EnvelopeKind::SteerButton
+        } else {
+            EnvelopeKind::Callback(CallbackData::parse(cb).ok_or(RejectReason::BadCallback)?)
+        };
         return Ok(InboundEnvelope {
             source_chat_id: chat,
             update_id: raw.update_id,
             message_id: raw.message_id,
             received_at: now,
-            kind: EnvelopeKind::Callback(data),
+            kind,
             normalized_text: BoundedText::truncated("", MAX_INBOUND_TEXT),
             steer_flag: false,
         });
@@ -473,6 +480,9 @@ pub enum RuntimeEvent {
     /// An approval callback to resolve (the daemon runs it through the approval
     /// engine before it becomes an `ApprovalResolved` event).
     ApprovalCallback(CallbackData),
+    /// The 🛑 Steer button was pressed: arm the next message as a steer (NilCore
+    /// parity). It grants no capability — it only changes how the next turn is routed.
+    SteerButton,
 }
 
 /// Routes a normalized envelope to its [`RuntimeEvent`]. Queue is the default; a
@@ -482,6 +492,7 @@ pub fn route(envelope: InboundEnvelope) -> RuntimeEvent {
     match envelope.kind {
         EnvelopeKind::Command(cmd) => RuntimeEvent::Command(cmd),
         EnvelopeKind::Callback(cb) => RuntimeEvent::ApprovalCallback(cb),
+        EnvelopeKind::SteerButton => RuntimeEvent::SteerButton,
         EnvelopeKind::Text => {
             if envelope.steer_flag {
                 RuntimeEvent::Steer(envelope.normalized_text)
@@ -800,11 +811,17 @@ pub trait TelegramApi {
     /// [`TgError`] on a transport/API failure.
     fn get_updates(&self, offset: i64) -> Result<Vec<RawUpdate>, TgError>;
 
-    /// Sends a **redacted, rendered** reply to a chat; returns the message id.
+    /// Sends a **redacted, rendered** reply to a chat, optionally with an inline
+    /// keyboard (approval buttons / the 🛑 Steer button); returns the message id.
     ///
     /// # Errors
     /// [`TgError`] on a transport/API failure.
-    fn send_message(&self, chat: ChatId, text: &ModelVisibleText) -> Result<i64, TgError>;
+    fn send_message(
+        &self,
+        chat: ChatId,
+        text: &ModelVisibleText,
+        reply_markup: Option<&InlineKeyboard>,
+    ) -> Result<i64, TgError>;
 }
 
 /// The inbound runtime loop: each poll fetches updates, advances the long-poll
@@ -987,11 +1004,17 @@ impl<T: crustcore_net::telegram::TelegramBotApi> TelegramApi for LiveTelegramApi
         Ok(updates.iter().map(raw_update_from_net).collect())
     }
 
-    fn send_message(&self, chat: ChatId, text: &ModelVisibleText) -> Result<i64, TgError> {
+    fn send_message(
+        &self,
+        chat: ChatId,
+        text: &ModelVisibleText,
+        reply_markup: Option<&InlineKeyboard>,
+    ) -> Result<i64, TgError> {
         // `text` can only be a redacted `ModelVisibleText` (constructed solely via the
         // `Redactor`), so the wire send carries nothing unredacted (invariants 2, 5, 15).
+        // The keyboard carries only fixed button labels + callback ids (no secrets).
         self.bot
-            .send_message(chat.0, text.as_str())
+            .send_message(chat.0, text.as_str(), reply_markup)
             .map_err(|e| tg_error_from_net(&e))
     }
 }
@@ -1323,7 +1346,12 @@ mod tests {
                 .cloned()
                 .collect())
         }
-        fn send_message(&self, chat: ChatId, text: &ModelVisibleText) -> Result<i64, TgError> {
+        fn send_message(
+            &self,
+            chat: ChatId,
+            text: &ModelVisibleText,
+            _reply_markup: Option<&InlineKeyboard>,
+        ) -> Result<i64, TgError> {
             self.sent
                 .borrow_mut()
                 .push((chat, text.as_str().to_string()));
@@ -1379,7 +1407,7 @@ mod tests {
         let mut redactor = Redactor::new();
         redactor.register("tok", b"sk-TGSENTINEL");
         let rendered = OutboundRenderer::new(&redactor).logs("status leaked sk-TGSENTINEL");
-        api.send_message(ChatId(100), &rendered).unwrap();
+        api.send_message(ChatId(100), &rendered, None).unwrap();
         let sent = api.sent.borrow();
         assert_eq!(sent.len(), 1);
         assert!(
@@ -1460,6 +1488,7 @@ mod tests {
                 &self,
                 chat_id: i64,
                 text: &str,
+                _reply_markup: Option<&crustcore_net::telegram::InlineKeyboard>,
             ) -> Result<i64, crustcore_net::telegram::TgError> {
                 self.sent.borrow_mut().push((chat_id, text.to_string()));
                 Ok(self.sent.borrow().len() as i64)
@@ -1502,7 +1531,7 @@ mod tests {
             let mut redactor = Redactor::new();
             redactor.register("tok", b"sk-LIVESENTINEL");
             let rendered = OutboundRenderer::new(&redactor).logs("leak sk-LIVESENTINEL");
-            assert!(api.send_message(ChatId(100), &rendered).is_ok());
+            assert!(api.send_message(ChatId(100), &rendered, None).is_ok());
         }
 
         // The real getUpdates/sendMessage round-trip against api.telegram.org is `#[ignore]`d

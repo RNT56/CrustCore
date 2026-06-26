@@ -30,6 +30,15 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Inline keyboards — 🛑 Steer + approve/deny buttons.** `crustcore_net::telegram::
+  InlineKeyboard` (bounded: ≤8 rows × 8 cols, fields ≤64 bytes) threads through
+  `send_message`'s new `reply_markup` arg; every converse answer carries a **🛑 Steer**
+  button (a tap arms the next message as a steer — a new `RuntimeEvent::SteerButton`,
+  handled by `normalize`/`route`/`dispatch_event` + `ChatBridge`), and
+  `runtime::approval_keyboard` renders nonce-bound **✅ approve / 🚫 deny** buttons whose
+  `callback_data` is op-bound exactly like the `/approve` command. Buttons carry only
+  fixed labels + callback ids — never a secret. CI-tested.
+
 - **The runnable Telegram bot — `crustcore-daemon serve` actually runs now.** The chat
   front door is no longer just building blocks: a real long-poll → dispatch → reply loop
   drives it, launching verified tasks from chat.

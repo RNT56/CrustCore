@@ -14,15 +14,42 @@
 //!   thing it cannot run in CI is the real HTTPS socket (`TODO(P9-net-live)`).
 
 use crustcore_chat::ChatRoute;
+use crustcore_net::telegram::InlineKeyboard;
 use crustcore_netproto::CompleteRequest;
 use crustcore_secrets::ModelVisibleText;
 use crustcore_types::{ApprovalResolution, Timestamp};
 
-use crate::chat::{ChatBridge, ChatReply};
+use crate::chat::{ChatBridge, ChatReply, STEER_BUTTON_DATA};
 use crate::telegram::{
     ApprovalEngine, ApprovalOutcome, ChatAllowlist, ChatId, Command, OutboundRenderer,
     RuntimeEvent, StatusSnapshot,
 };
+
+/// A 🛑 Steer inline keyboard attached to converse answers, so the user can interrupt
+/// with a tap (NilCore parity). Tapping arms the next message as a steer. The button
+/// carries only a fixed label + the `STEER_BUTTON_DATA` callback id — no secret.
+fn steer_button() -> InlineKeyboard {
+    InlineKeyboard::single_row(vec![(
+        "🛑 Steer".to_string(),
+        STEER_BUTTON_DATA.to_string(),
+    )])
+}
+
+/// Approve/deny inline buttons for a pending approval (callback_data carries the
+/// nonce-bound `ap:<id>:<approve|deny>:<op_hash>` so a tap is operation-bound).
+#[must_use]
+pub fn approval_keyboard(nonce: &crate::telegram::ApprovalNonce) -> InlineKeyboard {
+    InlineKeyboard::single_row(vec![
+        (
+            "✅ approve".to_string(),
+            nonce.callback_data(ApprovalResolution::Approve),
+        ),
+        (
+            "🚫 deny".to_string(),
+            nonce.callback_data(ApprovalResolution::Deny),
+        ),
+    ])
+}
 
 /// One redacted message the loop must send. `text` is [`ModelVisibleText`] — the only
 /// thing that can reach the wire (constructible solely via the [`Redactor`]).
@@ -34,6 +61,9 @@ pub struct Outbound {
     pub chat: ChatId,
     /// The redacted, bounded text.
     pub text: ModelVisibleText,
+    /// An optional inline keyboard (the 🛑 Steer button on answers, approve/deny on an
+    /// approval request). Carries only fixed labels + callback ids — never a secret.
+    pub keyboard: Option<InlineKeyboard>,
 }
 
 /// An action the loop must perform *after* sending the messages. These need the loop's
@@ -69,10 +99,26 @@ pub struct Dispatch {
 }
 
 impl Dispatch {
-    /// A single message, no action.
+    /// A single message (no keyboard, no action).
     fn say(chat: ChatId, text: ModelVisibleText) -> Self {
         Dispatch {
-            outbound: vec![Outbound { chat, text }],
+            outbound: vec![Outbound {
+                chat,
+                text,
+                keyboard: None,
+            }],
+            action: None,
+        }
+    }
+
+    /// A single message with an inline keyboard (no action).
+    fn say_kb(chat: ChatId, text: ModelVisibleText, keyboard: InlineKeyboard) -> Self {
+        Dispatch {
+            outbound: vec![Outbound {
+                chat,
+                text,
+                keyboard: Some(keyboard),
+            }],
             action: None,
         }
     }
@@ -141,10 +187,21 @@ pub fn dispatch_event(
             );
             Dispatch::say(chat, render_approval_outcome(&outcome, ctx.renderer))
         }
+        // The 🛑 Steer button was tapped: arm the next message as a steer (grants
+        // nothing — it only changes how the next turn is routed).
+        RuntimeEvent::SteerButton => {
+            bridge.arm_steer();
+            Dispatch::say(
+                chat,
+                ctx.renderer
+                    .notice("🛑 steer armed — send your next message to redirect."),
+            )
+        }
         // A plain message or a `!`-steer: run it through the chat bridge.
         ev @ (RuntimeEvent::QueuedTurn(_) | RuntimeEvent::Steer(_)) => {
             match bridge.dispatch(ev, model) {
-                ChatReply::Answer(a) => Dispatch::say(chat, a),
+                // A converse answer carries a 🛑 Steer button so the user can interrupt.
+                ChatReply::Answer(a) => Dispatch::say_kb(chat, a, steer_button()),
                 ChatReply::StartTask { route, prompt } => Dispatch {
                     outbound: vec![Outbound {
                         chat,
@@ -152,6 +209,7 @@ pub fn dispatch_event(
                             "🛠️ on it — starting a {} task: {prompt}",
                             route.as_str()
                         )),
+                        keyboard: None,
                     }],
                     action: Some(LoopAction::LaunchTask {
                         route,
@@ -217,6 +275,7 @@ fn dispatch_command(
             outbound: vec![Outbound {
                 chat,
                 text: r.notice("⏹️ cancelling the active task (if any)."),
+                keyboard: None,
             }],
             action: Some(LoopAction::CancelTask { chat }),
         },
@@ -381,7 +440,7 @@ mod live {
             if let Some(handle) = active.as_mut() {
                 for msg in handle.drain() {
                     let text = renderer.notice(&msg);
-                    let _ = api.send_message(handle.chat(), &text);
+                    let _ = api.send_message(handle.chat(), &text, None);
                 }
                 if handle.finished() {
                     active = None;
@@ -419,7 +478,7 @@ mod live {
                             )
                         };
                         for o in &dispatch.outbound {
-                            let _ = api.send_message(o.chat, &o.text);
+                            let _ = api.send_message(o.chat, &o.text, o.keyboard.as_ref());
                         }
                         handle_action(dispatch.action, &task_spec, &mut active, &renderer, &api);
                     }
@@ -443,7 +502,7 @@ mod live {
                 if active.is_some() {
                     let t = renderer
                         .notice("a task is already running — /cancel it first, then retry.");
-                    let _ = api.send_message(chat, &t);
+                    let _ = api.send_message(chat, &t, None);
                     return;
                 }
                 match task_spec {
@@ -453,7 +512,7 @@ mod live {
                             "I can chat here, but task execution needs a bound repo + verify \
                              command (start me with --dir and --verify).",
                         );
-                        let _ = api.send_message(chat, &t);
+                        let _ = api.send_message(chat, &t, None);
                     }
                 }
             }
@@ -462,7 +521,7 @@ mod live {
                     handle.cancel();
                 } else {
                     let t = renderer.notice("nothing to cancel — no task is running.");
-                    let _ = api.send_message(chat, &t);
+                    let _ = api.send_message(chat, &t, None);
                 }
             }
             None => {}
@@ -688,5 +747,58 @@ mod tests {
         assert!(d.outbound[0].text.as_str().contains("not an allowlisted"));
         // Not consumed (a non-allowlisted resolution must not touch the pending).
         assert!(approvals.is_pending(42));
+    }
+
+    #[test]
+    fn a_converse_answer_carries_a_steer_button() {
+        let broker = SecretBroker::new(InMemoryStore::new());
+        let allow = ChatAllowlist::of(&[7]);
+        let mut approvals = ApprovalEngine::new();
+        let mut model = |_req: &CompleteRequest| Some("here's the answer".to_string());
+        let d = drive(
+            &broker,
+            &allow,
+            &mut approvals,
+            RuntimeEvent::QueuedTurn(bt("what's up?")),
+            &mut model,
+        );
+        let kb = d.outbound[0]
+            .keyboard
+            .as_ref()
+            .expect("a converse answer carries a 🛑 Steer button");
+        assert!(kb
+            .rows
+            .iter()
+            .flatten()
+            .any(|(_, data)| data == crate::chat::STEER_BUTTON_DATA));
+    }
+
+    #[test]
+    fn steer_button_event_arms_and_acknowledges() {
+        let broker = SecretBroker::new(InMemoryStore::new());
+        let allow = ChatAllowlist::of(&[7]);
+        let mut approvals = ApprovalEngine::new();
+        let mut model = |_req: &CompleteRequest| None;
+        let d = drive(
+            &broker,
+            &allow,
+            &mut approvals,
+            RuntimeEvent::SteerButton,
+            &mut model,
+        );
+        assert!(d.outbound[0].text.as_str().contains("steer armed"));
+        assert!(d.action.is_none());
+    }
+
+    #[test]
+    fn approval_keyboard_buttons_are_operation_bound() {
+        // The approve/deny buttons carry the nonce-bound callback_data, so a tap is
+        // op-bound exactly like the `/approve` command path.
+        let mut approvals = ApprovalEngine::new();
+        let nonce = approvals.request(9, "merge x", "merge x", Timestamp::from_millis(10_000));
+        let kb = approval_keyboard(&nonce);
+        let datas: Vec<&str> = kb.rows.iter().flatten().map(|(_, d)| d.as_str()).collect();
+        assert!(datas.iter().any(|d| d.starts_with("ap:9:approve:")));
+        assert!(datas.iter().any(|d| d.starts_with("ap:9:deny:")));
     }
 }

@@ -75,7 +75,32 @@ Each stage is a small, deterministic, CI-tested unit (see `crustcore-chat`'s mod
 | Channel | Status | Notes |
 | --- | --- | --- |
 | Terminal (`crustcore chat`) | **implemented** | local operator = authorized principal; feature `chat` |
-| Telegram converse mode | next increment | extends [`telegram.md`](./telegram.md) with a redacted `ConverseTurn` + a 🛑 Steer button; reuses the allowlist + approval engine |
+| Telegram (`crustcore-daemon serve`) | **implemented** (loop behind `live`) | the running bot: long-poll → dispatch → reply, with a 🛑 Steer button on answers, approve/deny buttons, and chat-launched verified tasks |
+
+## 5.1 Running the Telegram bot
+
+The runtime loop lives in `crustcore_daemon::runtime` (`dispatch_event` is the pure,
+CI-tested core; `run_serve_loop` wires the live transports behind the `live` feature).
+Setup — binding is **CLI-side, never a DM-to-pair flow** (an attacker race; §4 of
+[`telegram.md`](./telegram.md)):
+
+```bash
+# 1. Create a bot with @BotFather, copy the token.
+export CRUSTCORE_TELEGRAM_TOKEN=<token>
+
+# 2. Discover your chat id (message the bot; it prints it).
+crustcore-daemon serve --pair        # built with --features live
+
+# 3. Bind it + (optionally) enable task execution against a repo.
+crustcore-daemon serve --chat-id <id> --dir . --verify 'cargo test'
+```
+
+Then in the chat: plain text is answered (with a 🛑 Steer button to interrupt); a task
+request ("fix the failing test") runs the **same** worktree → sandbox → verifier flow as
+`crustcore run` on a background thread, streaming progress; `!text` steers; `/cancel`
+aborts; `/approve <id>`/`/deny <id>` (or the inline buttons) resolve approvals. An empty
+allowlist is deny-all (the bot ignores everyone); the bot token rides only in the URL
+path and is never logged.
 
 ## 6. Reasoning streaming
 
