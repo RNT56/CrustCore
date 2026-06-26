@@ -28,6 +28,10 @@ agent/PR/role/size/invariant audit trail.
 
 ## [Unreleased]
 
+_Nothing yet — the next release accumulates here._
+
+## [0.5.0] - 2026-06-26
+
 ### Added
 
 - **Track the all-capability-packs flagship binary size (`cargo xtask full-size`).** A new
