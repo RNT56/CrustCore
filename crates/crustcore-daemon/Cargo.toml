@@ -8,6 +8,13 @@ authors.workspace = true
 repository.workspace = true
 description = "Long-running CrustCore runtime: Telegram/GitHub loops, leases, supervision."
 
+# The runtime entry point. A tiny hand-rolled CLI (no clap) dispatching `serve`
+# (wire the std-only runtime pieces + report readiness), `doctor`, `version`, `help`.
+# Non-nano: nano links no part of this stack (invariants 19, 20).
+[[bin]]
+name = "crustcore-daemon"
+path = "src/bin/crustcore-daemon.rs"
+
 [dependencies]
 crustcore-types = { workspace = true }
 crustcore-kernel = { workspace = true }

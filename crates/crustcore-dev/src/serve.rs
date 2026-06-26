@@ -9,10 +9,12 @@
 //! loopback, route-classification, and the read/mutate split all live in the core and are
 //! CI-tested over `MockDevBackend`.
 //!
-//! Real provider/MCP/spawned-helper wiring (a `DevBackend` impl backed by a live event
-//! log, the spawned `crustcore-net` helper, and the P13-net MCP transport) is
-//! `TODO(C7-serve-live)` — it drops in behind this same `route` call with the core
-//! unchanged.
+//! The embedded single-page inspector ([`crate::assets`]) is served through this layer at
+//! `/` (HTML) and `/assets` (CSS), tagged with the right `Content-Type` in
+//! [`into_response`]. Real provider/MCP/spawned-helper wiring (a `DevBackend` impl backed
+//! by a live event log, the spawned `crustcore-net` helper, and the P13-net MCP transport)
+//! and live `/ws` snapshot streaming remain `TODO(C7-serve-live)` — they drop in behind
+//! this same `route` call with the core unchanged.
 
 use std::io::Read;
 use std::net::SocketAddr;
@@ -103,7 +105,12 @@ async fn dispatch<B: DevBackend + Send + 'static>(
         body.to_vec(),
     ) {
         Ok(r) => r.with_peer_loopback(peer.ip().is_loopback()),
-        Err(e) => return into_response(DevResponse::error(Status::BadRequest, e.to_string())),
+        Err(e) => {
+            return into_response(
+                uri.path(),
+                DevResponse::error(Status::BadRequest, e.to_string()),
+            )
+        }
     };
 
     // The core does ALL the security work. `&mut` is taken only here, under the lock; the
@@ -112,14 +119,31 @@ async fn dispatch<B: DevBackend + Send + 'static>(
         let mut backend = state.backend.lock().expect("backend mutex poisoned");
         crate::mutation::route(&mut *backend, &state.auth, &state.config, &dev_req)
     };
-    into_response(resp)
+    into_response(uri.path(), resp)
 }
 
-fn into_response(resp: DevResponse) -> Response {
+/// Map a core [`DevResponse`] onto an HTTP response, tagging the embedded single-page
+/// inspector with the right `Content-Type` (the core carries only a body string). Only the
+/// static SPA routes get a non-default type; every typed view stays `text/plain`.
+fn into_response(path: &str, resp: DevResponse) -> Response {
     let code =
         StatusCode::from_u16(resp.status.code()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let content_type = if resp.status == Status::Ok {
+        match path {
+            "/" => "text/html; charset=utf-8",
+            "/assets" => "text/css; charset=utf-8",
+            "/ws" => "application/json; charset=utf-8",
+            _ => "text/plain; charset=utf-8",
+        }
+    } else {
+        "text/plain; charset=utf-8"
+    };
     let mut http = Response::new(axum::body::Body::from(resp.body));
     *http.status_mut() = code;
+    http.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static(content_type),
+    );
     http
 }
 

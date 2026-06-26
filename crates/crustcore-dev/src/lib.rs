@@ -19,7 +19,10 @@
 //!   [`mutation`]); loopback config ([`config`]). No `axum`/`tokio`/`hyper` here.
 //! - **`serve` feature ([`serve`], self-verified, not in the default gate):** an
 //!   `axum`/`hyper` server bound to `127.0.0.1` that maps HTTP requests to the core
-//!   handler functions. Real provider/MCP/spawned-helper wiring is `TODO(C7-serve-live)`.
+//!   handler functions and sets the right `Content-Type` for the embedded SPA. The static
+//!   single-page inspector ([`assets`]) is now served at `/` (HTML) and `/assets` (CSS);
+//!   live websocket streaming (`/ws`) and real provider/MCP/spawned-helper wiring remain
+//!   `TODO(C7-serve-live)`.
 //!
 //! ## Trust posture (enforced structurally, not by convention)
 //!
@@ -56,6 +59,7 @@
 //! stack (`axum`/`tokio`/`hyper`) is `serve`-gated and absent from the default build.
 #![forbid(unsafe_code)]
 
+pub mod assets;
 pub mod auth;
 pub mod backend;
 pub mod config;
@@ -70,6 +74,7 @@ pub mod serve;
 #[cfg(feature = "serve")]
 pub mod serve_entry;
 
+pub use assets::{INSPECTOR_CSS, INSPECTOR_HTML, TITLE_MARKER};
 pub use auth::{AuthOutcome, Authenticator, BearerToken};
 pub use backend::{
     ApprovalView, DevBackend, FlowGraphView, FlowStepView, McpServerView, MockDevBackend,

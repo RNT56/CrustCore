@@ -116,6 +116,24 @@ agent/PR/role/size/invariant audit trail.
   tool-seq-cannot-leak case, the redact-chokepoint case, and the Internal/Redacted
   case (unit + end-to-end through `run_log`).
 
+- **`C7-devui` SPA served — real embedded inspector (`crustcore-dev`).** The `/` and
+  `/assets` placeholders now serve a dependency-free single-page inspector (inline
+  HTML/CSS/JS, no CDN): seven panels (run inspector, replay, providers, MCP, flow,
+  sessions, approvals) that `fetch()` the existing typed read endpoints with the
+  per-launch bearer token in an `Authorization` header (the token is obtained
+  client-side from the URL fragment and **never embedded** in any served byte).
+  Loopback-only + read/mutate type split + route count are unchanged; `/ws` returns a
+  documented non-streaming note (live websocket push remains `TODO(C7-serve-live)`).
+  10 new tests; the `serve` feature still compiles clean.
+
+- **`crustcore-daemon` binary + `serve` subcommand.** The runtime now has an entry
+  point: a tiny hand-rolled CLI (no clap) dispatching `serve`/`doctor`/`version`/`help`.
+  `serve` wires the std-only runtime pieces — a deny-all-default `ChatAllowlist` (from
+  `--chat-id`/`CRUSTCORE_TELEGRAM_ALLOW`), a `TelegramPoller`, and a `ChatBridge`
+  (persona + steering) — and prints a readiness report; the live Bot-API long-poll loop
+  stays `TODO(P9-net-live)` (no fake network loop). Pure `parse_args` unit-tested (11
+  tests). Non-nano, no new deps, nano unaffected.
+
 ### Changed
 
 - **Invariants 15 & 16 amended (owner-authorized) to sanction the chat front door.**

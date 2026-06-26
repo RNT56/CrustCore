@@ -1,0 +1,123 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* CrustCore dev UI styles (C7-devui). Dependency-free, served at `/assets`. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #11151a;
+  --panel: #1a212a;
+  --fg: #e6edf3;
+  --muted: #8b97a6;
+  --accent: #4ea1ff;
+  --err: #ff6b6b;
+  --border: #2a333f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 1.5rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: var(--bg);
+  color: var(--fg);
+  line-height: 1.45;
+}
+
+header h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.4rem;
+}
+
+header .sub {
+  margin: 0 0 1rem;
+  color: var(--muted);
+  max-width: 60ch;
+}
+
+#auth-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1.25rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+#auth-bar label {
+  color: var(--muted);
+}
+
+#auth-bar input {
+  flex: 1 1 24ch;
+  min-width: 18ch;
+  padding: 0.4rem 0.6rem;
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+button {
+  padding: 0.4rem 0.9rem;
+  font: inherit;
+  color: var(--bg);
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+button:hover {
+  filter: brightness(1.1);
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+main {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 28rem), 1fr));
+  gap: 1rem;
+}
+
+article {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem 1rem;
+  overflow: hidden;
+}
+
+article h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+  color: var(--accent);
+}
+
+pre.out {
+  margin: 0;
+  max-height: 22rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.85rem;
+  color: var(--fg);
+}
+
+pre.out.err {
+  color: var(--err);
+}
+
+footer {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
