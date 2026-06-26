@@ -215,6 +215,7 @@ fn clippy_features() -> Result<(), String> {
         ("crustcore-net", "live"),
         ("crustcore-secrets", "vault-file"),
         ("crustcore-index-rag", "persist"),
+        ("crustcore-index-rag", "ast"),
         ("crustcore-telemetry", "otlp"),
         ("crustcore", "chat"),
     ] {
@@ -244,6 +245,7 @@ fn test_features() -> Result<(), String> {
     for (package, feature) in [
         ("crustcore-secrets", "vault-file"),
         ("crustcore-index-rag", "persist"),
+        ("crustcore-index-rag", "ast"),
         ("crustcore-telemetry", "otlp"),
     ] {
         run(

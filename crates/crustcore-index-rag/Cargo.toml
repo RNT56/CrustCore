@@ -19,6 +19,13 @@ crustcore-index = { workspace = true }
 crustcore-secrets = { workspace = true }
 crustcore-types = { workspace = true }
 
+# OPTIONAL: the tree-sitter AST backend for precise symbol spans (`ast` feature only).
+# Never default, never linked into nano (off-by-default `dep:` deps are not selected by
+# the nano graph). tree-sitter brings its own (audited, upstream) `unsafe` C bindings; our
+# code stays `#![forbid(unsafe_code)]`-safe and only walks the parsed tree.
+tree-sitter = { version = "0.25", optional = true }
+tree-sitter-rust = { version = "0.24", optional = true }
+
 [features]
 default = []
 # Live text->vector embedding via B3's net-helper seam (`TODO(B3-embed-live)`); the
@@ -27,9 +34,11 @@ live = []
 # Persistent local store snapshot (reuses crustcore-index's dependency-free snapshot);
 # the seam is `TODO(C5-persist)`, off by default.
 persist = []
-# Tree-sitter / AST symbol spans for chunk boundaries (`TODO(C5-ast)`); the default is the
-# conservative grep/line-chunk fallback, so this is off by default and not in CI.
-ast = []
+# Tree-sitter / AST symbol spans for chunk boundaries (C5-ast, implemented for Rust). The
+# default remains the conservative grep/line-chunk fallback, so this is off by default and
+# not in CI; enabling it links the optional tree-sitter deps (never in nano). Additional
+# grammars are an additive follow-on (one `dep:tree-sitter-<lang>` + a match arm each).
+ast = ["dep:tree-sitter", "dep:tree-sitter-rust"]
 # External vector-store backends, each a thin adapter routing auth via `CredentialProxy`.
 # The real network client is `TODO(C5-<backend>-live)`; off by default, never in nano.
 qdrant = []

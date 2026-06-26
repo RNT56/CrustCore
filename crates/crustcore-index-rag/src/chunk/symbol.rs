@@ -6,10 +6,13 @@
 //! **Fail-closed default.** Whenever symbol info is absent — the `ast` feature is off, the
 //! file has no recognized symbols, or a symbol's line is out of range — this falls back to
 //! the conservative bounded line-chunking from [`Chunker::chunk`](super::Chunker::chunk)
-//! (adversarial dimension (d)). A tree-sitter/AST backend that produces precise spans is
-//! the `TODO(C5-ast)` seam behind the off-by-default `ast` feature; until then the symbol
-//! spans come from grep-located symbol lines, and the line-chunk fallback is always the
-//! safe path.
+//! (adversarial dimension (d)). Precise spans come from one of two sources, both feeding the
+//! same fail-closed machinery here:
+//! - the default grep-located symbol lines ([`symbol_spans_from_intel`]), or
+//! - **C5-ast (done for Rust):** tree-sitter byte-exact item spans behind the off-by-default
+//!   `ast` feature (`super::ast::ast_symbol_spans` / `Chunker::chunk_with_ast_symbols`).
+//!   Additional grammars are an additive follow-on. When the AST backend can't parse a file
+//!   it yields no spans, so this line-chunk fallback is always the safe path.
 
 use crustcore_index::{CodeIntel, MemorySource};
 
@@ -112,9 +115,10 @@ impl Chunker {
 /// [`GrepCodeIntel`](crustcore_index::GrepCodeIntel)). For each `name` in `symbol_names`,
 /// the backend's located line is treated as the symbol's start; the span runs to the next
 /// located symbol's start (or end of file) — a cheap, bounded approximation of an enclosing
-/// region. **This is grep-grade, not AST-grade**: precise tree-sitter spans are the
-/// `TODO(C5-ast)` seam. When no symbol is located the result is empty and the caller falls
-/// back to line-chunking (fail-closed).
+/// region. **This is grep-grade, not AST-grade**: precise tree-sitter spans are produced by
+/// the C5-ast backend (`super::ast::ast_symbol_spans`, `ast` feature; Rust today). When no
+/// symbol is located the result is empty and the caller falls back to line-chunking
+/// (fail-closed).
 ///
 /// `content` and the located line numbers must be consistent (same file). Line numbers are
 /// 1-based (as `GrepCodeIntel` produces). Out-of-range lines are dropped.

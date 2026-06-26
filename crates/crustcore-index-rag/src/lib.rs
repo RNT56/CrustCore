@@ -31,8 +31,10 @@
 //!
 //! Off-by-default feature seams (absent from CI / nano):
 //! - `live` — live text->vector embedding via B3's net-helper seam (`TODO(B3-embed-live)`).
-//! - `ast` — tree-sitter/AST symbol spans (`TODO(C5-ast)`); the default is the conservative
-//!   grep/line-chunk fallback.
+//! - `ast` — tree-sitter/AST symbol spans (C5-ast; implemented for Rust via
+//!   `chunk::ast::ast_symbol_spans` / `Chunker::chunk_with_ast_symbols`). The default
+//!   (feature off) remains the conservative grep/line-chunk fallback, and any parse failure
+//!   degrades to it; more grammars are an additive follow-on.
 //! - `persist` — a persistent local store snapshot ([`LocalVectorStore::save`] /
 //!   [`LocalVectorStore::load`]): a dependency-free, versioned, bounded, panic-free,
 //!   fail-closed "CCRG" frame, mirroring [`crustcore_index::MemoryStore`]'s snapshot.

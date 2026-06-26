@@ -81,6 +81,16 @@ agent/PR/role/size/invariant audit trail.
   count/dim/field cap **before** allocation and rejects bad magic / unknown version /
   truncation. 8 feature-gated tests. Off by default; never in nano.
 
+- **`C5-ast` implemented — tree-sitter AST symbol spans (`crustcore-index-rag`, `ast`
+  feature).** Precise chunk-boundary spans for **Rust** top-level items (fn / struct /
+  enum / impl / mod / trait) via optional `tree-sitter` 0.25 + `tree-sitter-rust` 0.24,
+  structured for additive grammars. Fail-closed to the existing line/grep fallback on
+  unknown extension / oversize / parse failure (default behavior byte-for-byte
+  unchanged); iterative walk (no recursion), bounded (≤4096 spans), never panics on
+  hostile input. 7 feature-gated tests. The deps are optional and off by default —
+  `cargo tree` confirms tree-sitter is **absent from the nano graph** (invariants 11,
+  19, 20).
+
 - **`B3-ann` implemented — approximate nearest-neighbor index (`crustcore-index`,
   dependency-free).** An additive `AnnIndex` using multi-table random-hyperplane LSH
   (10 tables × 8 bits, Hamming-radius-2 probe, hyperplanes from a fixed seed via an

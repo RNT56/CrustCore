@@ -234,7 +234,33 @@ fn next_char_boundary(s: &str, i: usize) -> usize {
     i
 }
 
+#[cfg(feature = "ast")]
+pub mod ast;
 pub mod symbol;
+
+impl Chunker {
+    /// **AST-aware chunking (C5-ast; `ast` feature only).** Parses `content` with
+    /// tree-sitter (grammar chosen from `path`'s extension), aligns chunk boundaries to the
+    /// precise byte spans of top-level items, and tags each with its symbol name. On any
+    /// failure — unsupported extension, oversize input, parse error, or no recognized items
+    /// — it falls back to the conservative line-chunking of
+    /// [`Chunker::chunk`](Self::chunk). It never relaxes a bound and never panics on hostile
+    /// input. The default (non-`ast`) behavior is unaffected; callers without the feature
+    /// keep using `chunk` / [`chunk_with_symbols`](Self::chunk_with_symbols).
+    #[cfg(feature = "ast")]
+    #[must_use]
+    pub fn chunk_with_ast_symbols(
+        &self,
+        path: &str,
+        content: &str,
+        source: crustcore_index::MemorySource,
+    ) -> Vec<Chunk> {
+        let spans = ast::ast_symbol_spans(path, content);
+        // `chunk_with_symbols` already falls back to `chunk` when `spans` is empty, so an
+        // unsupported/failed parse degrades to the exact line-chunk default.
+        self.chunk_with_symbols(path, content, source, &spans)
+    }
+}
 
 #[cfg(test)]
 mod tests {
