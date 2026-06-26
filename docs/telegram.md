@@ -95,6 +95,14 @@ Notes and edge cases:
 - Unknown commands, malformed arguments, and commands referencing a non-existent
   / not-owned task ID return a typed error reply; they never fall through to a
   model as a prompt.
+- **Multi-task supervision (`P10-net`, invariant 12).** `/tasks`, `/task`,
+  `/cancel`, and `/kill` resolve against a live, bounded-concurrency
+  `crustcore_daemon::registry::TaskRegistry`: each task carries a lease + heartbeat
+  (a healthy task — even a long *silent* verify — is never falsely expired; an
+  orphaned lease or over-budget task is reclaimed/killed and surfaced), and
+  `/cancel`//`/kill` are **owner-scoped** — one allowlisted operator cannot touch
+  another's task. The registry is a pure, CI-tested state machine; only the loop
+  that drives it is live.
 
 ---
 

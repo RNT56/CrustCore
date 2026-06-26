@@ -30,6 +30,25 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Multi-task supervised runtime (`P10-net`, invariant 12).** The daemon ran **one** chat
+  task at a time (`active: Option<TaskHandle>`); it now supervises **several** under a pure,
+  CI-tested `crustcore_daemon::registry::TaskRegistry` — bounded concurrency, per-task
+  lease + heartbeat, cooperative cancel + hard kill, and recovery. The registry is a
+  deterministic state machine over injected `now` (no threads/clock): `admit` reserves a
+  `supervisor::Scheduler` slot + grants a lease; `observe_progress`/`heartbeat` refresh the
+  lease (a healthy task — even a long *silent* verify — never falsely expires; the lease
+  reflects "the supervisor holds the live thread"); `tick` charges the per-task
+  `AgentBudget`/`AgentUsage` (invariant 11), reclaims an expired (orphaned) lease, kills a
+  runaway/over-budget task, and frees its slot — returning a bounded `RegistryAction` list
+  the live loop executes against the real `TaskHandle`s. It **reuses** the existing
+  `Scheduler`/`AgentBudget`/`AgentUsage` primitives verbatim and mirrors the kernel's lease
+  model in-process. `/tasks` and `/task <id>` now list/detail real tasks, `/cancel <id>` and
+  `/kill <id>` resolve against the registry (typed verbs, never a model prompt — invariant
+  16); tasks still never touch the user directly (the loop renders + redacts every line —
+  invariants 2, 5). 18 new tests (registry lifecycle/lease/budget/concurrency + command +
+  heartbeat). Cross-process recovery, an admin socket, and multi-repo stay marked
+  `TODO(daemon-*)` seams. Invariants 5, 11, 12, 13, 16, 19, 20. Nano: n/a (daemon-only).
+
 - **Dev-UI live `/ws` snapshot streaming (`C7-serve-live`).** The loopback inspector's `/ws`
   route now streams live runtime snapshots over **Server-Sent Events**. A new pure,
   always-compiled core (`crustcore_dev::stream`: `next_snapshot(&dyn ReadOnlyBackend,
