@@ -30,6 +30,25 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **`P9-net-live` Telegram Bot API + GitHub-App auth (`crustcore-net`).** A
+  `telegram::RestTelegram` client over the `HttpClient` transport — `getUpdates`
+  long-poll + `sendMessage`, the bot token resolved per-call via a new
+  `CredentialSource::bot_token` and spliced into the URL path (never logged, never in an
+  error body). And `githubapp` (behind a new `github-app` feature): RS256 JWT minting
+  (`{alg:RS256}`, `iat`/`exp≤10min`/`iss`) + installation-token exchange, the RSA key
+  resolved through the broker, `AppRsaKey`/`InstallationToken` non-`Debug`. `rsa`/`sha2`/
+  `base64` optional + gated (default tree links none). Telegram build/parse and the JWT
+  sign+verify are CI-tested (ephemeral keypair); the live HTTPS/exchange is `#[ignore]`d.
+
+- **`P14-exec` + `P14-intel` (`crustcore-index`).** Live repo enumeration via a
+  **hardened** `git ls-files` / `git grep -n` (scrubbed env, `core.hooksPath=/dev/null`,
+  no pager/attr drivers — an untrusted repo gets no config code-exec; bounded output)
+  feeding the existing `RepoMap`/`GrepCodeIntel` transforms (parsing CI-tested; live
+  `git` `#[ignore]`d). Plus `ast::AstCodeIntel` (off-by-default `ast` feature, optional
+  `tree-sitter` 0.25 + `tree-sitter-rust` 0.24): precise Rust symbol-definition lookup,
+  iterative + bounded, falling back to `GrepCodeIntel` on unknown ext / parse failure /
+  feature-off. tree-sitter never in nano.
+
 - **`B4-firecracker` / `B4-windows` — Tier-3 microVM + Windows backends
   (`crustcore-sandbox`).** A `FirecrackerBackend` (Tier-3 Hostile microVM) behind an
   off-by-default `firecracker` feature: dependency-free (shells out to `firecracker`),

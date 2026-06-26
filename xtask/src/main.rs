@@ -213,8 +213,10 @@ fn clippy() -> Result<(), String> {
 fn clippy_features() -> Result<(), String> {
     for (package, feature) in [
         ("crustcore-net", "live"),
+        ("crustcore-net", "github-app"),
         ("crustcore-secrets", "vault-file"),
         ("crustcore-secrets", "macos-keychain"),
+        ("crustcore-index", "ast"),
         ("crustcore-index-rag", "persist"),
         ("crustcore-index-rag", "ast"),
         ("crustcore-index-rag", "qdrant"),
@@ -249,8 +251,10 @@ fn clippy_features() -> Result<(), String> {
 /// The net adapter tests run under `--workspace` already (only `UreqClient` is gated).
 fn test_features() -> Result<(), String> {
     for (package, feature) in [
+        ("crustcore-net", "github-app"),
         ("crustcore-secrets", "vault-file"),
         ("crustcore-secrets", "macos-keychain"),
+        ("crustcore-index", "ast"),
         ("crustcore-index-rag", "persist"),
         ("crustcore-index-rag", "ast"),
         ("crustcore-index-rag", "qdrant"),

@@ -33,15 +33,30 @@
 //! helper) and never reach the model, a log, or the sandbox env (invariants 1–3). The
 //! adapters are drop-ins: they implement the same [`Provider`] trait the router,
 //! registry, and budget logic already route over, unchanged.
+//!
+//! Two more live wire layers sit over the same [`HttpClient`](transport::HttpClient)
+//! boundary, CI-tested with the [`ReplayClient`](transport::ReplayClient): the
+//! **Telegram Bot API** client ([`telegram`], P9-net — `getUpdates` long-poll +
+//! `sendMessage`, the bot token resolved per call and spliced into the URL path,
+//! never logged) and **GitHub App** authentication ([`githubapp`], behind the
+//! `github-app` feature — RS256 JWT minting + installation-token exchange, the RSA key
+//! resolved through the broker). Both keep credentials out of every error body, exactly
+//! like the providers' status-only error mapping.
 #![forbid(unsafe_code)]
 
 pub mod config;
 pub mod credsource;
 pub mod embed;
 pub mod github;
+/// GitHub App RS256 JWT minting + installation-token exchange (P10/B2-gh-app). Behind
+/// the `github-app` feature so the RSA/SHA-256/base64 crates it needs never enter the
+/// default (or nano) graph; the build/sign/verify + parse logic is CI-tested.
+#[cfg(feature = "github-app")]
+pub mod githubapp;
 pub mod modality;
 pub mod providers;
 pub mod rerank;
+pub mod telegram;
 pub mod transport;
 
 use std::io::{BufRead, Write};

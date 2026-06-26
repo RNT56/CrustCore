@@ -24,13 +24,32 @@ serde_json = "1"
 # feature ONLY — so the default build (workspace + CI + the default mock helper)
 # links no HTTP/TLS stack. `ureq` is a small, blocking, rustls-backed client matching
 # the sync `Provider::complete` contract (no async runtime). `forbidden-deps` asserts
-# the default crustcore-net build links no ureq/rustls.
+# the default crustcore-net build links no ureq/rustls. The live Telegram Bot API
+# client reuses this same `UreqClient` (no new HTTP stack).
 ureq = { version = "2", optional = true }
 
+# RS256 JWT minting for GitHub App auth (P10/B2-gh-app), behind the `github-app`
+# feature ONLY — all three OPTIONAL so the default build (workspace + CI + the mock
+# helper + nano, which never links this crate at all) pulls none of them.
+# `rsa` (RSASSA-PKCS1-v1_5) + `sha2` (SHA-256) sign the JWT; `base64` does the
+# url-safe-no-pad JWS encoding. `forbidden-deps` asserts the default crustcore-net
+# build links no rsa/sha2/base64.
+rsa = { version = "0.9", optional = true }
+# The `oid` feature is required: RSASSA-PKCS1-v1_5 (RS256) prefixes the DigestInfo
+# OID of SHA-256, so `SigningKey::<Sha256>::new` needs `Sha256: AssociatedOid`.
+sha2 = { version = "0.10", features = ["oid"], optional = true }
+base64 = { version = "0.22", optional = true }
+
 [features]
-# Enables the real network transport (`UreqClient`) + the `live_engine` builder. Off
-# by default; CI runs the adapter tests with a ReplayClient, not this.
+# Enables the real network transport (`UreqClient`) + the `live_engine` builder, and
+# the live Telegram Bot API client's real-socket path. Off by default; CI runs the
+# adapter tests with a ReplayClient, not this.
 live = ["dep:ureq"]
+
+# Enables GitHub App RS256 JWT minting + installation-token exchange (the `githubapp`
+# module). Pulls the rsa/sha2/base64 crypto crates — OFF by default, never nano.
+# Compose with `live` (`--features "live,github-app"`) for the real token exchange.
+github-app = ["dep:rsa", "dep:sha2", "dep:base64"]
 
 # The sidecar helper binary nano spawns and talks to over the local protocol.
 [[bin]]

@@ -23,8 +23,29 @@ crustcore-netproto = { workspace = true }
 # embedding-backed semantic retrieval (cosine NN + `semantic_select` over an `Embedder`
 # trait), and B3-embed-live wired the live text→vector call through the spawned
 # `crustcore-net` helper behind the same trait (`embed::NetEmbedder`, over the std-only
-# `crustcore-netproto`; `HashEmbedder` stays the dev/CI default). Still deferred (all
-# optional, never linked into nano): the live `git ls-files`/`git grep` invocation
-# (`TODO(P14-exec)`), *spawning* the live embedding sidecar (`TODO(B3-embed-live)`; the
-# protocol round-trip itself is CI-tested), and AST/tree-sitter/LSP code-intel
-# (`TODO(P14-intel)`). Memory is retrieved context, never authority.
+# `crustcore-netproto`; `HashEmbedder` stays the dev/CI default). P14-exec added the
+# dependency-free, hardened `git ls-files`/`git grep -n` enumeration (`exec`): scrubbed env,
+# no hooks/pager/attribute drivers, bounded output, feeding the existing `RepoMap`/
+# `GrepCodeIntel` transforms (parsing CI-tested; only the `git` call is `#[ignore]`d).
+# Still deferred (all optional, never linked into nano): the live `git` invocation itself
+# (`TODO(P14-exec)`) and *spawning* the live embedding sidecar (`TODO(B3-embed-live)`; both
+# protocol round-trips are CI-tested). Memory is retrieved context, never authority.
+
+# OPTIONAL: the tree-sitter AST code-intel backend for precise Rust symbol *definitions*
+# (P14-intel, `ast` feature only). Never default, never linked into nano (off-by-default
+# `dep:` deps are not selected by the nano graph, and `crustcore-index` is itself non-nano).
+# tree-sitter brings its own (audited, upstream) `unsafe` C bindings; our code stays
+# `#![forbid(unsafe_code)]`-safe and only walks the parsed tree with an explicit cursor.
+# Pinned to the same versions crustcore-index-rag's C5-ast backend uses.
+tree-sitter = { version = "0.25", optional = true }
+tree-sitter-rust = { version = "0.24", optional = true }
+
+[features]
+default = []
+# Tree-sitter / AST symbol-definition code-intel (P14-intel, implemented for Rust). The
+# default code-intel stays the conservative `git grep` substring lookup (`GrepCodeIntel`), so
+# this is off by default and not in CI; enabling it links the optional tree-sitter deps (never
+# in nano). `AstCodeIntel` falls back to grep on any unknown extension / parse failure / when
+# the feature is off. Additional grammars are an additive follow-on (one `dep:tree-sitter-<lang>`
+# + one match arm each).
+ast = ["dep:tree-sitter", "dep:tree-sitter-rust"]

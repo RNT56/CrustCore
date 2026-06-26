@@ -24,17 +24,26 @@
 //! still redact-then-bound and never-authority; and **B3-embed-live** wires the live
 //! text→vector call through the spawned `crustcore-net` helper behind the same `Embedder`
 //! trait ([`embed::NetEmbedder`], std-only `crustcore-netproto`, no HTTP/TLS linked,
-//! [`embed::HashEmbedder`] still the dev/CI default). Still deferred: only *spawning* the
-//! live sidecar (`TODO(B3-embed-live)`; the protocol round-trip is CI-tested), the live
-//! `git ls-files`/`git grep` invocation (`TODO(P14-exec)`), and AST/tree-sitter/LSP
-//! code-intel (`TODO(P14-intel)`); the deterministic transforms they feed are implemented
-//! now.
+//! [`embed::HashEmbedder`] still the dev/CI default). **P14-exec** ([`exec`]) realizes live
+//! repo enumeration: a **hardened, dependency-free** `git ls-files` / `git grep -n`
+//! invocation (scrubbed env, no hooks/pager/attribute drivers, bounded output) whose output
+//! parses into exactly the path listing [`RepoMap::from_paths`] and the [`SourceLine`]s
+//! [`GrepCodeIntel`] already consume — the parsing is CI-tested with canned output; only the
+//! `git` call itself is `#[ignore]`d. **P14-intel** ([`ast`], behind the off-by-default `ast`
+//! feature) adds a tree-sitter Rust [`CodeIntel`] ([`ast::AstCodeIntel`]) that resolves a
+//! symbol query to its **precise definition site**, falling back to [`GrepCodeIntel`] on an
+//! unknown extension / parse failure / when the feature is off. Still deferred: only
+//! *spawning* the live embedding sidecar (`TODO(B3-embed-live)`; the protocol round-trip is
+//! CI-tested) and the live `git` exec itself (`TODO(P14-exec)`; the parsing is CI-tested);
+//! the deterministic transforms they feed are implemented now.
 #![forbid(unsafe_code)]
 
 use crustcore_secrets::{ModelVisibleText, Redactor};
 use crustcore_types::{BoundedText, RepoRef};
 
+pub mod ast;
 pub mod embed;
+pub mod exec;
 
 /// Cap on the total bytes of a model-visible context bundle (bounded — not megabytes;
 /// invariant 11, §6.5). Mirrors the MCP summary cap so model-bound context is
@@ -396,9 +405,10 @@ fn u8_to_source(b: u8) -> Option<MemorySource> {
 // ---------------------------------------------------------------------------
 
 /// A cheap, bounded map of a repository, derived from a plain file listing (what
-/// `git ls-files` would print — the live invocation is `TODO(P14-exec)`, a local
-/// `git` call confined like the other worktree git wrappers). No file *contents* are
-/// read here; it is purely structural.
+/// `git ls-files` prints — produced live by [`exec::list_files`], a hardened local `git`
+/// call confined like the other worktree git wrappers; the parsing is CI-tested and only
+/// the `git` invocation itself is `TODO(P14-exec)`). No file *contents* are read here; it
+/// is purely structural.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RepoMap {
     /// Total number of files seen (before the entry cap).
@@ -546,14 +556,17 @@ pub struct SymbolRef {
 }
 
 /// A code-intelligence backend: looks up where a symbol/name appears. The default
-/// implementation is a cheap substring grep ([`GrepCodeIntel`], what `git grep`
-/// would feed); a richer AST/tree-sitter/LSP backend is `TODO(P14-intel)`.
+/// implementation is a cheap substring grep ([`GrepCodeIntel`], fed by [`exec::grep_lines`]);
+/// a richer tree-sitter backend ([`ast::AstCodeIntel`], P14-intel) resolves a name to its
+/// precise *definition* site and falls back to grep otherwise (behind the off-by-default
+/// `ast` feature).
 pub trait CodeIntel {
     /// All places `name` appears, as untrusted [`SymbolRef`]s (bounded by the impl).
     fn lookup(&self, name: &str) -> Vec<SymbolRef>;
 }
 
-/// One indexed source line (what a `git grep -n` line would carry).
+/// One indexed source line (what a `git grep -n` line carries; produced live by
+/// [`exec::grep_lines`] and parsed by [`exec::parse_grep_lines`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceLine {
     /// Repo-relative path.
