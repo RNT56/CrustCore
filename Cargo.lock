@@ -232,8 +232,10 @@ dependencies = [
 name = "crustcore-daemon"
 version = "0.4.0"
 dependencies = [
+ "crustcore-chat",
  "crustcore-kernel",
  "crustcore-net",
+ "crustcore-netproto",
  "crustcore-policy",
  "crustcore-secrets",
  "crustcore-types",

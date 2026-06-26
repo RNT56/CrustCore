@@ -14,6 +14,10 @@ crustcore-kernel = { workspace = true }
 crustcore-policy = { workspace = true }
 crustcore-secrets = { workspace = true }
 crustcore-net = { workspace = true }
+crustcore-netproto = { workspace = true }
+# The conversational front door pack — the Telegram converse channel bridges the
+# runtime channel to it (docs/chat.md §5). Std-only; no HTTP/TLS.
+crustcore-chat = { workspace = true }
 # TODO(P9-net/P10): the Telegram Bot API HTTP long-polling + sendMessage (in
 # crustcore-net, authenticated by the credential proxy), the GitHub task/PR loop,
 # the admin socket, and leases/heartbeats/recovery. The Phase-9 runtime-channel

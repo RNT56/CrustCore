@@ -26,6 +26,7 @@
 #![forbid(unsafe_code)]
 
 pub mod advisor;
+pub mod chat;
 pub mod exec;
 pub mod github;
 pub mod selfimprove;
