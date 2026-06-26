@@ -30,6 +30,21 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Supervisor fan-out coordinator (`P11`) — race verified proposers, the verifier picks the
+  winner.** `crustcore_daemon::exec::run_fanout` is the multi-proposer extension of
+  `run_subagent`: it runs each proposer agent at the **same** goal via `run_subagent`
+  (registry-bound identity, bounded `Scheduler` concurrency, per-agent `AgentBudget`,
+  blackboard-posted to the supervisor — never the user) and **stops at the first proposer the
+  verifier accepts**. The winner is chosen by the verifier (`SubagentOutcome.accepted` ⇐
+  `VerifiedPatch`), never by a worker's `self_claimed_done` (invariants 6, 13); early-stop
+  keeps fan-out bounded (invariant 11); an unknown/over-budget/errored proposer yields a typed
+  `RunRefused` and the race continues. Pure + deterministic + CI-tested over a keyed mock
+  executor (5 tests: first-winner stop, no-winner, verifier-owned selection, unknown-agent
+  skip, per-agent budget). This completes the P11 supervisor control plane; wiring it to a
+  live entry over a real `WorktreeSubagentExecutor` is the existing `TODO(P11-exec-live)` seam.
+  Adversarial review: no defects (all 5 invariant claims verified). Invariants 5, 6, 11, 13.
+  Nano: n/a (daemon-only).
+
 - **Multi-task supervised runtime (`P10-net`, invariant 12).** The daemon ran **one** chat
   task at a time (`active: Option<TaskHandle>`); it now supervises **several** under a pure,
   CI-tested `crustcore_daemon::registry::TaskRegistry` — bounded concurrency, per-task
