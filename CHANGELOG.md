@@ -30,6 +30,23 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Dev-UI live `/ws` snapshot streaming (`C7-serve-live`).** The loopback inspector's `/ws`
+  route now streams live runtime snapshots over **Server-Sent Events**. A new pure,
+  always-compiled core (`crustcore_dev::stream`: `next_snapshot(&dyn ReadOnlyBackend,
+  SnapshotCursor) -> SnapshotBatch`) reads the existing read-model (run inspector + pending
+  approvals), bounds it (`MAX_SNAPSHOT_APPROVALS`/`MAX_SNAPSHOT_TASKS`), debounces on a
+  cursor, and emits a changed frame — **no socket, no async**, fully CI-tested over
+  `MockDevBackend` (6 tests incl. a redaction leak-canary + bounding). The `serve`-gated
+  `/ws` handler funnels through the **same** core `route` gate (auth + loopback) before
+  opening, then drives an SSE stream off a `tokio::time::interval`; SSE is strictly
+  server→client so it can never become an inbound control channel (invariant 16), is
+  read-only by type (`&dyn ReadOnlyBackend`), and inherits the view models' redaction
+  (invariant 2). The interval tick loop over a real socket is the reduced
+  `TODO(C7-serve-live)` seam — an `#[ignore]`d smoke (`live_ws_sse_emits_a_snapshot`)
+  exercises it end-to-end. Cargo: `tokio` gains `time`/`io-util` + a `serve`-gated
+  `tokio-stream` (`IntervalStream`) — non-nano, confirmed absent from the nano graph
+  (forbidden-deps clean). Invariants 2, 11, 16, 19, 20. Nano: n/a (sidecar, `serve`).
+
 - **Chat → draft PR (the approval flow, lit up end-to-end).** A chat task can now open a
   **draft** PR, gated on a per-launch human approval (invariant 14). New
   `crustcore-daemon serve --open-pr --repo <owner/name> [--base main] [--branch-prefix
