@@ -7,7 +7,8 @@
 //! [`McpTransport`] so the protocol + the gateway call flow ([`crate::call_tool`]) are
 //! **fully CI-testable with an in-process [`MockMcp`]** (no network, no subprocess).
 //! The real local transport ([`StdioMcp`]) is std `process` + Content-Length-framed
-//! JSON-RPC; a remote HTTP transport would reuse `crustcore-net` (`TODO(P13-net-http)`).
+//! JSON-RPC; the remote HTTP transport ([`HttpMcp`], `http` feature, P13-net-http) POSTs
+//! the same JSON-RPC envelope over `ureq` and is where `BrokerSecret` auth applies.
 //!
 //! Trust posture (invariant 7): an MCP server's responses are **untrusted data** —
 //! nothing here interprets a response as a command; the gateway decides from the
@@ -84,6 +85,27 @@ pub trait McpTransport {
         params: serde_json::Value,
         auth: Option<&HeaderInjection>,
     ) -> Result<serde_json::Value, McpError>;
+}
+
+/// Builds a JSON-RPC 2.0 request envelope (`{jsonrpc:"2.0", id, method, params}`) — the
+/// single canonical shape every transport puts on the wire. Pure and side-effect-free,
+/// so the envelope is asserted directly in CI (no network/subprocess); the stdio and
+/// HTTP transports both serialize exactly this. `auth` is intentionally **not** part of
+/// the envelope: a credential is a wire-level transport header, never a body field —
+/// putting it in `params` would place the secret in the model-visible JSON-RPC body and
+/// break invariants 1–3.
+#[must_use]
+pub fn build_request_envelope(
+    id: i64,
+    method: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": method,
+        "params": params,
+    })
 }
 
 /// Extracts the `result` from a JSON-RPC response object, mapping an `error` member
@@ -355,7 +377,7 @@ impl McpTransport for StdioMcp {
     /// transport is a local subprocess speaking framed JSON-RPC over pipes — it has no
     /// HTTP header channel, so an `Authorization` header has nowhere to go. By contract
     /// (`docs/mcp.md`; [`crate::McpAuthMode`]) `BrokerSecret` auth applies to the
-    /// (future) HTTP transport; a stdio server uses [`crate::McpAuthMode::None`]. The
+    /// HTTP transport ([`HttpMcp`]); a stdio server uses [`crate::McpAuthMode::None`]. The
     /// credential is deliberately **not** smuggled into `params` — that would put the
     /// secret in the model-visible JSON-RPC body, violating invariants 1–3. The
     /// resolution path still runs in [`crate::call_tool`]; this transport simply elects
@@ -369,12 +391,7 @@ impl McpTransport for StdioMcp {
         use std::io::Write;
         let id = self.next_id.get();
         self.next_id.set(id.saturating_add(1));
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
-        });
+        let request = build_request_envelope(id, method, params);
         let body =
             serde_json::to_vec(&request).map_err(|e| McpError::BadResponse(e.to_string()))?;
         {
@@ -386,6 +403,110 @@ impl McpTransport for StdioMcp {
         }
         let response = self.read_framed()?;
         parse_rpc_result(&response)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HttpMcp — a remote MCP server over HTTP, JSON-RPC in the request/response body
+// ---------------------------------------------------------------------------
+
+/// A remote MCP server over HTTP (`http` feature, P13-net-http): POSTs a JSON-RPC 2.0
+/// request envelope to the configured server URL and parses the JSON-RPC response from
+/// the (bounded) body. Backed by `ureq` (a small, blocking, rustls HTTP/1.1 client — no
+/// Tokio); a default `crustcore-mcp` build links none of it.
+///
+/// **This is where `BrokerSecret` auth actually applies.** Unlike stdio (no header
+/// channel), HTTP has one: when `call` is handed a broker-resolved [`HeaderInjection`]
+/// it sets that header on the request, reading the secret bytes via
+/// [`HeaderInjection::reveal`] **only** at the `ureq` boundary. The bytes never enter
+/// the envelope `params`, the returned `result`, the model context, or any error/log —
+/// errors here carry only the header *name* and the transport's own message, never the
+/// value (invariants 1–3).
+///
+/// The envelope build ([`build_request_envelope`]) and response parse ([`parse_rpc_result`])
+/// are pure and CI-tested without network; the live POST round-trip is `#[ignore]`d (it
+/// needs a running MCP HTTP server).
+#[cfg(feature = "http")]
+pub struct HttpMcp {
+    agent: ureq::Agent,
+    url: String,
+    next_id: std::cell::Cell<i64>,
+}
+
+#[cfg(feature = "http")]
+impl HttpMcp {
+    /// A remote MCP transport posting to `url`, with a bounded request timeout.
+    #[must_use]
+    pub fn new(url: impl Into<String>) -> Self {
+        let agent = ureq::AgentBuilder::new()
+            .timeout(std::time::Duration::from_secs(120))
+            .build();
+        HttpMcp {
+            agent,
+            url: url.into(),
+            next_id: std::cell::Cell::new(1),
+        }
+    }
+
+    /// Reads the response body bounded by [`MAX_MESSAGE_BYTES`] (a hostile server cannot
+    /// force an unbounded allocation; invariant 11, §6.5) and parses it as a JSON-RPC
+    /// response, mapping `result`/`error` via [`parse_rpc_result`].
+    fn parse_response(reader: impl std::io::Read) -> Result<serde_json::Value, McpError> {
+        use std::io::Read;
+        // `take` caps the read at the body limit *before* the buffer can grow past it.
+        let mut buf = Vec::new();
+        reader
+            .take(MAX_MESSAGE_BYTES as u64 + 1)
+            .read_to_end(&mut buf)
+            .map_err(|e| McpError::Transport(e.to_string()))?;
+        if buf.len() > MAX_MESSAGE_BYTES {
+            return Err(McpError::BadResponse("response exceeds size cap".into()));
+        }
+        let response: serde_json::Value =
+            serde_json::from_slice(&buf).map_err(|e| McpError::BadResponse(e.to_string()))?;
+        parse_rpc_result(&response)
+    }
+}
+
+#[cfg(feature = "http")]
+impl McpTransport for HttpMcp {
+    /// POSTs the JSON-RPC envelope to the server URL with `Content-Type: application/json`
+    /// and, when present, the broker-resolved `auth` header. The secret bytes are read
+    /// (via [`HeaderInjection::reveal`]) only to set the header on the wire and are never
+    /// echoed into the error path.
+    fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        auth: Option<&HeaderInjection>,
+    ) -> Result<serde_json::Value, McpError> {
+        let id = self.next_id.get();
+        self.next_id.set(id.saturating_add(1));
+        let request = build_request_envelope(id, method, params);
+        let body =
+            serde_json::to_vec(&request).map_err(|e| McpError::BadResponse(e.to_string()))?;
+
+        let mut req = self
+            .agent
+            .post(&self.url)
+            .set("Content-Type", "application/json");
+        if let Some(h) = auth {
+            // The ONLY place the secret bytes touch the wire. `reveal()` yields the full
+            // header value (e.g. `Bearer <token>`); it is set on the request and never
+            // captured into a variable that could reach an error/log (invariants 1–3).
+            let value = std::str::from_utf8(h.reveal())
+                .map_err(|_| McpError::Transport("auth header is not valid UTF-8".into()))?;
+            req = req.set(h.header_name(), value);
+        }
+
+        match req.send_bytes(&body) {
+            // 2xx (and ureq's non-2xx `Err(Status)` below) are both round-trips: the
+            // JSON-RPC layer carries success *and* application errors in a 200 body, so
+            // we parse the body either way. Error mapping never references `auth`.
+            Ok(resp) => Self::parse_response(resp.into_reader()),
+            Err(ureq::Error::Status(_status, resp)) => Self::parse_response(resp.into_reader()),
+            Err(ureq::Error::Transport(t)) => Err(McpError::Transport(t.to_string())),
+        }
     }
 }
 
@@ -565,5 +686,76 @@ mod tests {
             read_framed_message(&mut empty).unwrap_err(),
             McpError::Transport(_)
         ));
+    }
+
+    // --- JSON-RPC envelope: the shape every transport (stdio + HTTP) puts on the wire. ---
+
+    #[test]
+    fn build_request_envelope_is_a_jsonrpc_2_0_request() {
+        let env = build_request_envelope(7, "tools/call", serde_json::json!({"name": "search"}));
+        assert_eq!(
+            env,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {"name": "search"},
+            })
+        );
+        // The credential is never an envelope field — it is a wire header only (inv. 1–3).
+        assert!(env.get("auth").is_none());
+        assert!(env.get("authorization").is_none());
+    }
+
+    // --- HttpMcp response parse: bounded, parses a canned result and a canned error. ---
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn http_parse_response_unwraps_result_and_maps_error_and_bounds_body() {
+        // A canned JSON-RPC success body → unwrapped `result`.
+        let ok = br#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"hi"}]}}"#;
+        assert_eq!(
+            HttpMcp::parse_response(&ok[..]).unwrap(),
+            serde_json::json!({"content":[{"type":"text","text":"hi"}]})
+        );
+
+        // A canned JSON-RPC error body → McpError::Rpc, not a panic.
+        let err = br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"no method"}}"#;
+        assert_eq!(
+            HttpMcp::parse_response(&err[..]).unwrap_err(),
+            McpError::Rpc {
+                code: -32601,
+                message: "no method".into()
+            }
+        );
+
+        // Non-JSON body → BadResponse.
+        assert!(matches!(
+            HttpMcp::parse_response(&b"not json"[..]).unwrap_err(),
+            McpError::BadResponse(_)
+        ));
+
+        // A body one byte over the cap → BadResponse, no unbounded allocation.
+        let oversized = vec![b'x'; MAX_MESSAGE_BYTES + 1];
+        assert!(matches!(
+            HttpMcp::parse_response(&oversized[..]).unwrap_err(),
+            McpError::BadResponse(_)
+        ));
+    }
+
+    /// A genuine HTTP round-trip through [`HttpMcp`] against a *real* MCP HTTP server.
+    /// `#[ignore]`d (not CI): it opens a socket and needs a server speaking JSON-RPC at
+    /// `$CRUSTCORE_MCP_HTTP_URL`. The CI-covered logic (envelope build, response parse,
+    /// bounding, auth-header injection) lives in the helper tests above and the
+    /// `call_tool` gateway-flow tests in `lib.rs`.
+    #[cfg(feature = "http")]
+    #[test]
+    #[ignore = "opens a socket; needs a running MCP HTTP server at $CRUSTCORE_MCP_HTTP_URL"]
+    fn http_round_trips_against_a_live_server() {
+        let url = std::env::var("CRUSTCORE_MCP_HTTP_URL")
+            .expect("set CRUSTCORE_MCP_HTTP_URL to a running MCP HTTP server");
+        let transport = HttpMcp::new(url);
+        let tools = list_tools(&transport).expect("tools/list over HTTP");
+        assert!(!tools.is_empty(), "server advertised no tools");
     }
 }

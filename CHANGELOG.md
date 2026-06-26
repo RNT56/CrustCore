@@ -30,6 +30,35 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **`B4-firecracker` / `B4-windows` — Tier-3 microVM + Windows backends
+  (`crustcore-sandbox`).** A `FirecrackerBackend` (Tier-3 Hostile microVM) behind an
+  off-by-default `firecracker` feature: dependency-free (shells out to `firecracker`),
+  deny-all egress + worktree-confined writes + env sanitization, wired into
+  `select_backend`/`run_command` so a Tier-3 task **can** select it when present —
+  **still refuse-if-no-backend, no downgrade** (a Tier-3 task with only Tier-2 backends
+  is refused). A selectable `WindowsBackend` stub behind `windows-native` (real Win32
+  confinement deferred — it needs a *safe* wrapper crate because this nano-linked crate
+  is `#![forbid(unsafe_code)]`). No `unsafe`, no new deps, off by default; nano
+  unchanged (`forbidden-deps` still 0 third-party). Live VM boot is `TODO(B4-firecracker-live)`.
+
+- **`C5-qdrant-live` / `C5-lancedb-live` — external vector-store clients
+  (`crustcore-index-rag`).** Real HTTP clients behind the `qdrant` / `lancedb` features:
+  Qdrant REST (`/points`, `/points/search`, `/points/delete`) and the LanceDB
+  remote/Cloud HTTP+JSON surface. API keys resolve **only** via the broker →
+  `CredentialProxy`, injected as an outbound header at send time (never env/log/
+  model-visible); responses are bounded and scores sanitized, and the planner's
+  **no-trust-store-score** cosine re-rank is unchanged. `ureq`/`serde_json` optional +
+  gated (default tree links neither). Request-build/response-parse CI-tested (incl. a
+  hostile-response test); the live socket is `#[ignore]`d.
+
+- **`P13-net-http` — `HttpMcp` remote transport (`crustcore-mcp`).** A JSON-RPC 2.0
+  over HTTP MCP transport behind the `http` feature: shared envelope builder, `ureq`
+  POST with `Content-Type: application/json`, the body bounded by `MAX_MESSAGE_BYTES`.
+  This is where `McpAuthMode::BrokerSecret` auth reaches the wire (the resolved header
+  is read only at the socket boundary — never in `params`, the result, the receipt, or
+  the model). `ureq` optional + gated (default links no HTTP). Envelope/parse CI-tested;
+  live POST `#[ignore]`d.
+
 - **`C6-otlp-live` — real OTLP/HTTP+JSON trace exporter (`crustcore-telemetry`,
   `otlp` feature).** Replaces the buffer-dropping stub: serializes the post-redaction
   span IR to the OTLP/HTTP **JSON** schema (resourceSpans → scopeSpans → spans;

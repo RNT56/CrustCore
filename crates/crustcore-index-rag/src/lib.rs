@@ -66,6 +66,9 @@ pub use store::{ByteSpan, ChunkId, ChunkMeta, VectorStore, MAX_NEAREST_K, MAX_ST
 #[cfg(feature = "persist")]
 pub use store::local::SnapshotError;
 
+#[cfg(any(feature = "qdrant", feature = "lancedb"))]
+pub use store::http::{BrokerAuth, EndpointAuth, StoreHit, StoreSendError};
+
 #[cfg(feature = "qdrant")]
 pub use store::qdrant::{QdrantConfig, QdrantVectorStore};
 

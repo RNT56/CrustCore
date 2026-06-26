@@ -15,11 +15,11 @@
 //! This module is the std-only trust/policy/redaction/receipt core. The gateway call
 //! flow ([`call_tool`]) resolves a server's `McpAuthMode::BrokerSecret` via the broker
 //! → [`crustcore_secrets::CredentialProxy`] and injects it at the transport boundary
-//! (P13-net), fully tested with an in-process `MockMcp`. What remains `TODO(P13-net)`
-//! is only the live network transport (the HTTP transport that would carry the injected
-//! header on the wire — `TODO(P13-net-http)` in `transport.rs`) and sandboxed stub
-//! execution (they need real network + the Phase-4 sandbox); the trust-critical gateway
-//! and credential-resolution logic are fully tested.
+//! (P13-net), fully tested with an in-process `MockMcp`. The live network transport that
+//! carries the injected header on the wire is [`transport::HttpMcp`] (P13-net-http, the
+//! `http` feature); its envelope build + response parse are CI-tested and the live POST
+//! is `#[ignore]`d. What remains is only sandboxed stub execution (it needs the Phase-4
+//! sandbox); the trust-critical gateway and credential-resolution logic are fully tested.
 #![forbid(unsafe_code)]
 
 pub mod server;

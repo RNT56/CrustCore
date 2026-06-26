@@ -148,8 +148,10 @@ pub trait SandboxBackend {
     /// refuses to run a task whose required tier exceeds every available backend's
     /// `provided_tier` — there is **no downgrade** (a Tier-3 hostile task never falls back
     /// to a Tier-2 sandbox). Defaults to [`ExecutionTier::Sandboxed`] (Tier 2 — the
-    /// bubblewrap level); a microVM/container backend (Firecracker, `TODO(B4-firecracker-live)`)
-    /// or a Windows-native backend (`TODO(B4-windows-live)`) overrides this.
+    /// bubblewrap/Seatbelt level); the Firecracker microVM backend
+    /// ([`FirecrackerBackend`], `firecracker` feature) overrides this to
+    /// [`ExecutionTier::Hostile`] (Tier 3), and the Windows-native stub
+    /// ([`WindowsBackend`], `windows-native` feature) keeps Tier 2.
     fn provided_tier(&self) -> ExecutionTier {
         ExecutionTier::Sandboxed
     }
@@ -642,6 +644,234 @@ impl SandboxBackend for SeatbeltBackend {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tier-3 backend (B4-firecracker): Firecracker microVM (Hostile)
+// ---------------------------------------------------------------------------
+
+/// The Firecracker microVM backend (`docs/sandbox.md` §3; Tier 3 — Hostile).
+///
+/// Unlike the Tier-2 namespace/Seatbelt sandboxes, this provides a **microVM
+/// boundary** (a separate guest kernel) for running *untrusted* code, so it is
+/// the only backend [`select_backend`] will hand an [`ExecutionTier::Hostile`]
+/// task (a Tier-3 task with only Tier-2 backends is still **refused** — no
+/// downgrade). It is **dependency-free**: it shells out to the `firecracker`
+/// binary via `std::process` (through [`crustcore_runner`]), so it adds nothing
+/// to the build and contains no `unsafe`.
+///
+/// Security posture matches the other backends (and the kernel contract):
+/// **deny-all egress** (the microVM is booted with no network device) and
+/// **writes confined to the worktree** (only the worktree block device / shared
+/// dir is mounted read-write inside the guest; the rootfs is read-only). The
+/// environment is sanitized at the launch boundary via [`sanitize_env`], exactly
+/// like bubblewrap/Seatbelt, so secrets and exec-injection vars never cross into
+/// the guest.
+///
+/// Available behind the off-by-default `firecracker` cargo feature. The argv
+/// construction ([`Self::wrapped_spec`]) is pure and unit-tested on every
+/// platform; the actual guest **VM boot + in-guest exec** is the live seam
+/// (`TODO(B4-firecracker-live)`): wiring up the jailer, the VM socket API, the
+/// kernel image + worktree block device, and harvesting the guest's exit
+/// status/output back into a [`CommandResult`]. Until that lands, [`run`](SandboxBackend::run)
+/// returns [`SandboxError::Setup`] rather than silently running unconfined.
+#[cfg(feature = "firecracker")]
+#[derive(Debug, Clone)]
+pub struct FirecrackerBackend {
+    firecracker: PathBuf,
+}
+
+#[cfg(feature = "firecracker")]
+impl FirecrackerBackend {
+    /// Detects the `firecracker` binary on this host, returning `None` when it is
+    /// not installed. Returning `None` keeps the refuse-if-no-backend contract:
+    /// a Tier-3 task on a host without Firecracker is refused, never downgraded.
+    #[must_use]
+    pub fn detect() -> Option<Self> {
+        find_executable("firecracker").map(|firecracker| FirecrackerBackend { firecracker })
+    }
+
+    /// Builds the `firecracker`-wrapped [`CommandSpec`] for `inner`. The argv
+    /// boots the microVM from a JSON VM config (no network device — deny-all
+    /// egress) and runs the inner command inside the guest with the worktree as
+    /// its working directory.
+    ///
+    /// The shape is `firecracker --no-api --config-file <vm.json> -- <program>
+    /// <args...>`: `--no-api` boots straight from the static config (no live API
+    /// socket needed for a one-shot run), the config pins the read-only rootfs +
+    /// read-write worktree drive and **omits any network interface**, and the
+    /// inner program/args are forwarded after `--` (the live boot wiring resolves
+    /// these inside the guest; `TODO(B4-firecracker-live)`).
+    ///
+    /// The (already-sanitized) env, stdin, timeout, and output cap are forwarded
+    /// unchanged. `cwd` is preserved so the *host-side* launcher (jailer) starts
+    /// in the worktree; the guest mounts that same worktree read-write.
+    fn wrap(&self, inner: &CommandSpec, vm_config: &Path) -> CommandSpec {
+        let mut args: Vec<String> = vec![
+            "--no-api".into(),
+            "--config-file".into(),
+            vm_config.to_string_lossy().into_owned(),
+            "--".into(),
+            inner.program.clone(),
+        ];
+        args.extend(inner.args.iter().cloned());
+        CommandSpec {
+            program: self.firecracker.to_string_lossy().into_owned(),
+            args,
+            // Preserve the worktree cwd for the host-side launcher; the guest
+            // mounts the same worktree read-write.
+            cwd: inner.cwd.clone(),
+            env: inner.env.clone(),
+            stdin: inner.stdin.clone(),
+            timeout: inner.timeout,
+            max_output_bytes: inner.max_output_bytes,
+        }
+    }
+
+    /// The `firecracker` argv this backend would use for `inner` (exposed for
+    /// tests/inspection, mirroring [`BubblewrapBackend::wrapped_spec`] and
+    /// [`SeatbeltBackend::wrapped_spec`]). Requires a worktree `cwd`: the guest
+    /// mounts that worktree read-write and runs there. The VM config path is the
+    /// per-run generated config the live boot will materialize.
+    ///
+    /// # Errors
+    /// [`SandboxError::Setup`] if `inner` has no `cwd` (the microVM needs a
+    /// worktree to mount; fail-closed).
+    pub fn wrapped_spec(
+        &self,
+        inner: &CommandSpec,
+        vm_config: &Path,
+    ) -> Result<CommandSpec, SandboxError> {
+        if inner.cwd.is_none() {
+            return Err(SandboxError::Setup(
+                "firecracker backend requires a worktree cwd to mount into the guest".to_string(),
+            ));
+        }
+        Ok(self.wrap(inner, vm_config))
+    }
+}
+
+#[cfg(feature = "firecracker")]
+impl SandboxBackend for FirecrackerBackend {
+    fn run(
+        &self,
+        profile: &SandboxProfile,
+        spec: CommandSpec,
+    ) -> Result<CommandResult, SandboxError> {
+        // Sanitize the environment at the launch boundary (not just one layer up),
+        // so invoking the backend directly cannot fail open — same as the Tier-2
+        // backends. A worktree cwd is required (the guest mounts it).
+        let worktree = spec.cwd.clone().map(PathBuf::from);
+        let _env = sanitize_env(&spec.env, profile, worktree.as_deref())?;
+        let _cwd = spec.cwd.clone().ok_or_else(|| {
+            SandboxError::Setup(
+                "firecracker backend requires a worktree cwd to mount into the guest".to_string(),
+            )
+        })?;
+        // TODO(B4-firecracker-live): boot the microVM and run `spec` inside it.
+        // The argv construction (`wrap`/`wrapped_spec`) and env sanitization above
+        // are done and tested; the remaining live steps are: (1) materialize the
+        // per-run VM JSON config — read-only rootfs drive, read-write worktree
+        // drive, NO network interface (deny-all egress), sanitized `_env` injected
+        // as the guest's environment; (2) launch via the jailer for the host-side
+        // isolation; (3) boot through the VM socket / `--no-api` config, run the
+        // inner command in the guest with `_cwd` as the working directory; and
+        // (4) harvest the guest's exit status + (bounded) stdout/stderr back into a
+        // `CommandResult`. Until that lands we refuse rather than run unconfined.
+        Err(SandboxError::Setup(
+            "firecracker microVM boot is not yet wired up (TODO(B4-firecracker-live)); \
+             refusing rather than running unconfined"
+                .to_string(),
+        ))
+    }
+
+    fn provided_tier(&self) -> ExecutionTier {
+        // The microVM boundary is the only thing strong enough for hostile code.
+        ExecutionTier::Hostile
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Windows-native backend STUB (B4-windows): selectable, Tier-2
+// ---------------------------------------------------------------------------
+
+/// A **selectable stub** for a Windows-native Tier-2 sandbox, behind the
+/// off-by-default `windows-native` cargo feature.
+///
+/// Why a stub and not the real thing: a real Windows confinement (a job object
+/// with UI/process limits, plus an AppContainer / restricted token for
+/// filesystem + network isolation) requires Win32 calls that are `unsafe` FFI
+/// and need a platform crate (e.g. `windows-sys`). This crate is
+/// `#![forbid(unsafe_code)]` and is a **nano dependency**, so it cannot take that
+/// dependency or write that `unsafe`. The real OS confinement is therefore
+/// deferred to `TODO(B4-windows-live)` and must arrive via a **safe** Win32
+/// wrapper crate (one exposing job-object / AppContainer setup behind a safe
+/// API) in a *non-nano* crate — never by relaxing this crate's `forbid(unsafe)`.
+///
+/// What is real today: the **selection plumbing**. [`Self::detect`] returns
+/// `None` off Windows (so it never claims to confine on a platform it cannot),
+/// the backend declares Tier 2 ([`ExecutionTier::Sandboxed`]), and it is wired
+/// into [`run_command`]'s backend list so [`select_backend`] can pick it. Like
+/// the Firecracker stub, [`run`](SandboxBackend::run) **refuses** (returns
+/// [`SandboxError::Setup`]) rather than running unconfined — no fail-open.
+#[cfg(feature = "windows-native")]
+#[derive(Debug, Clone)]
+pub struct WindowsBackend {
+    _private: (),
+}
+
+#[cfg(feature = "windows-native")]
+impl WindowsBackend {
+    /// Detects whether a Windows-native sandbox is usable on this host. Returns
+    /// `Some` only on Windows; `None` everywhere else (so it is never selected on
+    /// a platform where it cannot actually confine — refuse-if-no-backend holds).
+    ///
+    /// Even on Windows it currently reports availability only as the *selection*
+    /// stub — the actual confinement is `TODO(B4-windows-live)`; until that lands,
+    /// [`run`](SandboxBackend::run) refuses rather than running unconfined.
+    #[must_use]
+    pub fn detect() -> Option<Self> {
+        if cfg!(target_os = "windows") {
+            Some(WindowsBackend { _private: () })
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(feature = "windows-native")]
+impl SandboxBackend for WindowsBackend {
+    fn run(
+        &self,
+        profile: &SandboxProfile,
+        spec: CommandSpec,
+    ) -> Result<CommandResult, SandboxError> {
+        // Sanitize the environment at the launch boundary — same contract as the
+        // other backends — so the plumbing is honest even though confinement is
+        // deferred.
+        let worktree = spec.cwd.clone().map(PathBuf::from);
+        let _env = sanitize_env(&spec.env, profile, worktree.as_deref())?;
+        // TODO(B4-windows-live): set up the real Windows confinement here — a job
+        // object (process/UI limits, kill-on-close) plus an AppContainer or
+        // restricted-token launch confining writes to the worktree and denying
+        // network egress (mirroring bubblewrap/Seatbelt Tier 2). That needs Win32
+        // calls, which are `unsafe` FFI requiring a platform crate. Because this
+        // crate is `#![forbid(unsafe_code)]` AND a nano dependency, it must come
+        // through a SAFE Win32 wrapper crate in a non-nano crate — do NOT add
+        // `windows-sys` here or relax `forbid(unsafe_code)`. Until then, refuse
+        // rather than run unconfined.
+        Err(SandboxError::Setup(
+            "windows-native confinement is not yet implemented (TODO(B4-windows-live)); \
+             refusing rather than running unconfined"
+                .to_string(),
+        ))
+    }
+
+    fn provided_tier(&self) -> ExecutionTier {
+        // A job object + AppContainer is a Tier-2 (sandboxed) boundary, not a
+        // microVM — it must never be handed a Tier-3 (hostile) task.
+        ExecutionTier::Sandboxed
+    }
+}
+
 /// Runs `spec` under `profile`, gated by a [`SandboxExecCap`] (invariant 9: no
 /// capability, no execution). The environment is sanitized (§5), path-list vars
 /// validated (§5.2), and the strongest available backend selected; if no backend
@@ -679,12 +909,19 @@ pub fn run_command(
 
     // Assemble the backends built on this host. The Linux bubblewrap Tier-2 backend
     // (`detect()` returns `None` off Linux) and the macOS Seatbelt Tier-2 backend
-    // (`#[cfg(target_os = "macos")]`) are compiled in; the Firecracker Tier-3
-    // (`TODO(B4-firecracker-live)`) and Windows-native (`TODO(B4-windows-live)`)
-    // backends append here behind their features.
+    // (`#[cfg(target_os = "macos")]`) are always compiled in; the Firecracker
+    // Tier-3 backend (`firecracker` feature) and the Windows-native Tier-2 stub
+    // (`windows-native` feature) append here when their off-by-default features are
+    // enabled. Each backend `detect()`s itself and is pushed only when present, so
+    // `select_backend` chooses the least-over-isolating backend that MEETS the tier
+    // (and refuses — never downgrades — when none does).
     let bwrap = BubblewrapBackend::detect();
     #[cfg(target_os = "macos")]
     let seatbelt = SeatbeltBackend::detect();
+    #[cfg(feature = "firecracker")]
+    let firecracker = FirecrackerBackend::detect();
+    #[cfg(feature = "windows-native")]
+    let windows = WindowsBackend::detect();
     let mut backends: Vec<&dyn SandboxBackend> = Vec::new();
     if let Some(b) = bwrap.as_ref() {
         backends.push(b);
@@ -692,6 +929,14 @@ pub fn run_command(
     #[cfg(target_os = "macos")]
     if let Some(s) = seatbelt.as_ref() {
         backends.push(s);
+    }
+    #[cfg(feature = "firecracker")]
+    if let Some(fc) = firecracker.as_ref() {
+        backends.push(fc);
+    }
+    #[cfg(feature = "windows-native")]
+    if let Some(w) = windows.as_ref() {
+        backends.push(w);
     }
 
     // Select a backend that MEETS the required tier, or refuse. A Tier-3 (hostile) task
@@ -981,6 +1226,15 @@ mod tests {
 
     #[test]
     fn hostile_tier_is_refused_without_microvm() {
+        // A Tier-3 (hostile) task is refused when no Tier-3 backend is present —
+        // never downgraded to a Tier-2 sandbox. Skip if a real Firecracker backend
+        // is detectable on this host (only possible with `--features firecracker`),
+        // where the refusal cannot be observed: there the run reaches the live-boot
+        // `TODO(B4-firecracker-live)` refusal (`SandboxError::Setup`) instead.
+        #[cfg(feature = "firecracker")]
+        if FirecrackerBackend::detect().is_some() {
+            return;
+        }
         let cap = SandboxExecCap {
             profile: ScopeId(1),
             scope: ScopeId(1),
@@ -1071,6 +1325,201 @@ mod tests {
                 .provided_tier(),
             ExecutionTier::Hostile
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // B4: Firecracker Tier-3 backend (selection + command construction). These
+    // are cross-platform — they never boot a VM; the real boot is gated behind
+    // `TODO(B4-firecracker-live)`.
+    // -----------------------------------------------------------------------
+    #[cfg(feature = "firecracker")]
+    mod firecracker_tests {
+        use super::*;
+
+        /// A `FirecrackerBackend` for tests, bypassing `detect()` (no `firecracker`
+        /// binary needed to exercise argv construction / tier selection).
+        fn fake_firecracker() -> FirecrackerBackend {
+            FirecrackerBackend {
+                firecracker: PathBuf::from("/usr/bin/firecracker"),
+            }
+        }
+
+        #[test]
+        fn firecracker_backend_is_tier_3() {
+            assert_eq!(fake_firecracker().provided_tier(), ExecutionTier::Hostile);
+        }
+
+        #[test]
+        fn tier3_task_selects_firecracker_when_present() {
+            // A Tier-3 task with a Tier-2 backend AND the firecracker Tier-3 backend
+            // available selects the microVM (the only thing that MEETS Tier 3).
+            let t2 = MockBackend {
+                tier: ExecutionTier::Sandboxed,
+            };
+            let fc = fake_firecracker();
+            let chosen = select_backend(ExecutionTier::Hostile, &[&t2, &fc]).unwrap();
+            assert_eq!(chosen.provided_tier(), ExecutionTier::Hostile);
+        }
+
+        #[test]
+        fn tier3_task_refused_with_only_tier2_no_downgrade() {
+            // The crux of the no-downgrade rule: a Tier-3 task with only Tier-2
+            // backends (even several) is REFUSED, never run in a Tier-2 sandbox.
+            let t2a = MockBackend {
+                tier: ExecutionTier::Sandboxed,
+            };
+            let t2b = MockBackend {
+                tier: ExecutionTier::Sandboxed,
+            };
+            assert!(matches!(
+                select_backend(ExecutionTier::Hostile, &[&t2a, &t2b]),
+                Err(SandboxError::NoBackend)
+            ));
+        }
+
+        #[test]
+        fn tier2_task_does_not_needlessly_select_firecracker() {
+            // A Tier-2 task with both a Tier-2 backend and the Tier-3 microVM
+            // available picks the Tier-2 backend — never over-isolates onto the VM.
+            let t2 = MockBackend {
+                tier: ExecutionTier::Sandboxed,
+            };
+            let fc = fake_firecracker();
+            let chosen = select_backend(ExecutionTier::Sandboxed, &[&fc, &t2]).unwrap();
+            assert_eq!(chosen.provided_tier(), ExecutionTier::Sandboxed);
+        }
+
+        #[test]
+        fn firecracker_argv_is_well_formed() {
+            let backend = fake_firecracker();
+            let mut inner = CommandSpec::new("/bin/echo");
+            inner.args = vec!["hi".to_string()];
+            inner.cwd = Some("/work/tree".to_string());
+            let cfg = Path::new("/run/cc/vm-abc.json");
+            let wrapped = backend.wrapped_spec(&inner, cfg).unwrap();
+
+            // Launches firecracker, boots from the static config (no live API socket).
+            assert!(wrapped.program.ends_with("firecracker"));
+            assert!(wrapped.args.iter().any(|a| a == "--no-api"));
+            assert!(wrapped
+                .args
+                .windows(2)
+                .any(|w| w == ["--config-file", "/run/cc/vm-abc.json"]));
+            // The worktree cwd is preserved for the host-side launcher.
+            assert_eq!(wrapped.cwd.as_deref(), Some("/work/tree"));
+            // The inner command is forwarded after the `--` separator.
+            let sep = wrapped.args.iter().position(|a| a == "--").unwrap();
+            assert_eq!(wrapped.args[sep + 1], "/bin/echo");
+            assert_eq!(wrapped.args[sep + 2], "hi");
+        }
+
+        #[test]
+        fn firecracker_requires_a_worktree_cwd() {
+            // No cwd → fail-closed (the guest has nothing to mount).
+            let backend = fake_firecracker();
+            let inner = CommandSpec::new("/bin/echo");
+            assert!(matches!(
+                backend.wrapped_spec(&inner, Path::new("/run/cc/vm.json")),
+                Err(SandboxError::Setup(_))
+            ));
+        }
+
+        #[test]
+        fn firecracker_run_sanitizes_env_then_refuses_live_boot() {
+            // `run` must sanitize the env (so a bad PATH/credential is caught at the
+            // boundary) and, the live boot being unimplemented, refuse with `Setup`
+            // rather than fail open. A PATH component inside the writable worktree is
+            // an exec vector → env sanitation rejects it before the live TODO.
+            let backend = fake_firecracker();
+            let profile = SandboxProfile {
+                tier: ExecutionTier::Hostile,
+                network: NetworkPosture::DenyAll,
+                stripped_env: default_stripped_env(),
+            };
+            let mut bad = CommandSpec::new("/bin/echo");
+            bad.cwd = Some("/work/tree".to_string());
+            bad.env = env(&[("PATH", "/work/tree/bin:/usr/bin")]);
+            assert!(
+                matches!(backend.run(&profile, bad), Err(SandboxError::Setup(_))),
+                "a writable-worktree PATH component must be rejected by env sanitation"
+            );
+
+            // With a clean env the live boot is still unimplemented → `Setup` refusal,
+            // never an unconfined run.
+            let mut ok = CommandSpec::new("/bin/echo");
+            ok.cwd = Some("/work/tree".to_string());
+            ok.env = env(&[("PATH", "/usr/bin:/bin")]);
+            assert!(matches!(
+                backend.run(&profile, ok),
+                Err(SandboxError::Setup(_))
+            ));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // B4: Windows-native backend STUB (selection plumbing only; real Win32
+    // confinement is `TODO(B4-windows-live)`).
+    // -----------------------------------------------------------------------
+    #[cfg(feature = "windows-native")]
+    mod windows_tests {
+        use super::*;
+
+        fn stub_windows() -> WindowsBackend {
+            WindowsBackend { _private: () }
+        }
+
+        #[test]
+        fn windows_backend_is_tier_2() {
+            assert_eq!(stub_windows().provided_tier(), ExecutionTier::Sandboxed);
+        }
+
+        #[test]
+        fn windows_detect_is_none_off_windows() {
+            // The stub only reports availability on Windows; everywhere else it is
+            // `None`, so `select_backend` never picks it on a platform it cannot
+            // confine (refuse-if-no-backend holds).
+            if cfg!(target_os = "windows") {
+                assert!(WindowsBackend::detect().is_some());
+            } else {
+                assert!(WindowsBackend::detect().is_none());
+            }
+        }
+
+        #[test]
+        fn windows_stub_can_satisfy_a_tier2_selection() {
+            // The selection plumbing is real: a Tier-2 task with only the Windows
+            // backend selects it (it MEETS Tier 2); a Tier-3 task does NOT (no
+            // downgrade — the stub is not a microVM).
+            let w = stub_windows();
+            assert_eq!(
+                select_backend(ExecutionTier::Sandboxed, &[&w])
+                    .unwrap()
+                    .provided_tier(),
+                ExecutionTier::Sandboxed
+            );
+            assert!(matches!(
+                select_backend(ExecutionTier::Hostile, &[&w]),
+                Err(SandboxError::NoBackend)
+            ));
+        }
+
+        #[test]
+        fn windows_run_sanitizes_env_then_refuses_unimplemented_confinement() {
+            // Same honesty contract as the other backends: sanitize at the boundary,
+            // then refuse (the real Win32 confinement is deferred) rather than fail
+            // open.
+            let w = stub_windows();
+            let profile = SandboxProfile::default_sandboxed();
+            let mut bad = CommandSpec::new("cmd");
+            bad.cwd = Some("/work/tree".to_string());
+            bad.env = env(&[("PATH", "/work/tree/bin:/usr/bin")]);
+            assert!(matches!(w.run(&profile, bad), Err(SandboxError::Setup(_))));
+
+            let mut ok = CommandSpec::new("cmd");
+            ok.cwd = Some("/work/tree".to_string());
+            ok.env = env(&[("PATH", "/usr/bin:/bin")]);
+            assert!(matches!(w.run(&profile, ok), Err(SandboxError::Setup(_))));
+        }
     }
 
     // -----------------------------------------------------------------------

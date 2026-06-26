@@ -217,7 +217,12 @@ fn clippy_features() -> Result<(), String> {
         ("crustcore-secrets", "macos-keychain"),
         ("crustcore-index-rag", "persist"),
         ("crustcore-index-rag", "ast"),
+        ("crustcore-index-rag", "qdrant"),
+        ("crustcore-index-rag", "lancedb"),
         ("crustcore-telemetry", "otlp"),
+        ("crustcore-mcp", "http"),
+        ("crustcore-sandbox", "firecracker"),
+        ("crustcore-sandbox", "windows-native"),
         ("crustcore", "chat"),
     ] {
         run(
@@ -248,7 +253,11 @@ fn test_features() -> Result<(), String> {
         ("crustcore-secrets", "macos-keychain"),
         ("crustcore-index-rag", "persist"),
         ("crustcore-index-rag", "ast"),
+        ("crustcore-index-rag", "qdrant"),
+        ("crustcore-index-rag", "lancedb"),
         ("crustcore-telemetry", "otlp"),
+        ("crustcore-mcp", "http"),
+        ("crustcore-sandbox", "firecracker"),
     ] {
         run(
             "cargo",

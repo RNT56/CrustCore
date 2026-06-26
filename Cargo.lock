@@ -349,8 +349,10 @@ dependencies = [
  "crustcore-index",
  "crustcore-secrets",
  "crustcore-types",
+ "serde_json",
  "tree-sitter",
  "tree-sitter-rust",
+ "ureq",
 ]
 
 [[package]]
@@ -369,6 +371,7 @@ dependencies = [
  "crustcore-secrets",
  "crustcore-types",
  "serde_json",
+ "ureq",
 ]
 
 [[package]]

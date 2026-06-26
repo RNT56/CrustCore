@@ -8,6 +8,19 @@ authors.workspace = true
 repository.workspace = true
 description = "Sandbox command specs, profiles, and backend wrappers for CrustCore."
 
+[features]
+# Off-by-default sandbox backends (B4). Each is dependency-free — it shells out
+# to an external binary via `std::process` — so it adds NOTHING to the default
+# (nano) build. Neither pulls a new crate; both are `#![forbid(unsafe_code)]`-clean.
+default = []
+# Tier-3 (Hostile) Firecracker microVM backend. Shells out to the `firecracker`
+# binary; the live VM boot is `TODO(B4-firecracker-live)`.
+firecracker = []
+# Selectable Windows-native backend STUB. Real Win32 confinement (job objects /
+# AppContainer) is `TODO(B4-windows-live)` and needs a *safe* Win32 wrapper crate
+# because this crate is `#![forbid(unsafe_code)]`. The selection plumbing is real.
+windows-native = []
+
 [dependencies]
 crustcore-types = { workspace = true }
 crustcore-path = { workspace = true }
