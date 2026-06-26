@@ -164,6 +164,11 @@ pub const DEFAULT_NAMESPACE: &str = "default";
 pub mod local;
 pub mod mock;
 
+/// Shared HTTP plumbing (ureq agent, broker-mediated auth, response bounding) for the
+/// external store backends. Compiled only when an external backend feature is on.
+#[cfg(any(feature = "qdrant", feature = "lancedb"))]
+pub mod http;
+
 #[cfg(feature = "qdrant")]
 pub mod qdrant;
 

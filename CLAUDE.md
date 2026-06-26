@@ -254,8 +254,8 @@ in [`ROADMAP.md` §4](./ROADMAP.md). Summary every agent must hold in memory:
 12. Every long-running job has lease, heartbeat, cancellation, and recovery semantics.
 13. Every shippable patch is a VerifiedPatch.
 14. Irreversible actions require an approval token.
-15. Runtime user communication goes through Telegram only by default.
-16. CLI is setup/admin/emergency, not a hidden second chat channel.
+15. Runtime user communication goes through authorized, redacted channels (Telegram by default; the sanctioned `crustcore chat` front door). [amended v0.4.x]
+16. The CLI is setup/admin/emergency; the only sanctioned conversational surface is the explicit, redacted, policy-gated `crustcore chat` front door — no *ungoverned* parallel control plane. [amended v0.4.x]
 17. Model/provider names are config and capability-probed, not permanent assumptions.
 18. Self-improvement happens through PRs/evals, not live mutation of the running kernel.
 19. Nano feature build must remain below the configured size budget.
@@ -640,6 +640,8 @@ Start here, then go deep. Every doc below is a contract the code must satisfy.
 | [`docs/receipts.md`](./docs/receipts.md) | Tool receipts, MAC chain, replay verification |
 | [`docs/backend-contract.md`](./docs/backend-contract.md) | `BackendResult`, Unverified/VerifiedPatch, external workers |
 | [`docs/telegram.md`](./docs/telegram.md) | Runtime channel, commands, queue/steer, nonce approvals |
+| [`docs/chat.md`](./docs/chat.md) | Conversational front door (`crustcore chat`): routing, converse, queue/steer, trust rules |
+| [`docs/persona.md`](./docs/persona.md) | Personality + operator steering (voice, not authority; scoped below the safety core) |
 | [`docs/github.md`](./docs/github.md) | Auth, capabilities, deny/ask defaults, credential proxy |
 | [`docs/mcp.md`](./docs/mcp.md) | MCP modes, trust rules, registry, code-mode gateway |
 | [`docs/model-routing.md`](./docs/model-routing.md) | Providers, router, meta-providers, budgets |

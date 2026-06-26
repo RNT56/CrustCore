@@ -17,6 +17,19 @@ crustcore-receipts = { workspace = true }
 # `crustcore-mcp` is a capability-pack SIDECAR the nano binary never links (gated
 # behind the `mcp` feature of `crustcore`), so serde_json never enters the nano graph
 # (CLAUDE.md §5.1; the `forbidden-deps` nano check lists serde_json). The local
-# **stdio** transport is std `process` + this; a remote **HTTP** transport would reuse
-# `crustcore-net` and is the deferred `TODO(P13-net-http)`.
+# **stdio** transport is std `process` + this; the remote **HTTP** transport
+# ([`HttpMcp`]) is the `http` feature below.
 serde_json = "1"
+
+# Optional, gated to the `http` feature. `ureq` is a small, blocking, rustls-backed
+# HTTP/1.1 client (no Tokio); it is the *only* socket-opening code in this crate and
+# powers the remote `HttpMcp` JSON-RPC transport (P13-net-http). The default build
+# links no HTTP/TLS stack — the envelope build + response parse are CI-tested without
+# network, and the live POST is `#[ignore]`d. (Matches the `ureq` pin in crustcore-net.)
+ureq = { version = "2.12", optional = true }
+
+[features]
+# The remote HTTP MCP transport ([`HttpMcp`]). Off by default: a default
+# `crustcore-mcp` build links no HTTP/TLS. Enabling it is what the (future) live MCP
+# adapter turns on; the `BrokerSecret` auth header is sent on the wire only here.
+http = ["dep:ureq"]

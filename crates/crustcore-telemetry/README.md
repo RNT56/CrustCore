@@ -50,10 +50,16 @@ This is phase `C6-telemetry` of Track C; see
 | budget deltas (`semconv::budget_samples`)| `crustcore.budget.<axis>` (metric) |
 | every other kind                         | `crustcore.event.<kind>`           |
 
-GenAI model attributes are intentionally conservative: `gen_ai.system = "crustcore"`
-(the *mediator*, not the provider) and `gen_ai.operation.name`. Model name and token
-usage are **not** taken from untrusted model output (invariant 17); threading
-recorded `ModelCard`/usage metadata into these spans is `TODO(C6-genai-usage)`.
+GenAI model attributes are split by trust. Always emitted (fixed constant /
+kind-derived, never payload): `gen_ai.system = "crustcore"` (the *mediator*, not the
+provider) and `gen_ai.operation.name`. Emitted **only** from a trusted recorded source
+(`C6-genai-usage`, implemented): `gen_ai.request.model` / `gen_ai.response.model`,
+`gen_ai.usage.input_tokens`, and `gen_ai.usage.output_tokens`. These come from a
+`RecordedUsage` carrier (`usage::UsageBySeq`, keyed by frame `seq`) that **only trusted
+code populates** — the mediator that made the call, from the recorded `ModelCard` id and
+the provider-reported token counts — never from free-text model output (invariants 7,
+17). A model frame with no recorded usage emits no model/usage attributes (no fabricated
+tokens); the `model` id still passes the single redact chokepoint before export.
 
 Tool spans bind to their receipt via `crustcore_receipts::join::verify_against_log`
 (P5-join, consumed not re-implemented) and carry only the receipt's hashes / MAC /
@@ -62,20 +68,25 @@ ids — never tool name, args, or result values (invariant 10).
 ## Layering
 
 The deterministic core (`project` + `semconv` + `redact` + `InMemoryExporter` +
-`run`) is fully CI-testable: **no network, no secrets, no SDK**. The heavy OTel/OTLP
-stack and broker-mediated endpoint auth live behind the `otlp` cargo feature
+`run`) is fully CI-testable: **no network, no secrets, no SDK**. The OTLP/HTTP+JSON
+exporter and broker-mediated endpoint auth live behind the `otlp` cargo feature
 (`export::otlp`, `auth`), **off by default**, and never enter the nano graph
-(invariants 19, 20). The live OTLP socket and per-request broker auth injection are
-`TODO(C6-otlp-live)`; the deterministic projection never needs them.
+(invariants 19, 20). It is **lightweight by design**: a small `ureq` POST + a
+`serde_json`-shaped body — **not** the heavy OTel/tonic/Tokio SDK. The IR→OTLP-JSON
+serialization (`OtlpExporter::spans_to_otlp_json`) is unit-tested without a network;
+only the live socket smoke (an actual POST to a running collector) is
+`TODO(C6-otlp-live)`. The default build links neither `ureq` nor `serde_json`.
 
 ```rust
-use crustcore_telemetry::{run_log, Config, InMemoryExporter};
+use crustcore_telemetry::{run_log, Config, InMemoryExporter, UsageBySeq};
 use crustcore_secrets::Redactor;
 
 // `log`: &EventLog, `receipts`: &[ToolReceipt], `redactor`: &Redactor (broker-loaded).
+// `usage`: &UsageBySeq, trusted recorded GenAI usage keyed by frame seq (populated by
+// the mediator from recorded ModelCard ids + provider token counts; empty when none).
 let mut exporter = InMemoryExporter::new();
 let report = run_log(
-    log, receipts,
+    log, receipts, usage,
     /* seq_lo */ 0, /* seq_hi */ u64::MAX,
     &Config::enabled_in_memory(),
     redactor,

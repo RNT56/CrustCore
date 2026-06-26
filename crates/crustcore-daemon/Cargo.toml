@@ -8,14 +8,65 @@ authors.workspace = true
 repository.workspace = true
 description = "Long-running CrustCore runtime: Telegram/GitHub loops, leases, supervision."
 
+# The runtime entry point. A tiny hand-rolled CLI (no clap) dispatching `serve`
+# (wire the std-only runtime pieces + report readiness), `doctor`, `version`, `help`.
+# Non-nano: nano links no part of this stack (invariants 19, 20).
+[[bin]]
+name = "crustcore-daemon"
+path = "src/bin/crustcore-daemon.rs"
+
 [dependencies]
 crustcore-types = { workspace = true }
 crustcore-kernel = { workspace = true }
 crustcore-policy = { workspace = true }
 crustcore-secrets = { workspace = true }
 crustcore-net = { workspace = true }
-# TODO(P9-net/P10): the Telegram Bot API HTTP long-polling + sendMessage (in
-# crustcore-net, authenticated by the credential proxy), the GitHub task/PR loop,
-# the admin socket, and leases/heartbeats/recovery. The Phase-9 runtime-channel
-# logic (allowlist, dedupe, normalization, commands, queue/steer, nonce approvals,
-# typed outbound rendering) is std-only and implemented in `telegram`.
+crustcore-netproto = { workspace = true }
+# The conversational front door pack — the Telegram converse channel bridges the
+# runtime channel to it (docs/chat.md §5). Std-only; no HTTP/TLS.
+crustcore-chat = { workspace = true }
+
+# --- live-only deps (behind the `live` feature) ------------------------------
+# The live `WorktreeSubagentExecutor` (P11-exec-live) runs a real worker in a
+# sandboxed throwaway worktree and reruns the verifier — exactly as the `crustcore`
+# harness chains them. These crates are pulled in ONLY by the `live` feature so the
+# default (mock-driven, CI-green) daemon build links none of the sandbox/worktree/
+# receipt stack. They are non-nano regardless (the daemon is never in nano).
+crustcore-backend = { workspace = true, optional = true }
+crustcore-worktree = { workspace = true, optional = true }
+crustcore-sandbox = { workspace = true, optional = true }
+crustcore-receipts = { workspace = true, optional = true }
+crustcore-path = { workspace = true, optional = true }
+
+[features]
+# Default: mock-driven, no live transports. CI builds/tests this — green, no network,
+# no sandbox backend, no HTTP/TLS, no crypto. Every decision core + its tests live in
+# the default build; the `live` adapters are thin drop-ins over them.
+default = []
+
+# Wires the daemon's std-only decision cores to the now-existing net-side live
+# transports + the sandboxed worker/verify loop:
+#   * P9-net-live  — `LiveTelegramApi` over `crustcore_net::telegram::RestTelegram`
+#                    (needs the net `live` HTTP transport for the real socket).
+#   * P10/B2       — GitHub App installation-token minting via
+#                    `crustcore_net::githubapp::AppTokenMinter` (needs net `github-app`),
+#                    the git credential-helper argv→`PushRequest` parser, and the live
+#                    webhook HTTP listener feeding the existing `WebhookVerifier`.
+#   * P11-exec-live — `WorktreeSubagentExecutor` over backend/worktree/sandbox/receipts.
+#   * P12-native-live — the live advisor consult routed through the spawned net helper.
+#   * B5-autoloop-live — `LiveEvalRunner` (sandboxed eval workers) + the draft-PR seam.
+# The real network/sandbox calls are `#[ignore]`d; the mapping/adapter glue is CI-tested.
+live = [
+    "dep:crustcore-backend",
+    "dep:crustcore-worktree",
+    "dep:crustcore-sandbox",
+    "dep:crustcore-receipts",
+    "dep:crustcore-path",
+    "crustcore-net/live",
+    "crustcore-net/github-app",
+]
+# TODO(P10-net): the GitHub task/PR loop driver, the admin socket, and
+# leases/heartbeats/recovery (the long-running supervision runtime) land with the
+# daemon runtime entry point. The trust-critical cores (allowlist/dedupe/normalize,
+# push validation, merge gate, webhook verify, advisor, autoloop gate) are std-only
+# and implemented + tested; this feature wires them to the live sockets.

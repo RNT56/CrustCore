@@ -25,7 +25,7 @@ use crustcore_telemetry::project::EventProjector;
 use crustcore_telemetry::redact::redact_frame;
 use crustcore_telemetry::{
     project::{ProjectedFrame, SpanModel},
-    run_log, Config, InMemoryExporter,
+    run_log, Config, InMemoryExporter, UsageBySeq,
 };
 use crustcore_types::{JobId, TaskId, Timestamp};
 
@@ -97,6 +97,7 @@ fn sentinel_in_payloads_never_reaches_emitted_telemetry() {
     run_log(
         &log,
         &[],
+        &UsageBySeq::new(),
         0,
         u64::MAX,
         &Config::enabled_in_memory(),

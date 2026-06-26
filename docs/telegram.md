@@ -312,6 +312,30 @@ A model's *intent* ("tell the user the build is green") is realized as a
 **structured status/summary event** that CrustCore renders — bounded, redacted,
 attributable — not as raw model text injected verbatim.
 
+### 8.1 Amendment (v0.4.x): the converse turn (owner-authorized)
+
+The conversational front door ([`docs/chat.md`](./chat.md)) adds **one** model-authored
+message type — a **converse answer** — for chat parity. This narrows, but does not
+remove, the boundary above:
+
+- **Supervisory messages stay typed-only.** Status, plans, verifier results, approval
+  requests, `/logs`, and every runtime control message are still rendered *only* from
+  typed events — never model-authored. The model has no influence over them.
+- **A converse answer is model-authored, but never raw.** It is the model's reply to a
+  user question, and it reaches the user *only* through the trusted
+  `ConverseRenderer`: **redact (the `Redactor`, the sole `ModelVisibleText` constructor)
+  → bound → re-seal**. So it is redacted, length-bounded, and attributable, and a secret
+  split across the byte bound still cannot leak (redact precedes bound).
+- **The model still holds no `send_message(text)` tool.** It *supplies* an answer string
+  as untrusted output; trusted code decides to render it. Prompt-injection in
+  repo/MCP/tool content therefore cannot push a chosen string verbatim to the user — it
+  is redacted/bounded first, and it can never become a supervisory message, an approval,
+  or a capability.
+
+In short: the renderer, the redactor, and the principal-trust boundary are unchanged;
+exactly one new, fully-redacted message class (the converse answer) is permitted, and
+only in the explicit chat front door.
+
 ---
 
 ## 9. Where it lives, and what nano sees

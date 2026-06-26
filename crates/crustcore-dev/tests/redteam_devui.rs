@@ -79,6 +79,52 @@ fn seeded_backend() -> MockDevBackend {
 }
 
 // ---------------------------------------------------------------------------
+// SPA serving (C7-devui) — `/` and `/assets` serve the real embedded inspector,
+// the route table is unchanged (exactly 9 read + 1 mutating), and the SPA routes
+// keep the same auth/read posture as every other route.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn root_serves_the_spa_with_title_marker() {
+    let auth = Authenticator::new(token());
+    let cfg = DevConfig::default();
+    let mut backend = seeded_backend();
+    let resp = route(&mut backend, &auth, &cfg, &get("/", bearer_header()));
+    assert_eq!(resp.status, Status::Ok);
+    assert!(resp.body.contains("<title>CrustCore Inspector</title>"));
+    assert!(resp.body.contains("<!DOCTYPE html>"));
+    assert_ne!(resp.body, "ok", "the `/` placeholder must be replaced");
+}
+
+#[test]
+fn assets_serves_the_stylesheet_bytes() {
+    let auth = Authenticator::new(token());
+    let cfg = DevConfig::default();
+    let mut backend = seeded_backend();
+    let resp = route(&mut backend, &auth, &cfg, &get("/assets", bearer_header()));
+    assert_eq!(resp.status, Status::Ok);
+    assert_eq!(resp.body, crustcore_dev::INSPECTOR_CSS);
+}
+
+#[test]
+fn route_table_is_unchanged_ten_read_and_one_mutating() {
+    // The SPA reuses the existing read routes; it adds none. The table stays exactly the
+    // ten read GET routes (`/`, `/assets`, `/ws`, `/inspector`, `/replay`, `/provider`,
+    // `/mcp`, `/flow`, `/sessions`, `/approvals`) plus the single mutating POST.
+    let read = ROUTES
+        .iter()
+        .filter(|r| r.class == RouteClass::ReadOnly)
+        .count();
+    let mutating = ROUTES
+        .iter()
+        .filter(|r| r.class == RouteClass::Mutating)
+        .count();
+    assert_eq!(read, 10, "exactly ten read routes");
+    assert_eq!(mutating, 1, "exactly one mutating route");
+    assert_eq!(ROUTES.len(), 11);
+}
+
+// ---------------------------------------------------------------------------
 // (a) Bind / exposure
 // ---------------------------------------------------------------------------
 

@@ -91,7 +91,7 @@ fn print_help() {
     println!(
         "cargo xtask <command>\n\n\
          COMMANDS:\n\
-         \x20 verify          fmt + clippy(+features) + test(+features) + forbidden-deps + size gate\n\
+         \x20 verify          fmt + clippy(+features) + test(+features) + all-features + forbidden-deps + size gate\n\
          \x20 fmt             cargo fmt --check\n\
          \x20 clippy          cargo clippy --workspace -- -D warnings\n\
          \x20 test            cargo test --workspace\n\
@@ -175,6 +175,7 @@ fn verify() -> Result<(), String> {
     step("clippy-features", clippy_features)?;
     step("test", test)?;
     step("test-features", test_features)?;
+    step("all-features", all_features)?;
     step("forbidden-deps", forbidden_deps)?;
     step("size-check", size_check)?;
     Ok(())
@@ -183,6 +184,20 @@ fn verify() -> Result<(), String> {
 fn step(name: &str, f: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
     println!("\n=== xtask: {name} ===");
     f()
+}
+
+/// **Composition gate:** build the ENTIRE workspace with EVERY feature enabled at once
+/// (`--workspace --all-features --all-targets`), so a feature that only breaks when
+/// *combined* with another can never slip in. This is the guarantee behind the
+/// `crustcore-full --features all` "build everything" switch. It compiles all targets
+/// (incl. tests) but does not run them — `clippy-features`/`test-features` already run
+/// the per-feature suites. It does NOT touch the nano build (a separate package +
+/// profile); `forbidden-deps` and `size-check` still own nano.
+fn all_features() -> Result<(), String> {
+    run(
+        "cargo",
+        &["build", "--workspace", "--all-features", "--all-targets"],
+    )
 }
 
 fn fmt_check() -> Result<(), String> {
@@ -205,53 +220,72 @@ fn clippy() -> Result<(), String> {
 
 /// Clippy the **feature-gated** code the default `--workspace` clippy does not see
 /// (it does not enable per-crate features): the live HTTP transport
-/// (`crustcore-net --features live`, P7-live) and the encrypted-file vault
-/// (`crustcore-secrets --features vault-file`, P8-store).
+/// (`crustcore-net --features live`, P7-live), the encrypted-file vault
+/// (`crustcore-secrets --features vault-file`, P8-store), the persistent RAG store
+/// (`crustcore-index-rag --features persist`, C5-persist), the OTLP telemetry seam
+/// (`crustcore-telemetry --features otlp`, C6), and the conversational front door
+/// (`crustcore --features chat`).
 fn clippy_features() -> Result<(), String> {
-    run(
-        "cargo",
-        &[
-            "clippy",
-            "--package",
-            "crustcore-net",
-            "--features",
-            "live",
-            "--all-targets",
-            "--",
-            "-D",
-            "warnings",
-        ],
-    )?;
-    run(
-        "cargo",
-        &[
-            "clippy",
-            "--package",
-            "crustcore-secrets",
-            "--features",
-            "vault-file",
-            "--all-targets",
-            "--",
-            "-D",
-            "warnings",
-        ],
-    )
+    for (package, feature) in [
+        ("crustcore-net", "live"),
+        ("crustcore-net", "github-app"),
+        ("crustcore-secrets", "vault-file"),
+        ("crustcore-secrets", "macos-keychain"),
+        ("crustcore-index", "ast"),
+        ("crustcore-index-rag", "persist"),
+        ("crustcore-index-rag", "ast"),
+        ("crustcore-index-rag", "qdrant"),
+        ("crustcore-index-rag", "lancedb"),
+        ("crustcore-telemetry", "otlp"),
+        ("crustcore-mcp", "http"),
+        ("crustcore-sandbox", "firecracker"),
+        ("crustcore-sandbox", "windows-native"),
+        ("crustcore-daemon", "live"),
+        ("crustcore", "chat"),
+    ] {
+        run(
+            "cargo",
+            &[
+                "clippy",
+                "--package",
+                package,
+                "--features",
+                feature,
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings",
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 /// Run the tests behind cargo features the default `--workspace` test run does not
-/// enable. The vault's seal/open/tamper tests live behind `vault-file`; the net
-/// adapter tests run under `--workspace` already (only `UreqClient` is feature-gated).
+/// enable. The vault's seal/open/tamper tests live behind `vault-file`; the persistent
+/// RAG snapshot tests behind `persist` (C5); the OTLP projection behind `otlp` (C6).
+/// The net adapter tests run under `--workspace` already (only `UreqClient` is gated).
 fn test_features() -> Result<(), String> {
-    run(
-        "cargo",
-        &[
-            "test",
-            "--package",
-            "crustcore-secrets",
-            "--features",
-            "vault-file",
-        ],
-    )
+    for (package, feature) in [
+        ("crustcore-net", "github-app"),
+        ("crustcore-secrets", "vault-file"),
+        ("crustcore-secrets", "macos-keychain"),
+        ("crustcore-index", "ast"),
+        ("crustcore-index-rag", "persist"),
+        ("crustcore-index-rag", "ast"),
+        ("crustcore-index-rag", "qdrant"),
+        ("crustcore-index-rag", "lancedb"),
+        ("crustcore-telemetry", "otlp"),
+        ("crustcore-mcp", "http"),
+        ("crustcore-sandbox", "firecracker"),
+        ("crustcore-daemon", "live"),
+    ] {
+        run(
+            "cargo",
+            &["test", "--package", package, "--features", feature],
+        )?;
+    }
+    Ok(())
 }
 
 fn test() -> Result<(), String> {

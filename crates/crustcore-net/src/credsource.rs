@@ -49,6 +49,20 @@ pub trait CredentialSource {
     /// The auth header for `label` in the given `style`, or `None` if no credential
     /// is configured for that label (a local endpoint needs none → no auth header).
     fn header_for(&self, label: &str, style: AuthStyle) -> Option<AuthHeader>;
+
+    /// The raw bot-token bytes for `label`, or `None` if none is configured.
+    ///
+    /// This is the **one** path that returns a secret as a plain `String` rather than
+    /// pre-assembled into an [`AuthHeader`] — because Telegram carries the bot token in
+    /// the URL *path* (`/bot<token>/getUpdates`), not a header (`docs/telegram.md` §9).
+    /// The caller ([`crate::telegram::RestTelegram`]) splices it into the request URL
+    /// and drops it; it is never stored, logged, or placed into an error. The default
+    /// impl returns `None` so existing credential sources that serve only header-style
+    /// providers are unaffected.
+    fn bot_token(&self, label: &str) -> Option<String> {
+        let _ = label;
+        None
+    }
 }
 
 /// A simple in-process [`CredentialSource`] mapping handle labels to key strings —
@@ -96,6 +110,11 @@ impl CredentialSource for StaticCredentials {
                 value: key.clone(),
             },
         })
+    }
+
+    fn bot_token(&self, label: &str) -> Option<String> {
+        // The same key store backs the Telegram bot token (URL-path credential).
+        self.keys.get(label).cloned()
     }
 }
 

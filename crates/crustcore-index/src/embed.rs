@@ -8,12 +8,28 @@
 //! The vector store + cosine nearest-neighbor + [`semantic_select`] are **pure `f32`
 //! math — dependency-free** and fully CI-testable with the deterministic [`HashEmbedder`]
 //! (a bag-of-words stand-in). The *real* embedding call — text → vector via an embedding
-//! provider — is the only deferred part: it routes through the spawned `crustcore-net`
-//! helper (reusing the P7-live transport) behind the [`Embedder`] trait, `TODO(B3-embed-live)`.
+//! provider — routes through the spawned `crustcore-net` helper (reusing the P7-live
+//! transport) behind the [`Embedder`] trait: [`NetEmbedder`] (B3-embed-live). It is
+//! **additive** — [`HashEmbedder`] stays the dev/CI default everywhere; only an explicitly
+//! constructed [`NetEmbedder`] reaches the live provider. The std-only `crustcore-netproto`
+//! protocol carries the request to the sidecar *process* (no HTTP/TLS linked into this
+//! crate, which is itself non-nano behind the `index` feature). The only seam that cannot
+//! run in CI without a real provider is *spawning* the sidecar (`SpawnedHelper::spawn`,
+//! `TODO(B3-embed-live)`); the protocol round-trip itself is CI-tested over an in-memory
+//! pipe.
 //! A brute-force cosine scan over the bounded memory set needs no vector-DB dependency
-//! (mirroring P14-store's dependency-free design); an approximate-NN index is a later
-//! `TODO(B3-ann)` optimization.
+//! (mirroring P14-store's dependency-free design). For larger bounded sets, [`AnnIndex`]
+//! adds a dependency-free **approximate nearest-neighbor** layer (B3-ann, implemented):
+//! random-hyperplane LSH buckets vectors by a K-bit signature, a query probes its own
+//! bucket plus a small Hamming radius, and candidates are **re-ranked by exact
+//! [`cosine`]** — same positively-similar, deterministic, panic-free contract as
+//! [`VectorMemory::nearest`]. Hyperplanes come from a fixed seed via an internal
+//! [splitmix64](https://en.wikipedia.org/wiki/Xorshift) PRNG (no wall clock, no std rng,
+//! no per-run randomness).
 
+use std::io::{BufRead, Write};
+
+use crustcore_netproto::{EmbedRequest, NetHelper, ProtoError, Role};
 use crustcore_secrets::Redactor;
 
 use crate::{build_bundle, ContextBundle, ContextCandidate, MemoryEntry};
@@ -22,8 +38,15 @@ use crate::{build_bundle, ContextBundle, ContextCandidate, MemoryEntry};
 pub const EMBED_DIM: usize = 256;
 
 /// Produces a bounded embedding vector for a (bounded) text. The live implementation
-/// routes the text through the net helper's embedding provider (`TODO(B3-embed-live)`);
-/// the dev/CI implementation is [`HashEmbedder`] (deterministic, dependency-free).
+/// ([`NetEmbedder`], B3-embed-live) routes the text through the spawned `crustcore-net`
+/// helper's embedding provider; the dev/CI implementation is [`HashEmbedder`]
+/// (deterministic, dependency-free) and stays the default everywhere.
+///
+/// `embed` is **infallible** — it always returns a `Vec<f32>`. A live implementation that
+/// hits a transport/provider error must therefore handle it internally and still return a
+/// usable, fixed-dimension vector (it must never panic, hang, or return an empty vector
+/// that would silently disable retrieval). [`NetEmbedder`] does this by falling back to a
+/// deterministic [`HashEmbedder`] of the same dimension.
 pub trait Embedder {
     /// Embeds `text` into a vector. Implementations should return a fixed dimension.
     fn embed(&self, text: &str) -> Vec<f32>;
@@ -57,6 +80,138 @@ fn fnv1a(bytes: &[u8]) -> u64 {
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     h
+}
+
+/// The default [`Role`] a [`NetEmbedder`] routes embedding requests for: [`Role::Research`]
+/// (the cheap/fast tier — embeddings are high-volume, low-reasoning). The router resolves
+/// it against the dynamic registry's embedding-capable models (invariant 17); it is never a
+/// hard-coded model name.
+pub const DEFAULT_EMBED_ROLE: Role = Role::Research;
+
+/// The **live** [`Embedder`] (B3-embed-live): embeds text → vector by routing the request
+/// through the spawned `crustcore-net` helper over the std-only `crustcore-netproto`
+/// protocol. The heavy provider stack (HTTP/TLS/embedding SDKs) lives behind that helper
+/// *process*; this crate links **none** of it — exactly as nano spawns `git`/`codex`
+/// (invariants 19, 20). It is **additive**: [`HashEmbedder`] remains the dev/CI default,
+/// and a [`NetEmbedder`] only exists where one is explicitly constructed.
+///
+/// It is generic over the protocol client's byte channel (`W`/`R`) so the live spawned
+/// path (`SpawnedHelper`'s stdio) and an in-memory test pipe share one implementation. The
+/// client is held behind a [`RefCell`](std::cell::RefCell) because [`Embedder::embed`] takes
+/// `&self` while the protocol exchange needs `&mut` access to write the request and read the
+/// reply.
+///
+/// **Error / fallback contract.** [`Embedder::embed`] is infallible, so a protocol or
+/// provider error cannot surface as an `Err`. Instead [`NetEmbedder`] falls back to a
+/// deterministic [`HashEmbedder`] of the same dimension and returns *that* vector — so a
+/// transient sidecar failure degrades retrieval to the keyword-flavoured stand-in rather
+/// than panicking, hanging, or silently emitting a zero/empty vector (which would make
+/// every cosine `0` and quietly disable semantic recall). This keeps memory's
+/// inert/redacted/never-authority contract intact: a degraded embedding only changes *which*
+/// prior observations surface, never their (non-)authority.
+pub struct NetEmbedder<W: Write, R: BufRead> {
+    helper: std::cell::RefCell<NetHelper<W, R>>,
+    role: Role,
+    fallback_dim: usize,
+    max_cost_micros: u64,
+}
+
+impl<W: Write, R: BufRead> NetEmbedder<W, R> {
+    /// Builds a live embedder over an existing protocol client (`NetHelper`). Use this with
+    /// a spawned helper's [`NetHelper`](crustcore_netproto::SpawnedHelper::helper) in
+    /// production, or with an in-memory `NetHelper::new(writer, reader)` in tests. Defaults
+    /// to [`DEFAULT_EMBED_ROLE`], an [`EMBED_DIM`] fallback dimension, and no per-request
+    /// cost ceiling (`0`).
+    #[must_use]
+    pub fn new(helper: NetHelper<W, R>) -> Self {
+        NetEmbedder {
+            helper: std::cell::RefCell::new(helper),
+            role: DEFAULT_EMBED_ROLE,
+            fallback_dim: EMBED_DIM,
+            max_cost_micros: 0,
+        }
+    }
+
+    /// Overrides the abstract [`Role`] embedding requests route for (default
+    /// [`DEFAULT_EMBED_ROLE`]).
+    #[must_use]
+    pub fn with_role(mut self, role: Role) -> Self {
+        self.role = role;
+        self
+    }
+
+    /// Overrides the hard per-request cost ceiling in micros (`0` = unlimited; the default).
+    /// The sidecar's budget provider refuses/degrades rather than breach it (invariant 11).
+    #[must_use]
+    pub fn with_max_cost_micros(mut self, micros: u64) -> Self {
+        self.max_cost_micros = micros;
+        self
+    }
+
+    /// The dimension of the deterministic fallback vector returned on a protocol/provider
+    /// error (default [`EMBED_DIM`]).
+    #[must_use]
+    pub fn with_fallback_dim(mut self, dim: usize) -> Self {
+        self.fallback_dim = dim;
+        self
+    }
+
+    /// Performs the protocol round-trip: send a single-input [`EmbedRequest`] and return the
+    /// first returned vector. A protocol error, an empty `vectors` reply, or an
+    /// already-borrowed client (a re-entrant call) becomes a typed `Err` so the caller can
+    /// decide how to degrade — [`Embedder::embed`] maps any `Err` to the fallback.
+    ///
+    /// # Errors
+    /// [`ProtoError`] on a transport/decode failure, a sidecar-reported error, an empty
+    /// embedding reply, or a re-entrant borrow of the held client.
+    pub fn try_embed(&self, text: &str) -> Result<Vec<f32>, ProtoError> {
+        let req = EmbedRequest {
+            role: self.role,
+            inputs: vec![text.to_string()],
+            max_cost_micros: self.max_cost_micros,
+        };
+        let mut helper = self
+            .helper
+            .try_borrow_mut()
+            .map_err(|_| ProtoError::Io("net embedder client already in use".into()))?;
+        let result = helper.embed(&req)?;
+        result
+            .vectors
+            .into_iter()
+            .next()
+            .ok_or_else(|| ProtoError::Decode("embedding reply carried no vectors".into()))
+    }
+}
+
+impl<W: Write, R: BufRead> Embedder for NetEmbedder<W, R> {
+    /// Embeds `text` via the net helper, falling back to a deterministic [`HashEmbedder`]
+    /// vector (of [`fallback_dim`](Self::with_fallback_dim) dimension) on any error — never a
+    /// panic, hang, or empty/zero vector (see the type-level error/fallback contract).
+    fn embed(&self, text: &str) -> Vec<f32> {
+        match self.try_embed(text) {
+            Ok(vector) => vector,
+            Err(_) => fallback_embedding(text, self.fallback_dim),
+        }
+    }
+}
+
+/// The deterministic fallback embedding for a text at an arbitrary dimension: the
+/// [`HashEmbedder`] bag-of-words vector folded into `dim` buckets. Used by [`NetEmbedder`]
+/// when the live provider is unreachable so retrieval degrades gracefully (a usable,
+/// non-zero, fixed-dimension vector) rather than failing. `dim == 0` yields an empty vector.
+fn fallback_embedding(text: &str, dim: usize) -> Vec<f32> {
+    if dim == 0 {
+        return Vec::new();
+    }
+    let mut v = vec![0f32; dim];
+    for token in text
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+    {
+        let idx = (fnv1a(token.to_ascii_lowercase().as_bytes()) % dim as u64) as usize;
+        v[idx] += 1.0;
+    }
+    v
 }
 
 /// Cosine similarity in `[-1, 1]`. Returns `0.0` for a zero vector, a length mismatch, or
@@ -143,6 +298,248 @@ impl VectorMemory {
             .take(k)
             .map(|(_, i)| &self.entries[i].0)
             .collect()
+    }
+}
+
+/// Fixed seed for the LSH hyperplane PRNG. Deterministic by construction: the same seed
+/// always yields the same hyperplanes, so an [`AnnIndex`] over the same inputs returns
+/// identical results across builds and runs (no wall clock, no per-run randomness).
+const ANN_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+
+/// Number of random hyperplanes / signature bits **per table**. Bounded and fixed. Kept
+/// small (so similar vectors collide in at least one table) and combined with [`ANN_TABLES`]
+/// independent tables to lift recall — the classic multi-table LSH trade-off.
+pub const ANN_BITS: usize = 8;
+
+/// Number of independent LSH tables. Each table has its own [`ANN_BITS`] hyperplanes (a
+/// distinct random projection), a vector is inserted into all of them, and a query unions
+/// candidates across all of them. More tables ⇒ higher recall at fixed `ANN_BITS`; bounded
+/// and fixed so signing/probing cost stays `ANN_TABLES * ANN_BITS * dim`.
+pub const ANN_TABLES: usize = 10;
+
+/// Maximum number of vectors an [`AnnIndex`] holds. Bounded everything (§6.5): inserts past
+/// this cap are dropped, so the index can never grow without limit.
+pub const ANN_MAX_VECTORS: usize = 100_000;
+
+/// Maximum Hamming radius a query may probe **within each table**. Bounded: the number of
+/// probed buckets per table is `sum_{r<=R} C(ANN_BITS, r)`, so the radius is capped to keep
+/// probing cheap and predictable.
+pub const ANN_MAX_RADIUS: u32 = 2;
+
+/// A tiny deterministic [splitmix64](https://en.wikipedia.org/wiki/Xorshift) PRNG. Used
+/// only to derive the fixed LSH hyperplanes from [`ANN_SEED`]; it is *not* a CSPRNG and is
+/// never seeded from a clock or any per-run source.
+struct SplitMix64 {
+    state: u64,
+}
+
+impl SplitMix64 {
+    fn new(seed: u64) -> Self {
+        SplitMix64 { state: seed }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// A finite `f32` in roughly `[-1, 1)`, derived deterministically. Hyperplane normals
+    /// only need a fixed pseudo-random direction; exact distribution does not matter.
+    fn next_unit_f32(&mut self) -> f32 {
+        // Top 24 bits → [0, 1), then map to [-1, 1). Always finite.
+        let bits = (self.next_u64() >> 40) as u32; // 24 bits
+        let unit = (bits as f32) / ((1u32 << 24) as f32); // [0, 1)
+        unit * 2.0 - 1.0
+    }
+}
+
+/// A dependency-free **approximate nearest-neighbor** index over embedding vectors, an
+/// additive companion to [`VectorMemory`] (it does not change `VectorMemory`'s API or
+/// behavior). It uses **random-hyperplane LSH** across [`ANN_TABLES`] independent tables:
+/// in each table a vector is projected onto [`ANN_BITS`] fixed hyperplanes (sign of the dot
+/// product → one bit), giving a per-table signature, and is bucketed by that signature.
+/// A query signs itself the same way in each table, probes its own bucket plus every bucket
+/// within a small Hamming radius, **unions** the candidates across all tables, and **re-ranks
+/// them by exact [`cosine`]** — so the ranking that survives is exact; only the *candidate
+/// set* is approximate. Multiple tables lift recall: two similar vectors only have to collide
+/// in *one* table to become candidates.
+///
+/// Determinism is structural: every hyperplane in every table is derived from the fixed
+/// [`ANN_SEED`] via [`SplitMix64`] in a fixed order (no wall clock, no std rng, no per-run
+/// randomness), so the same inputs always produce the same results across builds and runs.
+/// Like [`VectorMemory`] it is **retrieval only** and grants nothing; results match the
+/// [`VectorMemory::nearest`] contract — only **positively-similar** entries, descending by
+/// cosine, ties keep insertion order, never a panic, never `NaN`.
+#[derive(Debug)]
+pub struct AnnIndex {
+    /// Vector dimension this index signs against (fixed at construction).
+    dim: usize,
+    /// `ANN_TABLES` tables, each holding `ANN_BITS` hyperplane normals of length `dim`,
+    /// derived deterministically from [`ANN_SEED`].
+    tables: Vec<Vec<Vec<f32>>>,
+    /// Stored entries paired with their embedding (insertion order preserved).
+    entries: Vec<(MemoryEntry, Vec<f32>)>,
+    /// Per-table maps: `signature → indices into entries` that share it (one per table).
+    buckets: Vec<std::collections::HashMap<u32, Vec<usize>>>,
+}
+
+impl AnnIndex {
+    /// An empty index sized for `dim`-dimensional vectors. Every hyperplane in every table is
+    /// generated deterministically from [`ANN_SEED`]; an index built with the same `dim` is
+    /// always identical. A `dim` of `0` yields a usable (but trivially-bucketed) index.
+    #[must_use]
+    pub fn new(dim: usize) -> Self {
+        let mut rng = SplitMix64::new(ANN_SEED);
+        let mut tables = Vec::with_capacity(ANN_TABLES);
+        // Fixed generation order: table-major, then plane, then component. The planes depend
+        // only on (ANN_SEED, dim, ANN_BITS, ANN_TABLES) — never on insertion order or
+        // anything per-run.
+        for _ in 0..ANN_TABLES {
+            let mut planes = Vec::with_capacity(ANN_BITS);
+            for _ in 0..ANN_BITS {
+                let mut plane = Vec::with_capacity(dim);
+                for _ in 0..dim {
+                    plane.push(rng.next_unit_f32());
+                }
+                planes.push(plane);
+            }
+            tables.push(planes);
+        }
+        let buckets = (0..ANN_TABLES)
+            .map(|_| std::collections::HashMap::new())
+            .collect();
+        AnnIndex {
+            dim,
+            tables,
+            entries: Vec::new(),
+            buckets,
+        }
+    }
+
+    /// The `ANN_BITS`-bit LSH signature of `v` in table `t`: bit `i` is the sign of
+    /// `v · plane_i` (`1` if the dot product is `> 0`, else `0`). A length mismatch or a
+    /// non-finite dot product yields a `0` bit, so the signature is always well-defined and
+    /// never panics.
+    fn signature(&self, t: usize, v: &[f32]) -> u32 {
+        let mut sig = 0u32;
+        for (i, plane) in self.tables[t].iter().enumerate() {
+            if v.len() == plane.len() {
+                let mut dot = 0f64;
+                for (x, p) in v.iter().zip(plane) {
+                    dot += f64::from(*x) * f64::from(*p);
+                }
+                if dot.is_finite() && dot > 0.0 {
+                    sig |= 1 << i;
+                }
+            }
+        }
+        sig
+    }
+
+    /// Number of stored entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the index is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Records an entry with its embedding, bucketed by its per-table LSH signatures. Inserts
+    /// past [`ANN_MAX_VECTORS`] or whose embedding dimension does not match the index `dim`
+    /// are **dropped** (returns `false`); a successful insert returns `true`. Bounding the
+    /// index keeps it from growing without limit (§6.5).
+    pub fn put(&mut self, entry: MemoryEntry, embedding: Vec<f32>) -> bool {
+        if self.entries.len() >= ANN_MAX_VECTORS || embedding.len() != self.dim {
+            return false;
+        }
+        let idx = self.entries.len();
+        for t in 0..self.tables.len() {
+            let sig = self.signature(t, &embedding);
+            self.buckets[t].entry(sig).or_default().push(idx);
+        }
+        self.entries.push((entry, embedding));
+        true
+    }
+
+    /// The top-`k` entries by **exact** cosine similarity to `query`, found approximately: in
+    /// each of the [`ANN_TABLES`] tables the query is signed, every bucket within Hamming
+    /// distance `radius` (capped at [`ANN_MAX_RADIUS`]) of that signature is probed, the
+    /// union of all those entries (across all tables) is the candidate set, and the
+    /// candidates are re-ranked by exact [`cosine`]. Returns only **positively-similar**
+    /// entries, descending by cosine, ties keep insertion order (deterministic). Empty index,
+    /// zero query, or a dimension mismatch yields an empty result — never a panic.
+    #[must_use]
+    pub fn nearest(&self, query: &[f32], k: usize, radius: u32) -> Vec<&MemoryEntry> {
+        if self.entries.is_empty() || k == 0 {
+            return Vec::new();
+        }
+        let radius = radius.min(ANN_MAX_RADIUS).min(ANN_BITS as u32);
+
+        // Gather candidate indices from every probed bucket in every table, deduping with a
+        // seen-set so each entry is scored once regardless of how many tables surface it.
+        let mut seen = vec![false; self.entries.len()];
+        let mut candidates: Vec<usize> = Vec::new();
+        for t in 0..self.tables.len() {
+            let base = self.signature(t, query);
+            for sig in hamming_ball(base, radius) {
+                if let Some(idxs) = self.buckets[t].get(&sig) {
+                    for &i in idxs {
+                        if !seen[i] {
+                            seen[i] = true;
+                            candidates.push(i);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut scored: Vec<(f32, usize)> = candidates
+            .into_iter()
+            .map(|i| (cosine(query, &self.entries[i].1), i))
+            .filter(|(s, _)| *s > 0.0)
+            .collect();
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        scored
+            .into_iter()
+            .take(k)
+            .map(|(_, i)| &self.entries[i].0)
+            .collect()
+    }
+}
+
+/// Every signature within Hamming distance `radius` of `base` over [`ANN_BITS`] bits,
+/// `base` itself first. Bounded: `radius` is assumed already capped by the caller, so the
+/// count is `sum_{r<=radius} C(ANN_BITS, r)` and stays small.
+fn hamming_ball(base: u32, radius: u32) -> Vec<u32> {
+    let mut out = vec![base];
+    let bits = ANN_BITS as u32;
+    // Flip every combination of up to `radius` bits. For the small fixed `ANN_BITS` /
+    // `ANN_MAX_RADIUS` this enumeration is tiny; we build masks of increasing popcount.
+    for r in 1..=radius {
+        flip_combinations(bits, r, 0, 0, &mut |mask| out.push(base ^ mask));
+    }
+    out
+}
+
+/// Invokes `emit` with every bitmask over `bits` bits that has exactly `remaining` bits set,
+/// choosing from bit positions `>= start`. A small recursive combination enumerator.
+fn flip_combinations(bits: u32, remaining: u32, start: u32, acc: u32, emit: &mut impl FnMut(u32)) {
+    if remaining == 0 {
+        emit(acc);
+        return;
+    }
+    // Need `remaining` more positions from [pos, bits): stop when too few remain.
+    let mut pos = start;
+    while pos + remaining <= bits {
+        flip_combinations(bits, remaining - 1, pos + 1, acc | (1 << pos), emit);
+        pos += 1;
     }
 }
 
@@ -299,5 +696,392 @@ mod tests {
         assert!(!shown.contains("VECSENTINEL")); // secret redacted before visibility (inv 2)
         assert!(shown.contains("[REDACTED:idx]"));
         assert!(shown.contains("IGNORE ALL POLICY")); // present only as inert data (inv 7)
+    }
+
+    // --- B3-embed-live: NetEmbedder over the std-only crustcore-netproto protocol ---
+
+    use crustcore_netproto::{encode_response, EmbeddingResult, Response, Usage};
+    use std::io::{BufReader, Cursor};
+
+    /// Builds a `NetEmbedder` whose helper reads a canned, pre-encoded response stream and
+    /// writes to a discard sink — the exact in-memory pipe the protocol round-trip is
+    /// CI-tested over, with no process spawned.
+    fn net_embedder_over(canned: &[u8]) -> NetEmbedder<Vec<u8>, BufReader<Cursor<Vec<u8>>>> {
+        let reader = BufReader::new(Cursor::new(canned.to_vec()));
+        NetEmbedder::new(NetHelper::new(Vec::new(), reader))
+    }
+
+    fn embedding_line(vectors: Vec<Vec<f32>>) -> Vec<u8> {
+        let resp = Response::Embedding(EmbeddingResult {
+            vectors,
+            usage: Usage::default(),
+            provider: "emb-test".into(),
+            model: "e-mock".into(),
+            fallbacks: Vec::new(),
+        });
+        format!("{}\n", encode_response(&resp)).into_bytes()
+    }
+
+    /// The protocol round-trip works over an in-memory pipe (no spawn): a canned
+    /// `Response::Embedding` decodes back to the exact vector the embedder returns.
+    #[test]
+    fn net_embedder_returns_the_providers_vector() {
+        let want = vec![0.5, -1.25, 0.0, 3.0];
+        let emb = net_embedder_over(&embedding_line(vec![want.clone()]));
+
+        // The fallible path returns the provider vector verbatim.
+        assert_eq!(emb.try_embed("embed me").unwrap(), want);
+
+        // The infallible trait method returns the same vector (no fallback taken).
+        let emb = net_embedder_over(&embedding_line(vec![want.clone()]));
+        assert_eq!(Embedder::embed(&emb, "embed me"), want);
+    }
+
+    /// When the provider returns a batch, only the first vector (this is a single-input
+    /// request) is used.
+    #[test]
+    fn net_embedder_uses_the_first_vector() {
+        let first = vec![1.0, 2.0, 3.0];
+        let canned = embedding_line(vec![first.clone(), vec![9.0, 9.0, 9.0]]);
+        let emb = net_embedder_over(&canned);
+        assert_eq!(emb.try_embed("x").unwrap(), first);
+    }
+
+    /// A sidecar-reported error: `try_embed` surfaces a typed `Err`, and the infallible
+    /// trait method degrades to a deterministic, non-zero, fixed-dimension fallback vector
+    /// (never a panic, hang, or empty/zero vector).
+    #[test]
+    fn net_embedder_falls_back_to_hash_on_error() {
+        let err = format!(
+            "{}\n",
+            encode_response(&Response::Error("no embedding model available".into()))
+        )
+        .into_bytes();
+
+        // try_embed → typed Err.
+        let emb = net_embedder_over(&err);
+        assert!(matches!(
+            emb.try_embed("verify clippy"),
+            Err(ProtoError::Decode(_))
+        ));
+
+        // embed → deterministic HashEmbedder-shaped fallback of the right dimension.
+        let emb = net_embedder_over(&err);
+        let got = Embedder::embed(&emb, "verify clippy");
+        assert_eq!(got.len(), EMBED_DIM);
+        assert_eq!(got, HashEmbedder.embed("verify clippy"));
+        // Non-zero (retrieval is not silently disabled) and finite.
+        assert!(got.iter().any(|x| *x != 0.0));
+        assert!(got.iter().all(|x| x.is_finite()));
+    }
+
+    /// A truncated stream (EOF before any response) degrades to the fallback, not a hang or
+    /// panic — `UnexpectedEof` is just another error to absorb.
+    #[test]
+    fn net_embedder_falls_back_on_eof() {
+        let emb = net_embedder_over(b"");
+        assert!(matches!(emb.try_embed("x"), Err(ProtoError::UnexpectedEof)));
+        let emb = net_embedder_over(b"");
+        assert_eq!(Embedder::embed(&emb, "abc"), HashEmbedder.embed("abc"));
+    }
+
+    /// An embedding reply that carries no vectors is treated as an error (and falls back),
+    /// never an empty embedding that would make every cosine `0`.
+    #[test]
+    fn net_embedder_treats_empty_vectors_as_error() {
+        let emb = net_embedder_over(&embedding_line(Vec::new()));
+        assert!(matches!(emb.try_embed("x"), Err(ProtoError::Decode(_))));
+    }
+
+    /// The fallback dimension is configurable; the fallback vector matches that width.
+    #[test]
+    fn net_embedder_fallback_dim_is_configurable() {
+        let reader = BufReader::new(Cursor::new(Vec::new())); // EOF → error → fallback
+        let emb = NetEmbedder::new(NetHelper::new(Vec::new(), reader)).with_fallback_dim(64);
+        let got = Embedder::embed(&emb, "some text with tokens");
+        assert_eq!(got.len(), 64);
+        assert!(got.iter().any(|x| *x != 0.0));
+    }
+
+    /// A `NetEmbedder` plugs straight into [`semantic_select`] (it *is* an `Embedder`): a
+    /// canned provider vector for the query drives ranking, and the surfaced fragment stays
+    /// redacted/inert (memory is never authority).
+    #[test]
+    fn net_embedder_drives_semantic_select() {
+        // Pick a query vector that aligns with the "relevant" candidate's HashEmbedder
+        // vector so it ranks first; the candidates themselves are embedded deterministically.
+        let e = HashEmbedder;
+        let relevant = "the verify command is cargo xtask verify";
+        let unrelated = "an unrelated note about formatting conventions";
+        let query_vec = e.embed("what is the verify command");
+
+        let emb = net_embedder_over(&embedding_line(vec![query_vec.clone()]));
+        let q = Embedder::embed(&emb, "what is the verify command");
+        assert_eq!(q, query_vec); // came from the provider, not the fallback
+
+        let mut redactor = Redactor::new();
+        redactor.register("idx", b"sk-NETSENTINEL");
+        let cands = vec![
+            (
+                ContextCandidate {
+                    source: MemorySource::RepoFile,
+                    kind: MemoryKind::Convention,
+                    text: unrelated,
+                },
+                e.embed(unrelated),
+            ),
+            (
+                ContextCandidate {
+                    source: MemorySource::ToolObservation,
+                    kind: MemoryKind::CommandMemory,
+                    text: relevant,
+                },
+                e.embed(relevant),
+            ),
+        ];
+        let bundle = semantic_select(&q, &cands, &redactor);
+        assert!(!bundle.fragments.is_empty());
+        assert!(bundle.fragments[0]
+            .text
+            .as_str()
+            .contains("cargo xtask verify"));
+    }
+
+    /// The real spawned-sidecar path (`SpawnedHelper::spawn`) is the only seam that needs a
+    /// process/provider — ignored in CI, documented as `TODO(B3-embed-live)`. The protocol
+    /// behavior it exercises is already covered by the in-memory tests above.
+    #[test]
+    #[ignore = "requires a spawned crustcore-net sidecar with a live embedding provider (B3-embed-live)"]
+    fn net_embedder_over_a_spawned_sidecar() {
+        use crustcore_netproto::SpawnedHelper;
+        // TODO(B3-embed-live): point this at the real `crustcore-net` helper binary once a
+        // live embedding provider is configured; the in-memory round-trip above already
+        // proves the request/response mapping.
+        let mut spawned =
+            SpawnedHelper::spawn("crustcore-net", &["helper"]).expect("spawn net helper");
+        let req = EmbedRequest {
+            role: DEFAULT_EMBED_ROLE,
+            inputs: vec!["hello".to_string()],
+            max_cost_micros: 0,
+        };
+        let result = spawned.helper().embed(&req).expect("embed via sidecar");
+        assert!(!result.vectors.is_empty());
+    }
+
+    // --- B3-ann: approximate nearest-neighbor (random-hyperplane LSH) ---
+
+    /// Builds a deterministic corpus of distinct short texts so embeddings differ.
+    fn ann_corpus() -> Vec<(MemoryEntry, Vec<f32>)> {
+        let e = HashEmbedder;
+        let texts = [
+            "cargo xtask verify runs fmt clippy test",
+            "clippy lints catch common mistakes early",
+            "quarterly revenue projections for the team",
+            "the sandbox confines execution and denies egress",
+            "worktree verify loop mints a verified patch",
+            "secrets are redacted before reaching the model",
+            "the event log is hash chained and inspectable",
+            "approval tokens gate irreversible side effects",
+            "telegram is the default runtime user channel",
+            "the kernel step function is sync and deterministic",
+        ];
+        texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (entry(&format!("k{i}"), t), e.embed(t)))
+            .collect()
+    }
+
+    fn ann_from(corpus: &[(MemoryEntry, Vec<f32>)]) -> AnnIndex {
+        let mut ann = AnnIndex::new(EMBED_DIM);
+        for (ent, emb) in corpus {
+            assert!(ann.put(ent.clone(), emb.clone()));
+        }
+        ann
+    }
+
+    /// Recall parity: AnnIndex top-k overlaps strongly with brute-force VectorMemory top-k.
+    #[test]
+    fn ann_recall_parity_with_brute_force() {
+        let e = HashEmbedder;
+        let corpus = ann_corpus();
+
+        let mut brute = VectorMemory::new();
+        for (ent, emb) in &corpus {
+            brute.put(ent.clone(), emb.clone());
+        }
+        let ann = ann_from(&corpus);
+
+        // A handful of deterministic queries drawn from / near the corpus.
+        let queries = [
+            "cargo verify clippy fmt test",
+            "redacted secrets never reach the model",
+            "hash chained event log inspect",
+            "sandbox denies egress execution",
+            "deterministic sync kernel step",
+        ];
+        let k = 3;
+        let mut matched = 0usize;
+        let mut total = 0usize;
+        let mut top1_recalled = 0usize;
+        for q in queries {
+            let qv = e.embed(q);
+            let want: Vec<String> = brute
+                .nearest(&qv, k)
+                .iter()
+                .map(|m| m.key.as_str().to_owned())
+                .collect();
+            let got: std::collections::HashSet<String> = ann
+                .nearest(&qv, k, ANN_MAX_RADIUS)
+                .iter()
+                .map(|m| m.key.as_str().to_owned())
+                .collect();
+            for w in &want {
+                total += 1;
+                if got.contains(w) {
+                    matched += 1;
+                }
+            }
+            // Track whether the single best brute-force hit was recalled. LSH is
+            // *approximate* — it gives no per-query exactness guarantee — so we measure
+            // top-1 recall in aggregate rather than asserting it on every query.
+            if let Some(best) = brute.nearest(&qv, 1).first() {
+                if got.contains(best.key.as_str()) {
+                    top1_recalled += 1;
+                }
+            }
+        }
+        // Strong overlap: recall of brute-force top-k by ANN top-k is high (the load-bearing
+        // approximation-quality property — a broken candidate set or re-rank would tank it).
+        let recall = matched as f64 / total as f64;
+        assert!(
+            recall >= 0.8,
+            "ANN recall {recall:.3} of brute-force top-{k} too low (matched {matched}/{total})"
+        );
+        // And the dominant (top-1) brute-force hit is recalled on the large majority of
+        // queries — approximate, not perfect, exactly as LSH promises.
+        let top1_recall = top1_recalled as f64 / queries.len() as f64;
+        assert!(
+            top1_recall >= 0.8,
+            "ANN top-1 recall {top1_recall:.3} too low ({top1_recalled}/{})",
+            queries.len()
+        );
+    }
+
+    /// Determinism: same inputs → identical results, including across freshly-built indices
+    /// (the hyperplanes come from a fixed seed, never a clock or per-run randomness).
+    #[test]
+    fn ann_is_deterministic() {
+        let e = HashEmbedder;
+        let corpus = ann_corpus();
+        let q = e.embed("verify clippy fmt sandbox secrets");
+
+        let a1 = ann_from(&corpus);
+        let a2 = ann_from(&corpus);
+        let r1: Vec<&str> = a1
+            .nearest(&q, 5, 2)
+            .iter()
+            .map(|m| m.key.as_str())
+            .collect();
+        let r2: Vec<&str> = a2
+            .nearest(&q, 5, 2)
+            .iter()
+            .map(|m| m.key.as_str())
+            .collect();
+        assert_eq!(r1, r2, "two builds of AnnIndex disagree");
+
+        // Signatures are stable for the same vector across independent indices, in every
+        // table (the hyperplanes are seeded, so this is exact).
+        let v = e.embed("the sandbox confines execution");
+        for t in 0..ANN_TABLES {
+            assert_eq!(a1.signature(t, &v), a2.signature(t, &v));
+        }
+    }
+
+    /// No panic on empty index / zero vector / dimension mismatch.
+    #[test]
+    fn ann_is_panic_free_on_degenerate_inputs() {
+        let e = HashEmbedder;
+
+        // Empty index → empty result, any radius.
+        let empty = AnnIndex::new(EMBED_DIM);
+        assert!(empty.is_empty());
+        assert!(empty
+            .nearest(&e.embed("anything"), 5, ANN_MAX_RADIUS)
+            .is_empty());
+
+        let corpus = ann_corpus();
+        let ann = ann_from(&corpus);
+
+        // Zero query vector → no positive similarity → empty result, no panic.
+        assert!(ann.nearest(&vec![0f32; EMBED_DIM], 5, 2).is_empty());
+
+        // Dimension-mismatched query → cosine yields 0 → empty result, no panic.
+        assert!(ann.nearest(&[1.0, 2.0, 3.0], 5, 2).is_empty());
+
+        // k == 0 → empty result.
+        assert!(ann.nearest(&e.embed("verify"), 0, 2).is_empty());
+
+        // Dimension-mismatched insert is dropped, not panicking.
+        let mut a2 = AnnIndex::new(EMBED_DIM);
+        assert!(!a2.put(entry("bad", "x"), vec![1.0, 2.0]));
+        assert_eq!(a2.len(), 0);
+
+        // A zero-dim index is still usable and never panics.
+        let mut zero = AnnIndex::new(0);
+        assert!(zero.put(entry("z", "z"), Vec::new()));
+        assert!(zero.nearest(&[], 3, 1).is_empty()); // zero vectors → no positive cosine
+    }
+
+    /// Inserting and querying returns positively-similar results only (never a negative or
+    /// zero-similarity entry), mirroring the VectorMemory::nearest contract.
+    #[test]
+    fn ann_returns_only_positively_similar() {
+        let e = HashEmbedder;
+        let corpus = ann_corpus();
+        let ann = ann_from(&corpus);
+
+        let q = e.embed("cargo verify clippy fmt test");
+        let hits = ann.nearest(&q, 10, ANN_MAX_RADIUS);
+        assert!(!hits.is_empty());
+        // Every returned entry has strictly positive cosine to the query.
+        for h in &hits {
+            // Recover the embedding for this hit from the corpus by key.
+            let emb = corpus
+                .iter()
+                .find(|(ent, _)| ent.key.as_str() == h.key.as_str())
+                .map(|(_, emb)| emb)
+                .expect("hit must come from the corpus");
+            assert!(
+                cosine(&q, emb) > 0.0,
+                "ANN returned a non-positively-similar entry {:?}",
+                h.key.as_str()
+            );
+        }
+        // The dominant match ranks first (exact cosine re-rank, like brute force).
+        assert_eq!(hits[0].key.as_str(), "k0");
+    }
+
+    /// The internal hamming_ball / flip_combinations enumerator produces the right bucket set.
+    #[test]
+    fn ann_hamming_ball_is_well_formed() {
+        // radius 0 → just the base.
+        assert_eq!(hamming_ball(0b0, 0), vec![0]);
+        // radius 1 over ANN_BITS → base plus one flip per bit, all distinct.
+        let ball = hamming_ball(0, 1);
+        assert_eq!(ball.len(), 1 + ANN_BITS);
+        let uniq: std::collections::HashSet<u32> = ball.iter().copied().collect();
+        assert_eq!(uniq.len(), ball.len());
+        // Count for radius r matches sum of binomials C(ANN_BITS, 0..=r).
+        fn binom(n: u32, k: u32) -> u64 {
+            let mut r = 1u64;
+            for i in 0..k {
+                r = r * u64::from(n - i) / u64::from(i + 1);
+            }
+            r
+        }
+        let r = 3u32;
+        let expect: u64 = (0..=r).map(|i| binom(ANN_BITS as u32, i)).sum();
+        assert_eq!(hamming_ball(0, r).len() as u64, expect);
     }
 }

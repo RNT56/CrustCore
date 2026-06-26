@@ -180,10 +180,19 @@ pub fn route<B: DevBackend>(
 /// handed `&dyn ReadOnlyBackend` — it cannot reach a mutating method (dimension (c)).
 fn handle_read(backend: &dyn ReadOnlyBackend, req: &DevRequest) -> DevResponse {
     let body = match req.path() {
-        "/" | "/assets" | "/ws" => {
-            // Static asset / ws upgrade placeholder (the real bytes are embedded in the
-            // `serve` layer). Authenticated like every route.
-            "ok".to_string()
+        // The single-page inspector: the page itself at `/` and its stylesheet at
+        // `/assets`, both embedded (dependency-free) and served through this same read
+        // mechanism — auth + loopback still apply, no posture change. The `serve` layer
+        // tags `/` as `text/html` and `/assets` as `text/css`.
+        "/" => crate::assets::INSPECTOR_HTML.to_string(),
+        "/assets" => crate::assets::INSPECTOR_CSS.to_string(),
+        "/ws" => {
+            // Read route, authenticated like every other. Live snapshot streaming over a
+            // websocket is not yet wired; the SPA polls the typed read endpoints instead.
+            // Real streaming is `TODO(C7-serve-live)` and drops in behind this same route.
+            "{\"streaming\":false,\"note\":\"websocket snapshot streaming not yet wired; \
+             poll the read endpoints\"}"
+                .to_string()
         }
         "/inspector" => format!("{:?}", backend.run_inspector()),
         "/replay" => format!("{:?}", backend.replay()),
@@ -253,6 +262,60 @@ mod tests {
             body,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn root_serves_the_spa_html() {
+        let config = DevConfig::default();
+        let auth = Authenticator::new(token());
+        let mut mock = MockDevBackend::new();
+        let resp = route(&mut mock, &auth, &config, &authed("GET", "/", Vec::new()));
+        assert_eq!(resp.status, Status::Ok);
+        // The real SPA, not the old "ok" placeholder.
+        assert!(resp.body.contains("<title>CrustCore Inspector</title>"));
+        assert!(resp.body.contains("<!DOCTYPE html>"));
+        assert_ne!(resp.body, "ok");
+    }
+
+    #[test]
+    fn assets_serves_the_stylesheet() {
+        let config = DevConfig::default();
+        let auth = Authenticator::new(token());
+        let mut mock = MockDevBackend::new();
+        let resp = route(
+            &mut mock,
+            &auth,
+            &config,
+            &authed("GET", "/assets", Vec::new()),
+        );
+        assert_eq!(resp.status, Status::Ok);
+        assert_eq!(resp.body, crate::assets::INSPECTOR_CSS);
+        assert!(resp.body.contains("CrustCore dev UI styles"));
+    }
+
+    #[test]
+    fn ws_is_a_documented_non_streaming_read_route() {
+        let config = DevConfig::default();
+        let auth = Authenticator::new(token());
+        let mut mock = MockDevBackend::new();
+        let resp = route(&mut mock, &auth, &config, &authed("GET", "/ws", Vec::new()));
+        assert_eq!(resp.status, Status::Ok);
+        assert!(resp.body.contains("streaming"));
+        // No secret/token leak; it is a static, harmless note.
+        assert_ne!(resp.body, "ok");
+    }
+
+    #[test]
+    fn spa_routes_still_require_auth() {
+        let config = DevConfig::default();
+        let auth = Authenticator::new(token());
+        let mut mock = MockDevBackend::new();
+        for path in ["/", "/assets", "/ws"] {
+            // No Authorization header => unauthorized, exactly like every other route.
+            let req = DevRequest::new("GET", path, [], [], Vec::new()).unwrap();
+            let resp = route(&mut mock, &auth, &config, &req);
+            assert_eq!(resp.status, Status::Unauthorized, "path {path}");
+        }
     }
 
     #[test]

@@ -30,6 +30,17 @@
 //! **Memory is never authority** (`docs/self-improvement.md` §2): the classifier may
 //! draw on failure memory, but a memory entry alone mints nothing — it only seeds a
 //! proposal that must still pass [`ReadyProposal::prepare`] and the gate.
+//!
+//! **Live wiring (behind the `live` feature) preserves every gate.** [`LiveEvalRunner`]
+//! dispatches each eval to a sandboxed subagent worker and emits an [`EvalRef`] only when
+//! the eval's verifier passed (evidence, never a say-so). [`draft_pr_request`] connects a
+//! `DraftReady` cycle outcome to the GitHub flow — but it routes through
+//! `crustcore_backend::integrate::open_pr`, which **structurally requires** a
+//! `VerifiedPatch` (by value) + a valid `Approved<GitHubWriteCap>` and always opens a
+//! **draft** (invariants 13, 14). So the live half adds no power: there is still no
+//! `Merged`/`Applied` outcome, no live kernel mutation, and the contract-file gate still
+//! blocks any guardrail-touching change. The real eval run + the PR POST are the reduced
+//! `TODO(B5-autoloop-live)` seams (`#[ignore]`d); the mapping is CI-tested.
 
 use crustcore_types::BoundedText;
 
@@ -378,10 +389,14 @@ pub fn plan_self_pr(ready: &ReadyProposal, changed_paths: &[&str]) -> SelfPrDeci
 // ---------------------------------------------------------------------------
 
 /// Runs the evals that back a proposal — the evidence bar [`ReadyProposal::prepare`]
-/// requires. The **live** implementation dispatches eval tasks to sandboxed subagent
-/// workers (P11-exec) running the real eval suite (`TODO(B5-autoloop-live)`); a mock
-/// drives CI. An eval that does **not** pass yields no [`EvalRef`], so a proposal whose
-/// evals fail simply cannot advance — evidence, not a model's say-so, is the gate.
+/// requires. The **live** implementation ([`LiveEvalRunner`], behind the `live` feature)
+/// dispatches each eval to a sandboxed subagent worker (P11-exec, via the
+/// [`SubagentExecutor`](crate::exec::SubagentExecutor)) and emits an [`EvalRef`] **only**
+/// for an eval whose verifier passed; a mock drives CI. An eval that does **not** pass
+/// yields no [`EvalRef`], so a proposal whose evals fail simply cannot advance — evidence,
+/// not a model's say-so, is the gate. The real sandboxed eval run is the reduced
+/// `TODO(B5-autoloop-live)` seam (`#[ignore]`d, needs a sandbox backend); the
+/// pass→`EvalRef` mapping is CI-tested.
 pub trait EvalRunner {
     /// Runs `proposal`'s evals, returning an [`EvalRef`] for **each that passed**.
     fn run_evals(&self, proposal: &ImprovementProposal) -> Vec<EvalRef>;
@@ -437,6 +452,114 @@ pub fn run_cycle(
             CycleOutcome::BlockedForMaintainer { touched }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Live eval runner (B5-autoloop-live) — sandboxed eval workers → EvalRefs
+// ---------------------------------------------------------------------------
+
+/// One eval the loop runs to back a proposal: a name, what it proves, and the
+/// **sandboxed subagent task** (a worker + verify command) that constitutes the eval. The
+/// eval passes iff that task's verifier passes (invariant 13) — never on a worker's claim.
+#[cfg(feature = "live")]
+#[derive(Clone)]
+pub struct LiveEval {
+    /// The eval's name/id (surfaced in the resulting [`EvalRef`]).
+    pub name: BoundedText,
+    /// What a pass proves (a demonstration or a regression guard).
+    pub kind: EvalKind,
+    /// The subagent task whose verifier *is* this eval.
+    pub task: crate::exec::SubagentTask,
+    /// The agent (registry-bound) to run the eval under.
+    pub agent: crate::supervisor::AgentSpec,
+}
+
+/// The live [`EvalRunner`] (behind the `live` feature): dispatches each [`LiveEval`] to a
+/// sandboxed subagent worker via a [`SubagentExecutor`](crate::exec::SubagentExecutor) and
+/// emits an [`EvalRef`] **only** for an eval whose verifier passed. An eval that fails (or
+/// could not run) yields no ref, so a proposal whose evals do not establish *both* a
+/// demonstration and a regression guard cannot advance ([`ReadyProposal::prepare`]) —
+/// evidence is the gate, exactly as in the mock-driven cycle.
+///
+/// It mutates **no** kernel state and opens **no** PR: it only produces evidence. The real
+/// sandboxed eval run is the reduced `TODO(B5-autoloop-live)` seam (`#[ignore]`d, needs a
+/// sandbox backend); the pass→`EvalRef` mapping is CI-tested over a mock executor.
+#[cfg(feature = "live")]
+pub struct LiveEvalRunner<'e> {
+    executor: &'e dyn crate::exec::SubagentExecutor,
+    evals: Vec<LiveEval>,
+}
+
+#[cfg(feature = "live")]
+impl<'e> LiveEvalRunner<'e> {
+    /// Builds a runner over `executor` and the eval suite `evals`.
+    #[must_use]
+    pub fn new(executor: &'e dyn crate::exec::SubagentExecutor, evals: Vec<LiveEval>) -> Self {
+        LiveEvalRunner { executor, evals }
+    }
+}
+
+#[cfg(feature = "live")]
+impl EvalRunner for LiveEvalRunner<'_> {
+    fn run_evals(&self, _proposal: &ImprovementProposal) -> Vec<EvalRef> {
+        let mut passed = Vec::new();
+        for eval in &self.evals {
+            // Run the eval as a sandboxed subagent. Acceptance is the verifier's call: only
+            // a `verified` result yields an EvalRef (invariants 6, 13). A run error or a
+            // failing verifier contributes NO evidence — the proposal simply can't advance.
+            match self.executor.execute(&eval.agent, &eval.task) {
+                Ok(result) if result.verified => passed.push(EvalRef {
+                    name: eval.name.clone(),
+                    kind: eval.kind,
+                }),
+                _ => {}
+            }
+        }
+        passed
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Draft-PR opening seam (B5-autoloop-live) — gate-preserving
+// ---------------------------------------------------------------------------
+
+/// Builds the **draft** PR request for a self-improvement change, routing through the
+/// type-13/14 gate `crustcore_backend::integrate::open_pr` (behind the `live` feature).
+///
+/// This is the connector from a [`CycleOutcome::DraftReady`] to the GitHub flow, and it
+/// **cannot widen the gate**: `open_pr` takes a `VerifiedPatch` **by value** (only the
+/// verifier mints one — invariant 13) and a valid `Approved<GitHubWriteCap>` (only a human
+/// `AuthorizedUser` mints one — invariants 4, 14), and always produces a *draft*
+/// (`docs/github.md` §3.1). A self-PR is therefore never privileged: it is a draft awaiting
+/// human review, exactly like any other. The actual POST (via `crustcore_net`'s
+/// `RestGitHub::create_pull`) is the reduced `TODO(B5-autoloop-live)` socket, `#[ignore]`d.
+///
+/// `head_branch`/`base_branch` are confined by `open_pr` to the cap's branch prefix; the
+/// body is the verifier's evidence (never a model claim).
+///
+/// # Errors
+/// A `crustcore_backend::integrate::IntegrateError` if the approval expired or the head
+/// branch is out of the cap's scope (the same fail-closed gate the credential proxy uses).
+#[cfg(feature = "live")]
+pub fn draft_pr_request(
+    approval: &crustcore_policy::Approved<crustcore_policy::GitHubWriteCap>,
+    patch: crustcore_backend::VerifiedPatch,
+    head_branch: &str,
+    base_branch: &str,
+    now: crustcore_types::Timestamp,
+) -> Result<crustcore_net::github::CreatePrRequest, crustcore_backend::integrate::IntegrateError> {
+    // The gate: requires the VerifiedPatch + the live Approved; always a draft.
+    let intent =
+        crustcore_backend::integrate::open_pr(approval, patch, head_branch, base_branch, now)?;
+    debug_assert!(intent.draft, "self-PRs are always draft (invariants 13/14)");
+    Ok(crustcore_net::github::CreatePrRequest {
+        repo: intent.repo.0.as_str().to_string(),
+        head: intent.head_branch,
+        base: intent.base_branch,
+        title: intent.title,
+        body: intent.body,
+        draft: true, // never auto-mergeable; a human reviews/merges (invariant 18)
+    })
 }
 
 #[cfg(test)]
@@ -734,6 +857,164 @@ mod tests {
                 assert!(touched.iter().any(|t| t.contains("policy.md")));
             }
             other => panic!("expected BlockedForMaintainer, got {other:?}"),
+        }
+    }
+
+    // --- live eval runner + draft-PR gate (B5-autoloop-live) ---
+    #[cfg(feature = "live")]
+    mod live {
+        use super::*;
+        use crate::exec::{ExecError, RawSubagentResult, SubagentExecutor, SubagentTask};
+        use crate::supervisor::{AgentBudget, AgentId, AgentSpec, AgentUsage, Role};
+        use crustcore_types::TaskId;
+
+        /// A mock executor that returns a fixed `verified` for every eval — so the
+        /// pass→EvalRef mapping is CI-tested with no sandbox.
+        struct MockExec {
+            verified: bool,
+        }
+        impl SubagentExecutor for MockExec {
+            fn execute(
+                &self,
+                _spec: &AgentSpec,
+                _task: &SubagentTask,
+            ) -> Result<RawSubagentResult, ExecError> {
+                Ok(RawSubagentResult {
+                    verified: self.verified,
+                    self_claimed_done: true, // shouted, but never authority
+                    summary: bt("ran the eval"),
+                    usage: AgentUsage::default(),
+                })
+            }
+        }
+
+        /// A mock executor that always errors — a non-running eval yields NO evidence.
+        struct FailingExec;
+        impl SubagentExecutor for FailingExec {
+            fn execute(
+                &self,
+                _spec: &AgentSpec,
+                _task: &SubagentTask,
+            ) -> Result<RawSubagentResult, ExecError> {
+                Err(ExecError::Backend("no sandbox backend".into()))
+            }
+        }
+
+        fn agent() -> AgentSpec {
+            AgentSpec {
+                id: AgentId(1),
+                role: Role::ExternalCommand,
+                budget: AgentBudget {
+                    max_wall_ms: 10_000,
+                    max_output_bytes: 10_000,
+                    max_tokens: 10_000,
+                },
+            }
+        }
+
+        fn eval(name: &str, kind: EvalKind) -> LiveEval {
+            LiveEval {
+                name: bt(name),
+                kind,
+                task: SubagentTask {
+                    task_id: TaskId(1),
+                    goal: bt("run eval"),
+                    verify_program: "true".into(),
+                    verify_args: vec![],
+                },
+                agent: agent(),
+            }
+        }
+
+        #[test]
+        fn passing_evals_yield_refs_and_a_cycle_advances_to_a_draft_only() {
+            let evals = vec![
+                eval("demo", EvalKind::Demonstrates),
+                eval("guard", EvalKind::GuardsRegression),
+            ];
+            let exec = MockExec { verified: true };
+            let runner = LiveEvalRunner::new(&exec, evals);
+
+            // The runner emits a ref per passing eval...
+            let refs = runner.run_evals(&proposal(ProposalTarget::Prompt));
+            assert_eq!(refs.len(), 2);
+            assert!(refs.iter().any(|r| r.kind == EvalKind::Demonstrates));
+            assert!(refs.iter().any(|r| r.kind == EvalKind::GuardsRegression));
+
+            // ...and driving the WHOLE cycle over the live runner still tops out at a draft
+            // (no Merged/Applied variant exists — invariant 18 holds structurally).
+            let out = run_cycle(
+                proposal(ProposalTarget::Prompt),
+                &["src/prompts/system.txt"],
+                &runner,
+            );
+            assert_eq!(
+                out,
+                CycleOutcome::DraftReady {
+                    risk: ProposalRisk::Low
+                }
+            );
+        }
+
+        #[test]
+        fn failing_or_unrun_evals_yield_no_evidence_so_the_proposal_cannot_advance() {
+            // A failing verifier → no refs → cannot advance (evidence is the gate).
+            let exec = MockExec { verified: false };
+            let runner = LiveEvalRunner::new(&exec, vec![eval("demo", EvalKind::Demonstrates)]);
+            assert!(runner
+                .run_evals(&proposal(ProposalTarget::Prompt))
+                .is_empty());
+            assert_eq!(
+                run_cycle(
+                    proposal(ProposalTarget::Prompt),
+                    &["src/prompts/x.txt"],
+                    &runner
+                ),
+                CycleOutcome::NotReady(AdvanceError::NoDemonstration)
+            );
+
+            // An eval that could not run (no sandbox) likewise contributes no evidence.
+            let runner = LiveEvalRunner::new(
+                &FailingExec,
+                vec![eval("guard", EvalKind::GuardsRegression)],
+            );
+            assert!(runner
+                .run_evals(&proposal(ProposalTarget::Prompt))
+                .is_empty());
+        }
+
+        #[test]
+        fn a_contract_touching_change_is_still_blocked_over_the_live_runner() {
+            // Even with all evals passing live, a contract-file change is blocked for the
+            // maintainer — the live runner adds NO power to slip a silent weakening through.
+            let evals = vec![
+                eval("demo", EvalKind::Demonstrates),
+                eval("guard", EvalKind::GuardsRegression),
+            ];
+            let exec = MockExec { verified: true };
+            let runner = LiveEvalRunner::new(&exec, evals);
+            let out = run_cycle(
+                proposal(ProposalTarget::Config),
+                &["src/prompts/x.txt", "docs/sandbox.md"],
+                &runner,
+            );
+            assert!(matches!(out, CycleOutcome::BlockedForMaintainer { .. }));
+        }
+
+        // The draft-PR opening seam is gate-preserving BY TYPE: `draft_pr_request` cannot be
+        // called without a `VerifiedPatch` (only the verifier mints one — invariant 13) and a
+        // valid `Approved<GitHubWriteCap>` (only a human AuthorizedUser mints one — inv 4/14),
+        // and it always sets `draft: true`. That compile-time signature is the proof; the real
+        // PR POST against api.github.com is the `#[ignore]`d TODO(B5-autoloop-live) socket.
+        //
+        // A daemon-side test cannot mint a `VerifiedPatch` (its constructor is crate-private to
+        // crustcore-backend), so there is no CI test here — the type system enforces the gate,
+        // and `crustcore_backend::integrate::open_pr` is itself fully tested in that crate.
+        #[test]
+        #[ignore = "live: requires a minted VerifiedPatch + Approved + a PR POST (TODO B5-autoloop-live)"]
+        fn live_draft_pr_post_smoke() {
+            // Intentionally empty: the live PR POST needs a real VerifiedPatch (verifier-minted)
+            // + a human Approved + network. The gate is proven by `draft_pr_request`'s signature.
         }
     }
 }

@@ -31,13 +31,17 @@
 //! `task_id`, `job_id`, `timestamp`, `kind`) and, for the tool-completed span, from
 //! the MAC-bound [`ToolReceipt`] (tool-name hash, args hash, result hash, MAC,
 //! tool-call id, event seq) — never from the payload bytes. GenAI `gen_ai.*` model
-//! attributes (system/model/usage) are intentionally **conservative**: `FrameMeta`
-//! does not carry the `ModelCard` capability metadata or token usage, and free-text
-//! model output is untrusted (invariant 17), so we emit only the typed audit facts
-//! (`gen_ai.operation.name`, `gen_ai.system`, and the audit ids). A live wiring that
-//! threads recorded `ModelCard`/usage metadata into these spans is a follow-up
-//! (`TODO(C6-genai-usage)`); it must come from recorded capability metadata, never
-//! from model output.
+//! attributes always include `gen_ai.system = "crustcore"` (the *mediator*, fixed
+//! constant) and `gen_ai.operation.name` (from the kind). The model id and token
+//! counts (`gen_ai.request.model` / `gen_ai.response.model`,
+//! `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`) are emitted **only**
+//! when the caller supplies a trusted [`crate::usage::RecordedUsage`] for that exact
+//! frame `seq` — recorded capability metadata owned by the mediator (the `ModelCard`
+//! id it selected and the provider-reported token counts), populated only by trusted
+//! code (`C6-genai-usage`). They are **never** parsed from free-text model output
+//! (invariants 7, 17): a frame without recorded usage emits no model/usage attrs at
+//! all, so a crafted payload can never become `gen_ai.request.model`. `FrameMeta`
+//! itself still carries no usage; the trusted carrier is threaded alongside it.
 //!
 //! All values produced here are **pre-redaction**: they pass through
 //! [`crate::redact`] (the sole emission chokepoint) before any exporter sees them.
@@ -48,6 +52,7 @@ use crustcore_receipts::ToolReceipt;
 use crustcore_types::BudgetAxis;
 
 use crate::project::{MetricSample, ProjectedFrame, SpanModel};
+use crate::usage::RecordedUsage;
 
 /// The OTel `gen_ai.system` value for CrustCore-mediated model calls. A fixed
 /// constant (not payload-derived): it identifies the *mediator*, not the provider.
@@ -206,10 +211,21 @@ fn minimal_span(meta: &FrameMeta) -> SpanModel {
     }
 }
 
-/// Projects one frame (+ joined receipt) to the IR. The single mapping entry point
-/// used by [`crate::project::EventProjector`].
+/// Projects one frame (+ joined receipt + trusted recorded usage) to the IR. The
+/// single mapping entry point used by [`crate::project::EventProjector`].
+///
+/// `usage` is honored only for the model-frame kinds
+/// (`ModelRequestStarted`/`ModelOutputReceived`) and only when present; for every
+/// other kind it is ignored, and an absent `usage` emits no model/usage attributes
+/// (no fabricated tokens). The values are trusted recorded capability metadata, never
+/// payload (`C6-genai-usage`; invariants 7, 17). Internal/Redacted frames are gated
+/// first, so suppressed frames never see `usage` either.
 #[must_use]
-pub fn project_frame(meta: &FrameMeta, receipt: Option<&ToolReceipt>) -> ProjectedFrame {
+pub fn project_frame(
+    meta: &FrameMeta,
+    receipt: Option<&ToolReceipt>,
+    usage: Option<&RecordedUsage>,
+) -> ProjectedFrame {
     // Visibility/redaction gate (C6T.6 / dimension (d)): Internal or Redacted frames
     // emit only kind+seq — no actor, no ids, no receipt hashes, no GenAI hints.
     if payload_derived_suppressed(meta) {
@@ -227,9 +243,10 @@ pub fn project_frame(meta: &FrameMeta, receipt: Option<&ToolReceipt>) -> Project
 
     match meta.kind {
         EventKind::ModelRequestStarted | EventKind::ModelOutputReceived => {
-            // GenAI semconv: the operation + the *mediator* system. Deliberately
-            // conservative — no model name/usage from untrusted output (invariant 17).
-            let op = if meta.kind == EventKind::ModelRequestStarted {
+            // GenAI semconv: the operation + the *mediator* system. These two are
+            // always safe — both are fixed constants / kind-derived, never payload.
+            let is_request = meta.kind == EventKind::ModelRequestStarted;
+            let op = if is_request {
                 "model_request"
             } else {
                 "model_response"
@@ -238,6 +255,29 @@ pub fn project_frame(meta: &FrameMeta, receipt: Option<&ToolReceipt>) -> Project
                 .push(("gen_ai.operation.name".to_string(), op.to_string()));
             span.attrs
                 .push(("gen_ai.system".to_string(), GEN_AI_SYSTEM.to_string()));
+            // Model id + token usage come ONLY from trusted recorded capability
+            // metadata keyed to this exact frame seq (`C6-genai-usage`), never from
+            // model output (invariants 7, 17). Absent => no model/usage attrs (no
+            // fabricated tokens). `model` is still pre-redaction and passes the
+            // redact chokepoint downstream like every other value.
+            if let Some(u) = usage {
+                // `gen_ai.request.model` on the request span, `gen_ai.response.model`
+                // on the response span (GenAI semconv); same trusted recorded id.
+                let model_key = if is_request {
+                    "gen_ai.request.model"
+                } else {
+                    "gen_ai.response.model"
+                };
+                span.attrs.push((model_key.to_string(), u.model.clone()));
+                span.attrs.push((
+                    "gen_ai.usage.input_tokens".to_string(),
+                    u.input_tokens.to_string(),
+                ));
+                span.attrs.push((
+                    "gen_ai.usage.output_tokens".to_string(),
+                    u.output_tokens.to_string(),
+                ));
+            }
         }
         EventKind::ToolCallCompleted => {
             // Bind the span to its receipt via P5-join (consumed, not re-implemented).
@@ -308,6 +348,7 @@ pub fn project_frame(meta: &FrameMeta, receipt: Option<&ToolReceipt>) -> Project
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::usage::RecordedUsage;
     use crustcore_kernel::Actor;
     use crustcore_receipts::{MacKey, ReceiptChain, ReceiptParams};
     use crustcore_types::{EventSeq, JobId, TaskId, Timestamp, ToolCallId};
@@ -337,7 +378,7 @@ mod tests {
 
     #[test]
     fn model_frames_map_to_genai_spans() {
-        let pf = project_frame(&meta(EventKind::ModelRequestStarted), None);
+        let pf = project_frame(&meta(EventKind::ModelRequestStarted), None, None);
         assert_eq!(pf.spans.len(), 1);
         let s = &pf.spans[0];
         assert_eq!(s.name, "gen_ai.model_request");
@@ -349,6 +390,128 @@ mod tests {
             .attrs
             .iter()
             .any(|(k, v)| k == "gen_ai.operation.name" && v == "model_request"));
+    }
+
+    #[test]
+    fn trusted_recorded_usage_populates_genai_model_and_usage_attrs() {
+        // (1) Trusted recorded usage for a model frame => the three gen_ai attrs come
+        // from that trusted source. Request frame => `gen_ai.request.model`.
+        let usage = RecordedUsage::new("anthropic/claude-x", 1234, 56);
+        let pf = project_frame(&meta(EventKind::ModelRequestStarted), None, Some(&usage));
+        let s = &pf.spans[0];
+        assert!(s
+            .attrs
+            .iter()
+            .any(|(k, v)| k == "gen_ai.request.model" && v == "anthropic/claude-x"));
+        assert!(s
+            .attrs
+            .iter()
+            .any(|(k, v)| k == "gen_ai.usage.input_tokens" && v == "1234"));
+        assert!(s
+            .attrs
+            .iter()
+            .any(|(k, v)| k == "gen_ai.usage.output_tokens" && v == "56"));
+        // The mediator system is still present and fixed.
+        assert!(s
+            .attrs
+            .iter()
+            .any(|(k, v)| k == "gen_ai.system" && v == GEN_AI_SYSTEM));
+
+        // Response frame => `gen_ai.response.model` (same trusted recorded id).
+        let pf = project_frame(&meta(EventKind::ModelOutputReceived), None, Some(&usage));
+        let s = &pf.spans[0];
+        assert!(s
+            .attrs
+            .iter()
+            .any(|(k, v)| k == "gen_ai.response.model" && v == "anthropic/claude-x"));
+        assert!(!s.attrs.iter().any(|(k, _)| k == "gen_ai.request.model"));
+    }
+
+    #[test]
+    fn model_frame_without_recorded_usage_emits_no_fake_usage() {
+        // (2) No recorded usage => no model id, no token attrs at all.
+        let pf = project_frame(&meta(EventKind::ModelRequestStarted), None, None);
+        let s = &pf.spans[0];
+        assert!(!s.attrs.iter().any(|(k, _)| k == "gen_ai.request.model"));
+        assert!(!s.attrs.iter().any(|(k, _)| k == "gen_ai.response.model"));
+        assert!(!s
+            .attrs
+            .iter()
+            .any(|(k, _)| k == "gen_ai.usage.input_tokens"));
+        assert!(!s
+            .attrs
+            .iter()
+            .any(|(k, _)| k == "gen_ai.usage.output_tokens"));
+        // The conservative facts are still there.
+        assert!(s.attrs.iter().any(|(k, _)| k == "gen_ai.system"));
+        assert!(s.attrs.iter().any(|(k, _)| k == "gen_ai.operation.name"));
+    }
+
+    #[test]
+    fn untrusted_payload_model_name_cannot_become_genai_model() {
+        // (3) The projection never reads payload, and only trusted recorded usage can
+        // set `gen_ai.request.model`. With NO recorded usage, the attr is absent even
+        // though a payload could "claim" a model name; with a trusted record, the attr
+        // equals the trusted value only. There is no code path from payload text to
+        // this attribute.
+        let no_usage = project_frame(&meta(EventKind::ModelRequestStarted), None, None);
+        assert!(!no_usage.spans[0]
+            .attrs
+            .iter()
+            .any(|(k, _)| k == "gen_ai.request.model"));
+
+        let trusted = RecordedUsage::new("trusted-model-id", 1, 1);
+        let with_usage = project_frame(&meta(EventKind::ModelRequestStarted), None, Some(&trusted));
+        // The only model value present equals the trusted recorded value.
+        let model_vals: Vec<&String> = with_usage.spans[0]
+            .attrs
+            .iter()
+            .filter(|(k, _)| k == "gen_ai.request.model")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(model_vals, vec![&"trusted-model-id".to_string()]);
+        // A fake name an attacker might place in payload never appears.
+        assert!(!with_usage.spans[0]
+            .attrs
+            .iter()
+            .any(|(_, v)| v == "evil/fake-model"));
+    }
+
+    #[test]
+    fn recorded_usage_ignored_on_non_model_kinds() {
+        // Recorded usage only attaches to model frames; a forged usage on a tool
+        // frame cannot inject gen_ai.* attributes onto an unrelated span.
+        let usage = RecordedUsage::new("model-x", 10, 20);
+        let pf = project_frame(&meta(EventKind::ToolCallStarted), None, Some(&usage));
+        let s = &pf.spans[0];
+        assert!(!s.attrs.iter().any(|(k, _)| k.starts_with("gen_ai.")));
+    }
+
+    #[test]
+    fn internal_or_redacted_model_frame_drops_recorded_usage() {
+        // (4) An Internal/Redacted model frame projects to kind+seq only — even when
+        // trusted usage was supplied, it is suppressed by the visibility gate.
+        let usage = RecordedUsage::new("model-x", 99, 99);
+        let internal = FrameMeta::new(7, EventKind::ModelOutputReceived)
+            .task(TaskId(2))
+            .visibility(Visibility::Internal);
+        let pf = project_frame(&internal, None, Some(&usage));
+        assert_eq!(pf.spans.len(), 1);
+        assert_eq!(pf.spans[0].attrs.len(), 2);
+        assert!(!pf.spans[0]
+            .attrs
+            .iter()
+            .any(|(k, _)| k.starts_with("gen_ai.")));
+
+        let redacted = FrameMeta::new(7, EventKind::ModelRequestStarted)
+            .visibility(Visibility::ModelVisible)
+            .redaction(RedactionState::Redacted);
+        let pf = project_frame(&redacted, None, Some(&usage));
+        assert_eq!(pf.spans[0].attrs.len(), 2);
+        assert!(!pf.spans[0]
+            .attrs
+            .iter()
+            .any(|(k, _)| k.starts_with("gen_ai.")));
     }
 
     #[test]
@@ -364,7 +527,7 @@ mod tests {
             artifacts: &[],
             event_seq: EventSeq(7),
         });
-        let pf = project_frame(&meta(EventKind::ToolCallCompleted), Some(&r));
+        let pf = project_frame(&meta(EventKind::ToolCallCompleted), Some(&r), None);
         let s = &pf.spans[0];
         assert_eq!(s.name, "crustcore.tool.completed");
         // The result hash is present; the raw result ("ok") is not.
@@ -379,7 +542,7 @@ mod tests {
 
     #[test]
     fn tool_completed_without_receipt_records_absence() {
-        let pf = project_frame(&meta(EventKind::ToolCallCompleted), None);
+        let pf = project_frame(&meta(EventKind::ToolCallCompleted), None, None);
         let s = &pf.spans[0];
         assert!(s
             .attrs
@@ -394,7 +557,7 @@ mod tests {
             (EventKind::PatchRejected, "rejected"),
             (EventKind::PatchProposed, "proposed"),
         ] {
-            let pf = project_frame(&meta(kind), None);
+            let pf = project_frame(&meta(kind), None, None);
             let s = &pf.spans[0];
             assert!(s
                 .attrs
@@ -409,7 +572,7 @@ mod tests {
         let internal = FrameMeta::new(7, EventKind::ModelOutputReceived)
             .task(TaskId(2))
             .visibility(Visibility::Internal);
-        let pf = project_frame(&internal, None);
+        let pf = project_frame(&internal, None, None);
         assert_eq!(pf.spans.len(), 1);
         let s = &pf.spans[0];
         assert_eq!(s.attrs.len(), 2);
@@ -424,7 +587,7 @@ mod tests {
             .task(TaskId(2))
             .visibility(Visibility::ModelVisible)
             .redaction(RedactionState::Redacted);
-        let pf = project_frame(&redacted, None);
+        let pf = project_frame(&redacted, None, None);
         assert_eq!(pf.spans[0].attrs.len(), 2);
         assert!(!pf.spans[0]
             .attrs

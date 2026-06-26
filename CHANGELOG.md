@@ -28,7 +28,259 @@ agent/PR/role/size/invariant audit trail.
 
 ## [Unreleased]
 
+### Added
+
+- **`crustcore-full` gains an `all` feature — the single "build everything" switch —
+  and is no longer stale.** `crustcore-full` now re-exports *every* runtime crate (it
+  was missing the chat front door + the Track C packs: `crustcore-chat`, `-flow`,
+  `-session`, `-telemetry`, `-dev`, `-index-rag`, `-toolkit`). Its new `all` feature
+  turns on **every** optional capability across every pack at once (net `live`+
+  `github-app`, secrets `vault-file`+`macos-keychain`+`linux-keyring`, index/`ast`,
+  index-rag `live`/`persist`/`ast`/`qdrant`/`lancedb`, telemetry `otlp`, mcp `http`,
+  sandbox `firecracker`+`windows-native`, daemon `live`, chat `terminal`, dev `serve`,
+  flow `live-flow`, session `live-session`). Default `crustcore-full` and the nano build
+  link **none** of the heavy stacks (verified by `cargo tree` + `forbidden-deps`).
+
+- **`cargo xtask verify` now runs an `all-features` composition gate** (`cargo build
+  --workspace --all-features --all-targets`) so a feature that only breaks when
+  *combined* with another can never regress. Verified the whole matrix composes:
+  `build`/`clippy -D warnings`/`test` all pass under `--workspace --all-features`
+  (0 failures). Does not touch the nano build (separate package + profile).
+
+- **Daemon live-runtime wiring (`crustcore-daemon`, new `live` feature; default stays
+  mock-driven & CI-green).** Connects the std-only decision cores to the net-side live
+  transports — each `TODO(*-live)` reduced to the irreducible socket (`#[ignore]`d), the
+  adapter glue CI-tested:
+  - **P9-net-live:** `telegram::LiveTelegramApi` wraps `crustcore_net::telegram::RestTelegram`
+    and implements the daemon `TelegramApi` (net `TgUpdate`→`RawUpdate` mapping tested;
+    `send_message` still redacted-`ModelVisibleText`-only).
+  - **P10/B2:** `github::mint_installation_token` (over the net `AppTokenMinter`),
+    `parse_push_argv` (git push argv → the structured `PushRequest` the fail-closed
+    `validate_push` consumes — can't smuggle a protected/force ref), and a std-only
+    (no axum/hyper) `webhook::serve_webhooks_once` HTTP edge that runs a bounded POST
+    through the existing `WebhookVerifier` → `GitHubEnvelope`.
+  - **P11-exec-live:** `exec::WorktreeSubagentExecutor` — disposable worktree →
+    sandboxed `run_external_worker` → `run_verify`, `verified` set **only** from a
+    verifier-minted `VerifiedPatch`; backend bound to the registry role, never a claim.
+  - **P12-native-live:** `advisor::consult_via_net_helper` routes a bounded,
+    untrusted-wrapped `Role::Advisor` consult through the net helper; any failure
+    degrades to "proceed with caution," never an unqualified proceed.
+  - **B5-autoloop-live:** `selfimprove::LiveEvalRunner` (emits an `EvalRef` only for a
+    verifier-passing eval) + `draft_pr_request` (gate preserved: `open_pr` needs a
+    `VerifiedPatch` by value + `Approved<GitHubWriteCap>`, always `draft:true`;
+    `CycleOutcome` still tops out at `DraftReady`/`BlockedForMaintainer` — no
+    Merged/Applied, no live kernel mutation, contract-file gate intact).
+  78 default + 91 `--features live` tests (6 live-socket smokes `#[ignore]`d); xtask
+  gates `crustcore-daemon --features live`. Non-nano; forbidden-deps confirms the
+  default net helper + nano are unaffected.
+
+- **`P9-net-live` Telegram Bot API + GitHub-App auth (`crustcore-net`).** A
+  `telegram::RestTelegram` client over the `HttpClient` transport — `getUpdates`
+  long-poll + `sendMessage`, the bot token resolved per-call via a new
+  `CredentialSource::bot_token` and spliced into the URL path (never logged, never in an
+  error body). And `githubapp` (behind a new `github-app` feature): RS256 JWT minting
+  (`{alg:RS256}`, `iat`/`exp≤10min`/`iss`) + installation-token exchange, the RSA key
+  resolved through the broker, `AppRsaKey`/`InstallationToken` non-`Debug`. `rsa`/`sha2`/
+  `base64` optional + gated (default tree links none). Telegram build/parse and the JWT
+  sign+verify are CI-tested (ephemeral keypair); the live HTTPS/exchange is `#[ignore]`d.
+
+- **`P14-exec` + `P14-intel` (`crustcore-index`).** Live repo enumeration via a
+  **hardened** `git ls-files` / `git grep -n` (scrubbed env, `core.hooksPath=/dev/null`,
+  no pager/attr drivers — an untrusted repo gets no config code-exec; bounded output)
+  feeding the existing `RepoMap`/`GrepCodeIntel` transforms (parsing CI-tested; live
+  `git` `#[ignore]`d). Plus `ast::AstCodeIntel` (off-by-default `ast` feature, optional
+  `tree-sitter` 0.25 + `tree-sitter-rust` 0.24): precise Rust symbol-definition lookup,
+  iterative + bounded, falling back to `GrepCodeIntel` on unknown ext / parse failure /
+  feature-off. tree-sitter never in nano.
+
+- **`B4-firecracker` / `B4-windows` — Tier-3 microVM + Windows backends
+  (`crustcore-sandbox`).** A `FirecrackerBackend` (Tier-3 Hostile microVM) behind an
+  off-by-default `firecracker` feature: dependency-free (shells out to `firecracker`),
+  deny-all egress + worktree-confined writes + env sanitization, wired into
+  `select_backend`/`run_command` so a Tier-3 task **can** select it when present —
+  **still refuse-if-no-backend, no downgrade** (a Tier-3 task with only Tier-2 backends
+  is refused). A selectable `WindowsBackend` stub behind `windows-native` (real Win32
+  confinement deferred — it needs a *safe* wrapper crate because this nano-linked crate
+  is `#![forbid(unsafe_code)]`). No `unsafe`, no new deps, off by default; nano
+  unchanged (`forbidden-deps` still 0 third-party). Live VM boot is `TODO(B4-firecracker-live)`.
+
+- **`C5-qdrant-live` / `C5-lancedb-live` — external vector-store clients
+  (`crustcore-index-rag`).** Real HTTP clients behind the `qdrant` / `lancedb` features:
+  Qdrant REST (`/points`, `/points/search`, `/points/delete`) and the LanceDB
+  remote/Cloud HTTP+JSON surface. API keys resolve **only** via the broker →
+  `CredentialProxy`, injected as an outbound header at send time (never env/log/
+  model-visible); responses are bounded and scores sanitized, and the planner's
+  **no-trust-store-score** cosine re-rank is unchanged. `ureq`/`serde_json` optional +
+  gated (default tree links neither). Request-build/response-parse CI-tested (incl. a
+  hostile-response test); the live socket is `#[ignore]`d.
+
+- **`P13-net-http` — `HttpMcp` remote transport (`crustcore-mcp`).** A JSON-RPC 2.0
+  over HTTP MCP transport behind the `http` feature: shared envelope builder, `ureq`
+  POST with `Content-Type: application/json`, the body bounded by `MAX_MESSAGE_BYTES`.
+  This is where `McpAuthMode::BrokerSecret` auth reaches the wire (the resolved header
+  is read only at the socket boundary — never in `params`, the result, the receipt, or
+  the model). `ureq` optional + gated (default links no HTTP). Envelope/parse CI-tested;
+  live POST `#[ignore]`d.
+
+- **`C6-otlp-live` — real OTLP/HTTP+JSON trace exporter (`crustcore-telemetry`,
+  `otlp` feature).** Replaces the buffer-dropping stub: serializes the post-redaction
+  span IR to the OTLP/HTTP **JSON** schema (resourceSpans → scopeSpans → spans;
+  `intValue` for numeric attrs like `gen_ai.usage.*`, `stringValue` otherwise) and POSTs
+  to the endpoint (default `127.0.0.1:4318/v1/traces`) via `ureq` — **not** the heavy
+  OTel/tonic/tokio SDK. Per-request auth resolves **only** through the broker →
+  `CredentialProxy::bearer` at send time; a `BrokerBearer` endpoint refuses to POST
+  unauthenticated (fail-closed); errors never panic or leak. `ureq` 2.12 + `serde_json`
+  are optional/gated to `otlp` (default tree links neither — confirmed). The IR→JSON
+  serialization is CI-tested; only the live socket is `#[ignore]`d.
+
+- **`B3-embed-live` — `NetEmbedder` (`crustcore-index`).** Live text→vector embedding
+  via the spawned `crustcore-net` helper over the std-only `crustcore-netproto`
+  protocol, behind the existing `Embedder` trait. `HashEmbedder` stays the CI default;
+  `NetEmbedder` falls back to it on any protocol/provider error (the trait is
+  infallible) — a degraded embedding only changes *which* inert observation surfaces.
+  Protocol round-trip CI-tested over an in-memory helper; the spawned path is
+  `#[ignore]`d. Only std-only `crustcore-netproto` added; nano unaffected.
+
+- **`P13-net` — MCP broker-secret injection (`crustcore-mcp`).** `call_tool` now
+  resolves `McpAuthMode::BrokerSecret` via the broker → `CredentialProxy` and injects
+  an `Authorization` header at the `McpTransport` boundary (the trait `call` gained an
+  `Option<&HeaderInjection>` auth arg). Fails closed
+  (`CallOutcome::CredentialUnavailable`) if the credential can't be minted — never an
+  unauthenticated call. The secret never reaches the model, the receipt, or `McpResult`
+  (red-team: a server echoing the token gets it `[REDACTED]`). Only the live HTTP
+  transport (`TODO(P13-net-http)`) remains.
+
+- **`P8-store` OS keychain loaders (`crustcore-secrets`, `macos-keychain` /
+  `linux-keyring` features).** Dependency-free loaders that fetch secrets from the
+  macOS Keychain (`security find-generic-password -w`) or Linux Secret Service
+  (`secret-tool lookup`) **into an `InMemoryStore`** the broker reads — the same
+  decrypt-into pattern as the encrypted-file vault. The argv-building, output-parsing
+  (macOS trailing-newline strip; empty→not-found), and fail-closed store population
+  (one failed entry fails the whole load) are tested over an injected `CommandRunner`
+  mock; the real shell-out (`SystemCommandRunner`, `env_clear`ed) is the only
+  `TODO(P8-store-live)` part. No secret bytes appear in errors. Off by default, never
+  in nano (`forbidden-deps` confirms); xtask gates `macos-keychain`. 7 tests. First
+  Tier-B item.
+
+- **Conversational front door — `crustcore-chat` (new non-nano capability pack).**
+  A NilCore-parity chat surface built as a std-only, deterministic **decision core**
+  (no network in the core; the live model transport is the spawned `crustcore-net`
+  helper, behind the `terminal` feature — never linked into nano). Pieces:
+  - `route` — a non-authoritative intent **classifier** (`ChatRoute`:
+    quickfix / feature / project / converse / continue) with a model-backed path that
+    is *honored as-is when parseable* and a pure-function heuristic fallback otherwise
+    (no retry). A route grants nothing; it only selects which kernel flow starts.
+  - `persona` — a `Persona` (default "terse senior engineer" voice) + `OperatorSteering`
+    (`CRUSTCORE.md`/`AGENTS.md`) assembled into the model-role **system preamble**. A
+    fixed `SAFETY_PREAMBLE` always leads and overrides the persona/steering, which are
+    scoped *below* the safety core. Neither type has any method yielding a capability,
+    `Approved<T>`, or secret — persona shapes tone, never authority (red-team tested).
+  - `converse` — the `ConverseRenderer` boundary: a model answer is **redacted then
+    bounded then re-sealed** as `ModelVisibleText` (the sole `Redactor`-minted type), so
+    a converse turn is redacted/bounded/attributable and a secret split by the byte
+    bound still cannot leak. Optional `reveal_reasoning` (owner-authorized, off by
+    default) streams reasoning, still redacted.
+  - `steer` — the queue/steer state machine: plain message queues (FIFO, bounded); a
+    `!`/`/steer` cancels the in-flight **model** call and jumps to the front; a steer
+    arriving while a **tool** runs is *buffered* and never kills the tool; `/cancel`
+    aborts. Mirrors NilCore's exact hard safety rule.
+  - `session` — `ChatSession`, the single front door tying it together over an injected
+    model consult; produces typed `Turn`s (`Answer`/`StartTask`/`Notice`), never raw
+    model text. Plus a `Principal` channel trust line: only an authorized principal's
+    message becomes a user turn (else dropped).
+  - `terminal` — a CI-testable REPL (`run_repl`, generic over streams + the model
+    consult) + a `complete_text` adapter over the std-only `NetHelper`, plus
+    `run_terminal` which spawns the `crustcore-net` helper. The local operator is an
+    authorized principal; a converse answer is redacted+bounded before it prints. A
+    full-pipeline red-team test proves a secret in the model's answer is redacted in
+    the REPL output.
+- **Runnable `crustcore chat` subcommand (binary, `chat` feature).** Mirrors the
+  `net` subcommand: gated on a new `chat` feature (`dep:crustcore-chat`), dispatched
+  before CLI parse, with a stub in the base/nano build. Loads an optional `persona.md`
+  + `CRUSTCORE.md`/`AGENTS.md` steering from the project root, spawns the net helper,
+  and runs the terminal REPL. **Zero nano impact** — `cargo xtask verify` green; nano
+  unchanged at 412.0 KiB (Linux) / 428.1 KiB (macOS); forbidden-deps clean (the chat
+  pack links only the std-only protocol, no HTTP/TLS). 39 chat-pack tests + the binary
+  feature build all green. Remaining for full parity: the Telegram converse channel,
+  and the contract amendment of invariants 15/16 + `docs/telegram.md` §8 (owner-
+  authorized) with new `docs/chat.md` / `docs/persona.md`.
+
+- **`C5-persist` implemented — persistent `LocalVectorStore` snapshot
+  (`crustcore-index-rag`, `persist` feature).** A dependency-free, versioned (`CCRG`
+  v1), length-prefixed little-endian snapshot of the per-namespace
+  `(ChunkId, embedding, ChunkMeta)` entries, mirroring `crustcore-index::MemoryStore`'s
+  discipline: a panic-free, fail-closed, bounded decoder that pre-checks every
+  count/dim/field cap **before** allocation and rejects bad magic / unknown version /
+  truncation. 8 feature-gated tests. Off by default; never in nano.
+
+- **`C5-ast` implemented — tree-sitter AST symbol spans (`crustcore-index-rag`, `ast`
+  feature).** Precise chunk-boundary spans for **Rust** top-level items (fn / struct /
+  enum / impl / mod / trait) via optional `tree-sitter` 0.25 + `tree-sitter-rust` 0.24,
+  structured for additive grammars. Fail-closed to the existing line/grep fallback on
+  unknown extension / oversize / parse failure (default behavior byte-for-byte
+  unchanged); iterative walk (no recursion), bounded (≤4096 spans), never panics on
+  hostile input. 7 feature-gated tests. The deps are optional and off by default —
+  `cargo tree` confirms tree-sitter is **absent from the nano graph** (invariants 11,
+  19, 20).
+
+- **`B3-ann` implemented — approximate nearest-neighbor index (`crustcore-index`,
+  dependency-free).** An additive `AnnIndex` using multi-table random-hyperplane LSH
+  (10 tables × 8 bits, Hamming-radius-2 probe, hyperplanes from a fixed seed via an
+  internal `SplitMix64` — deterministic, no wall clock / std rng), candidates
+  **re-ranked by the existing exact `cosine`**. `VectorMemory` is untouched. Measured
+  **top-3 recall 0.90 / top-1 1.00** vs brute force; 5 tests. Std-only.
+
+- **`C6-genai-usage` implemented — trusted GenAI model/usage attributes in
+  `crustcore-telemetry`.** The model spans now carry `gen_ai.request.model` /
+  `gen_ai.response.model`, `gen_ai.usage.input_tokens`, and
+  `gen_ai.usage.output_tokens` — sourced **only** from a new trusted carrier
+  (`usage::RecordedUsage` + `usage::UsageBySeq`, keyed by frame `seq`) that only
+  trusted code populates (the mediator's recorded `ModelCard` id + provider-reported
+  token counts), **never** from untrusted model output/payload (invariants 7, 17).
+  `FrameMeta` is unchanged; the carrier is threaded alongside it through
+  `semconv::project_frame`, `EventProjector::project_with_usage`, `FrameInput.usage`,
+  and `run_log(.., usage, ..)`. A frame without recorded usage emits no model/usage
+  attrs (no fabricated tokens); the model id still passes the single `redact`
+  chokepoint and is dropped on a tainted/secret value; Internal/Redacted model frames
+  still project to kind+seq only. `gen_ai.system = "crustcore"` (the mediator) is
+  preserved, and span/metric names remain enum-derived. New tests cover the trusted
+  source, the absence case, the untrusted-name-cannot-inject case, the
+  tool-seq-cannot-leak case, the redact-chokepoint case, and the Internal/Redacted
+  case (unit + end-to-end through `run_log`).
+
+- **`C7-devui` SPA served — real embedded inspector (`crustcore-dev`).** The `/` and
+  `/assets` placeholders now serve a dependency-free single-page inspector (inline
+  HTML/CSS/JS, no CDN): seven panels (run inspector, replay, providers, MCP, flow,
+  sessions, approvals) that `fetch()` the existing typed read endpoints with the
+  per-launch bearer token in an `Authorization` header (the token is obtained
+  client-side from the URL fragment and **never embedded** in any served byte).
+  Loopback-only + read/mutate type split + route count are unchanged; `/ws` returns a
+  documented non-streaming note (live websocket push remains `TODO(C7-serve-live)`).
+  10 new tests; the `serve` feature still compiles clean.
+
+- **`crustcore-daemon` binary + `serve` subcommand.** The runtime now has an entry
+  point: a tiny hand-rolled CLI (no clap) dispatching `serve`/`doctor`/`version`/`help`.
+  `serve` wires the std-only runtime pieces — a deny-all-default `ChatAllowlist` (from
+  `--chat-id`/`CRUSTCORE_TELEGRAM_ALLOW`), a `TelegramPoller`, and a `ChatBridge`
+  (persona + steering) — and prints a readiness report; the live Bot-API long-poll loop
+  stays `TODO(P9-net-live)` (no fake network loop). Pure `parse_args` unit-tested (11
+  tests). Non-nano, no new deps, nano unaffected.
+
 ### Changed
+
+- **Invariants 15 & 16 amended (owner-authorized) to sanction the chat front door.**
+  Invariant 15 broadens from "Telegram only by default" to "**authorized, redacted
+  channels** (Telegram by default; the `crustcore chat` front door)" — the *channel*
+  widened, the *boundary* (one redacted, principal-authenticated path) did not.
+  Invariant 16 changes from "not a hidden second chat channel" to "the only sanctioned
+  conversational surface is the **explicit, redacted, policy-gated** `crustcore chat`" —
+  no *ungoverned* parallel control plane. Updated in [`INVARIANTS.md`](./INVARIANTS.md)
+  (canonical, with amendment notes), [`CLAUDE.md`](./CLAUDE.md) §4, [`README.md`](./README.md),
+  [`docs/telegram.md`](./docs/telegram.md) §8.1 (the converse-turn carve-out), and the
+  `crustcore-cli` doc framing. New specs: [`docs/chat.md`](./docs/chat.md) and
+  [`docs/persona.md`](./docs/persona.md). The security properties are unchanged and, by
+  being stated generally, strengthened — verified by the chat pack's principal-trust,
+  non-authoritative-classifier, persona-cannot-authorize, and converse-redaction tests.
 
 - **CI now runs on Linux and macOS.** The `verify` job is a matrix over
   `ubuntu-latest` + `macos-latest` (`fail-fast: false`), so `cargo xtask verify`
@@ -36,6 +288,23 @@ agent/PR/role/size/invariant audit trail.
   runs on both — and the macOS live `sandbox-exec` confinement tests run in CI. The
   bubblewrap install and the `cargo-bloat` size report stay Linux-only (macOS uses
   the built-in `sandbox-exec`; the flagship size claim is the Linux nano binary).
+
+### Agent Log
+
+- **`C6-genai-usage`** — branch `claude/complete-crustcore-and-chat-frontdoor`,
+  agent role: implementer. Scope: `crustcore-telemetry` only (no new deps, no
+  `Cargo.toml`/`Cargo.lock` edits). Added `src/usage.rs`
+  (`RecordedUsage`/`UsageBySeq`); threaded a trusted `Option<&RecordedUsage>` through
+  `semconv::project_frame`, `project::EventProjector::project_with_usage`,
+  `run::FrameInput.usage`, and `run::run_log` (new `&UsageBySeq` arg); emitted the
+  three `gen_ai.*` model/usage attrs from that trusted source only. Nano size impact:
+  **n/a** (non-nano, feature-gated crate; never linked into nano). Invariants
+  verified: 6 (telemetry mints nothing / never authoritative — carrier is read-only),
+  7 & 17 (attrs from trusted recorded metadata, never untrusted payload/model output),
+  1–3 (model id passes the single redact chokepoint, dropped on taint), 11 (bounded,
+  count-capped, range-bounded). Verify: `cargo test -p crustcore-telemetry` (37 + 14 +
+  4 green), same with `--features otlp`, `cargo clippy --all-targets -- -D warnings`
+  clean (also with `otlp`), `cargo fmt --check` clean.
 
 ## [0.4.0] - 2026-06-21
 

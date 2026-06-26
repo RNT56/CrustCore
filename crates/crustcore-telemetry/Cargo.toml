@@ -15,11 +15,22 @@ crustcore-eventlog = { workspace = true }
 crustcore-receipts = { workspace = true }
 crustcore-secrets = { workspace = true }
 
+# OTLP/HTTP+JSON exporter deps — gated to the `otlp` feature ONLY (`dep:` below), so
+# the default build (workspace + CI) links NEITHER. We deliberately avoid the heavy
+# OTel/tonic/Tokio SDK: `ureq` is a small, blocking, rustls-backed HTTP client (the
+# same one `crustcore-net` uses for live providers; no async runtime), and `serde_json`
+# shapes the OTLP/HTTP JSON body. This is a non-nano sidecar crate the nano binary never
+# links — `xtask forbidden-deps` proves ureq/serde_json never enter the nano graph
+# (CLAUDE.md §5.1, invariants 19, 20).
+ureq = { version = "2.12", optional = true }
+serde_json = { version = "1", optional = true }
+
 [features]
-# The live OTLP exporter (OTel/OTLP SDK: Tokio/HTTP/protobuf) and broker-mediated
-# endpoint auth live behind this feature ONLY, so the default build (workspace + CI)
-# links no heavy stack — the deterministic projection core is feature-free. This is a
-# non-nano sidecar crate the nano binary never links; `xtask forbidden-deps` proves the
-# OTel/HTTP stack never enters the nano graph (CLAUDE.md §5.1, invariants 19, 20).
-# The real socket is `TODO(C6-otlp-live)`; the feature ships only a minimal seam today.
-otlp = []
+# The live OTLP exporter (OTLP/HTTP+JSON over `ureq`, body shaped with `serde_json`) and
+# broker-mediated endpoint auth live behind this feature ONLY, so the default build
+# (workspace + CI) links no HTTP/JSON stack — the deterministic projection core is
+# feature-free. This is a non-nano sidecar crate the nano binary never links; `xtask
+# forbidden-deps` proves the HTTP/JSON stack never enters the nano graph (CLAUDE.md §5.1,
+# invariants 19, 20). The IR->OTLP-JSON serialization is CI-testable without a network;
+# only the live socket smoke (an actual POST to a collector) remains `TODO(C6-otlp-live)`.
+otlp = ["dep:ureq", "dep:serde_json"]

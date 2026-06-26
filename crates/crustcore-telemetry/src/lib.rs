@@ -45,9 +45,11 @@ pub mod project;
 pub mod redact;
 pub mod run;
 pub mod semconv;
+pub mod usage;
 
 pub use config::{Config, ExporterChoice};
 pub use export::{Emitted, Exporter, InMemoryExporter};
 pub use project::{EventProjector, MetricSample, ProjectedFrame, SpanModel};
 pub use run::{run, run_log, FrameInput, RunReport};
 pub use semconv::{budget_samples, span_name};
+pub use usage::{RecordedUsage, UsageBySeq};

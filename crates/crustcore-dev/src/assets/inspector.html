@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!--
+  CrustCore dev UI single-page inspector (C7-devui).
+
+  Dependency-free: inline CSS + vanilla JS, NO external CDN / network / framework.
+  Served verbatim at `/` through the existing read-route mechanism (still a READ
+  route: auth + loopback apply, no posture change). The page fetches the typed,
+  already-redacted read endpoints and renders their bodies.
+
+  Auth: the dev UI authenticates with the per-launch bearer token presented as
+  `Authorization: Bearer <hex>` (see auth.rs — header-only; the page never weakens
+  that). The token is NOT embedded in this HTML (it must never appear in a response
+  body). Instead the page reads it client-side from the URL fragment
+  (`#token=<hex>`, which the browser never sends to the server) or from a paste box,
+  keeps it in a JS variable, and attaches the Authorization header to every fetch.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CrustCore Inspector</title>
+    <link rel="stylesheet" href="/assets" />
+  </head>
+  <body>
+    <header>
+      <h1>CrustCore Inspector</h1>
+      <p class="sub">
+        Loopback-only, read-by-default. Every panel below is a typed, redacted
+        read view; this UI mints nothing and writes nothing.
+      </p>
+    </header>
+
+    <section id="auth-bar">
+      <label for="token">Bearer token</label>
+      <input
+        id="token"
+        type="password"
+        autocomplete="off"
+        spellcheck="false"
+        placeholder="paste the per-launch token printed at startup"
+      />
+      <button id="refresh" type="button">Refresh all</button>
+      <span id="auth-status" class="muted"></span>
+    </section>
+
+    <main>
+      <article data-panel="/inspector">
+        <h2>Run inspector</h2>
+        <pre class="out" data-out="/inspector">…</pre>
+      </article>
+      <article data-panel="/replay">
+        <h2>Replay</h2>
+        <pre class="out" data-out="/replay">…</pre>
+      </article>
+      <article data-panel="/provider">
+        <h2>Providers</h2>
+        <pre class="out" data-out="/provider">…</pre>
+      </article>
+      <article data-panel="/mcp">
+        <h2>MCP registry</h2>
+        <pre class="out" data-out="/mcp">…</pre>
+      </article>
+      <article data-panel="/flow">
+        <h2>Flow</h2>
+        <pre class="out" data-out="/flow">…</pre>
+      </article>
+      <article data-panel="/sessions">
+        <h2>Sessions</h2>
+        <pre class="out" data-out="/sessions">…</pre>
+      </article>
+      <article data-panel="/approvals">
+        <h2>Approvals</h2>
+        <pre class="out" data-out="/approvals">…</pre>
+      </article>
+    </main>
+
+    <footer>
+      <span class="muted"
+        >Resolving an approval is a separate, operation-bound, launch-flag-gated
+        POST handled by the approval engine — not from this read view.</span
+      >
+    </footer>
+
+    <script>
+      "use strict";
+      // The read endpoints this page surfaces. Each maps 1:1 to a typed read route
+      // already served by the core (mutation::route -> handle_read).
+      var PANELS = [
+        "/inspector",
+        "/replay",
+        "/provider",
+        "/mcp",
+        "/flow",
+        "/sessions",
+        "/approvals",
+      ];
+
+      // Token handling. The token is supplied out-of-band (printed once at launch)
+      // and never embedded in this page. We accept it from the URL fragment
+      // (#token=<hex>; the fragment is NOT sent to the server) and remember it for
+      // the session in the input box. It is sent only as an Authorization header.
+      var tokenInput = document.getElementById("token");
+      var authStatus = document.getElementById("auth-status");
+
+      (function bootstrapToken() {
+        var hash = window.location.hash || "";
+        var m = hash.match(/[#&]token=([0-9a-fA-F]+)/);
+        if (m) {
+          tokenInput.value = m[1];
+          // Drop the token from the visible URL once captured.
+          history.replaceState(null, "", window.location.pathname);
+        }
+      })();
+
+      function currentToken() {
+        return (tokenInput.value || "").trim();
+      }
+
+      function authHeaders() {
+        var t = currentToken();
+        return t ? { Authorization: "Bearer " + t } : {};
+      }
+
+      function load(path) {
+        var out = document.querySelector('[data-out="' + path + '"]');
+        out.textContent = "loading…";
+        out.classList.remove("err");
+        return fetch(path, {
+          method: "GET",
+          headers: authHeaders(),
+          cache: "no-store",
+        })
+          .then(function (resp) {
+            return resp.text().then(function (body) {
+              if (!resp.ok) {
+                out.classList.add("err");
+                out.textContent = resp.status + " — " + body;
+              } else {
+                out.textContent = body;
+              }
+              return resp.status;
+            });
+          })
+          .catch(function (e) {
+            out.classList.add("err");
+            out.textContent = "fetch failed: " + e;
+            return 0;
+          });
+      }
+
+      function refreshAll() {
+        if (!currentToken()) {
+          authStatus.textContent = "enter the launch token to load views";
+          return;
+        }
+        authStatus.textContent = "loading…";
+        Promise.all(PANELS.map(load)).then(function (codes) {
+          var anyAuth = codes.some(function (c) {
+            return c === 401;
+          });
+          authStatus.textContent = anyAuth
+            ? "unauthorized — check the token"
+            : "loaded";
+        });
+      }
+
+      document.getElementById("refresh").addEventListener("click", refreshAll);
+      tokenInput.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") refreshAll();
+      });
+
+      // Auto-load if a token was supplied via the fragment.
+      if (currentToken()) refreshAll();
+    </script>
+  </body>
+</html>

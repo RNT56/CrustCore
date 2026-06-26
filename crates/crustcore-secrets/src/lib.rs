@@ -28,13 +28,21 @@
 //! enabled in the nano build, so nano links no crypto; the `forbidden-deps` gate
 //! asserts it). [`InMemoryStore`] is the std-only dev/test backend and what an
 //! opened vault decrypts *into*. The native OS keychain backends (macOS Keychain /
-//! Linux Secret Service) remain `TODO(P8-store)`. Nano stores only `secret://`
-//! handles.
+//! Linux Secret Service) are implemented as dependency-free **loaders** ([`keychain`],
+//! behind the `macos-keychain` / `linux-keyring` features) that fetch into an
+//! [`InMemoryStore`] the same way the vault decrypts into one; only the live shell-out
+//! to the system tool is `TODO(P8-store-live)`. Nano stores only `secret://` handles.
 #![forbid(unsafe_code)]
 
 /// Encrypted-file vault backend (`vault-file` feature; never in nano).
 #[cfg(feature = "vault-file")]
 pub mod store;
+
+/// OS keychain loaders (`macos-keychain` / `linux-keyring` features; never in nano).
+/// Dependency-free: they shell out to the system tool and load into an
+/// [`InMemoryStore`] (P8-store).
+#[cfg(any(feature = "macos-keychain", feature = "linux-keyring"))]
+pub mod keychain;
 
 use std::cell::Cell;
 use std::collections::BTreeMap;

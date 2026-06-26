@@ -12,8 +12,9 @@
 //!
 //! The deterministic projection core needs no secrets, so the auth *config* is a
 //! simple, non-secret descriptor that lives in the default build; the actual broker
-//! call + header injection (`TODO(C6-otlp-live)`) compiles only under the `otlp`
-//! feature, alongside the real exporter.
+//! call + header injection compiles only under the `otlp` feature, alongside the real
+//! exporter, which wires the returned [`crustcore_secrets::HeaderInjection`] straight
+//! into the outbound POST. Only the live socket smoke is `TODO(C6-otlp-live)`.
 
 use crustcore_secrets::SecretHandle;
 
@@ -78,8 +79,9 @@ mod live {
         /// The token is materialized only inside a one-shot
         /// [`crustcore_secrets::ApprovedSecretView`] and immediately moved into a
         /// non-model-visible [`HeaderInjection`]; it never enters env, a span, or
-        /// model context (invariant 1). `TODO(C6-otlp-live)`: wire the returned
-        /// injection into the OTLP SDK's outbound request headers.
+        /// model context (invariant 1). The returned injection is wired into the
+        /// exporter's outbound POST headers by [`crate::export::otlp::OtlpExporter::send`];
+        /// only the live socket smoke against a real collector is `TODO(C6-otlp-live)`.
         ///
         /// # Errors
         /// [`AuthError`] if no credential is configured, the broker refuses, or the

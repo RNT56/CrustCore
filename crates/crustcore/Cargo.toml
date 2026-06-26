@@ -31,7 +31,11 @@ net = ["dep:crustcore-netproto"]
 daemon = ["dep:crustcore-daemon", "net"]
 mcp = ["dep:crustcore-mcp"]
 index = ["dep:crustcore-index"]
-full = ["net", "daemon", "mcp", "index"]
+# `chat` is the conversational front door (`crustcore chat`). It links only the
+# std-only `crustcore-chat` pack, which speaks the std-only protocol to the spawned
+# `crustcore-net` helper — no HTTP/TLS linked here either. NOT part of nano.
+chat = ["dep:crustcore-chat"]
+full = ["net", "daemon", "mcp", "index", "chat"]
 
 [dependencies]
 # Nano-tier crates (always linked; std-only today). Unreferenced code is removed
@@ -56,3 +60,6 @@ crustcore-netproto = { workspace = true, optional = true }
 crustcore-daemon = { workspace = true, optional = true }
 crustcore-mcp = { workspace = true, optional = true }
 crustcore-index = { workspace = true, optional = true }
+# Conversational front door (`crustcore chat`). Std-only; talks to the spawned net
+# helper over the protocol. Off in nano.
+crustcore-chat = { workspace = true, optional = true }

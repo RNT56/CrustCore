@@ -20,6 +20,7 @@ use crustcore_eventlog::FrameMeta;
 use crustcore_receipts::ToolReceipt;
 
 use crate::semconv;
+use crate::usage::RecordedUsage;
 
 /// A span in the neutral IR: a name (from the closed [`crustcore_kernel::EventKind`]
 /// enum) and a bounded list of key/value attributes. Values here are
@@ -118,20 +119,37 @@ impl EventProjector {
         EventProjector
     }
 
-    /// Projects one frame (+ its joined receipt, if any) to the IR.
+    /// Projects one frame (+ its joined receipt, if any) to the IR, with no
+    /// recorded GenAI usage. Equivalent to [`project_with_usage`] with `usage =
+    /// None`; kept for callers that have no model-usage carrier.
+    ///
+    /// [`project_with_usage`]: EventProjector::project_with_usage
+    #[must_use]
+    pub fn project(&self, meta: &FrameMeta, receipt: Option<&ToolReceipt>) -> ProjectedFrame {
+        self.project_with_usage(meta, receipt, None)
+    }
+
+    /// Projects one frame (+ its joined receipt + trusted recorded usage) to the IR.
     ///
     /// The mapping is delegated entirely to [`semconv`]: the span/metric *names*
     /// derive only from `meta.kind` (the closed [`crustcore_kernel::EventKind`]
     /// enum), and attributes come only from typed [`FrameMeta`] / [`ToolReceipt`]
-    /// fields — never from the (untrusted) payload. `receipt` is honored only for a
-    /// `ToolCallCompleted` frame; for every other kind it is ignored (a forged
-    /// receipt cannot inject attributes onto an unrelated span).
+    /// fields and the trusted [`RecordedUsage`] carrier — never from the (untrusted)
+    /// payload. `receipt` is honored only for a `ToolCallCompleted` frame, and
+    /// `usage` only for the model-frame kinds; for every other kind each is ignored
+    /// (a forged receipt or usage cannot inject attributes onto an unrelated span).
+    /// An absent `usage` emits no model/usage attributes (no fabricated tokens).
     ///
     /// This is **pre-redaction** IR; callers must run it through [`crate::redact`]
     /// before handing it to an exporter.
     #[must_use]
-    pub fn project(&self, meta: &FrameMeta, receipt: Option<&ToolReceipt>) -> ProjectedFrame {
-        semconv::project_frame(meta, receipt)
+    pub fn project_with_usage(
+        &self,
+        meta: &FrameMeta,
+        receipt: Option<&ToolReceipt>,
+        usage: Option<&RecordedUsage>,
+    ) -> ProjectedFrame {
+        semconv::project_frame(meta, receipt, usage)
     }
 }
 
