@@ -23,11 +23,41 @@ use crustcore_types::{
 };
 
 use crate::chat::{ChatBridge, ChatReply, STEER_BUTTON_DATA};
-use crate::registry::{RegistrySnapshot, TaskId, TaskPhase};
+use crate::registry::{default_task_budget, RegistrySnapshot, TaskId, TaskPhase};
+use crate::supervisor::AgentBudget;
 use crate::telegram::{
     ApprovalEngine, ApprovalOutcome, ChatAllowlist, ChatId, Command, OutboundRenderer,
     RuntimeEvent, StatusSnapshot,
 };
+
+/// The per-task resource budget for a classified chat route (invariant 11). The classifier
+/// distinguishes a bounded **QuickFix** ("one worktree, one verify") from a multi-step
+/// **Feature** and a whole-project **Project** build, so the runtime honors that with
+/// route-aware resource tiers — a quick fix gets a tight budget (fail fast), a project the
+/// generous default. **Continue** maps to the Feature tier; true task *resumption*
+/// (re-attaching a prior task's state) is the `TODO(chat-resume)` seam. Routing Feature/Project
+/// to the multi-agent fan-out loop (`exec::run_fanout`) needs a live `SubagentExecutor`
+/// (`TODO(P11-exec-live)`); the budget tier is the in-process honoring of the route today.
+/// Pure + CI-tested.
+#[must_use]
+pub fn budget_for_route(route: ChatRoute) -> AgentBudget {
+    match route {
+        ChatRoute::QuickFix => AgentBudget {
+            max_wall_ms: 5 * 60 * 1000,
+            max_output_bytes: 256 * 1024,
+            max_tokens: u64::MAX,
+        },
+        ChatRoute::Feature | ChatRoute::Continue => AgentBudget {
+            max_wall_ms: 15 * 60 * 1000,
+            max_output_bytes: 512 * 1024,
+            max_tokens: u64::MAX,
+        },
+        // A whole-project build gets the generous default tier.
+        ChatRoute::Project => default_task_budget(),
+        // Converse never launches a task; default defensively (unreachable via LaunchTask).
+        ChatRoute::Converse => default_task_budget(),
+    }
+}
 
 /// Mint an `Approved<GitHubWriteCap>` for an allowlisted chat that just approved opening
 /// a draft PR. This is the **only** place the chat front door mints GitHub write
@@ -470,7 +500,7 @@ mod live {
     use std::rc::Rc;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-    use crustcore_chat::{ChatConfig, OperatorSteering, Persona};
+    use crustcore_chat::{ChatConfig, ChatRoute, OperatorSteering, Persona};
     use crustcore_net::credsource::StaticCredentials;
     use crustcore_net::telegram::{RestTelegram, TELEGRAM_API};
     use crustcore_net::transport::UreqClient;
@@ -485,9 +515,9 @@ mod live {
     };
     use crate::chat::ChatBridge;
     use crate::registry::{
-        default_task_budget, AdmitError, LeaseOwner, RegistryAction, RegistrySnapshot, TaskId,
-        TaskRegistry,
+        AdmitError, LeaseOwner, RegistryAction, RegistrySnapshot, TaskId, TaskRegistry,
     };
+    use crate::supervisor::AgentBudget;
     use crate::task::{TaskHandle, TaskSpec};
     use crate::telegram::{
         ApprovalOutcome, ChatAllowlist, ChatId, LiveTelegramApi, OutboundRenderer, StatusSnapshot,
@@ -528,9 +558,10 @@ mod live {
             prompt: String,
             chat: ChatId,
             pr_cap: Option<Approved<GitHubWriteCap>>,
+            budget: AgentBudget,
             now: Timestamp,
         ) -> Result<TaskId, AdmitError> {
-            let id = self.registry.admit(chat, default_task_budget(), now)?;
+            let id = self.registry.admit(chat, budget, now)?;
             let handle = TaskHandle::spawn(spec, prompt, chat, pr_cap);
             self.registry.mark_running(id, now);
             self.handles.insert(id, handle);
@@ -619,6 +650,8 @@ mod live {
         prompt: String,
         chat: ChatId,
         approval_id: u128,
+        /// The classified route, so the approved launch uses the route's budget tier.
+        route: ChatRoute,
     }
 
     /// The runtime configuration for [`run_serve_loop`].
@@ -819,7 +852,11 @@ mod live {
         now: Timestamp,
     ) -> Option<PendingTask> {
         match action {
-            Some(LoopAction::LaunchTask { prompt, chat, .. }) => {
+            Some(LoopAction::LaunchTask {
+                route,
+                prompt,
+                chat,
+            }) => {
                 if approval_pending {
                     let t = renderer
                         .notice("an approval is already pending — approve or deny it first.");
@@ -848,11 +885,19 @@ mod live {
                             prompt,
                             chat,
                             approval_id,
+                            route,
                         });
                     }
-                    // No PR target: a sandboxed verify is reversible — start it, subject to
-                    // the concurrency cap (invariant 11).
-                    Some(spec) => match runner.launch(spec.clone(), prompt, chat, None, now) {
+                    // No PR target: a sandboxed verify is reversible — start it under the
+                    // route's budget tier, subject to the concurrency cap (invariant 11).
+                    Some(spec) => match runner.launch(
+                        spec.clone(),
+                        prompt,
+                        chat,
+                        None,
+                        super::budget_for_route(route),
+                        now,
+                    ) {
                         Ok(id) => {
                             let t = renderer.notice(&format!("▶️ started task #{}.", id.0));
                             let _ = api.send_message(chat, &t, None);
@@ -928,6 +973,7 @@ mod live {
                                 pending.prompt.clone(),
                                 pending.chat,
                                 Some(cap),
+                                super::budget_for_route(pending.route),
                                 now,
                             ) {
                                 Ok(_) => {
@@ -1228,6 +1274,23 @@ mod tests {
             .text
             .as_str()
             .contains("no task #9"));
+    }
+
+    #[test]
+    fn budget_for_route_is_tiered_by_complexity() {
+        use crustcore_chat::ChatRoute;
+        // A quick fix gets a tighter budget than a feature, which is tighter than a project.
+        let quick = budget_for_route(ChatRoute::QuickFix);
+        let feature = budget_for_route(ChatRoute::Feature);
+        let project = budget_for_route(ChatRoute::Project);
+        assert!(quick.max_wall_ms < feature.max_wall_ms);
+        assert!(feature.max_wall_ms < project.max_wall_ms);
+        assert!(quick.max_output_bytes < project.max_output_bytes);
+        // Continue maps to the Feature tier (true resumption is a separate seam).
+        assert_eq!(
+            budget_for_route(ChatRoute::Continue).max_wall_ms,
+            feature.max_wall_ms
+        );
     }
 
     #[test]

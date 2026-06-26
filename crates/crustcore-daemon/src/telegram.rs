@@ -831,11 +831,68 @@ pub trait TelegramApi {
 /// no outward channel itself — replies are sent explicitly via [`TelegramApi::send_message`]
 /// with rendered [`ModelVisibleText`], so the model never gains a direct user channel
 /// (invariant 5). Deterministic given the `TelegramApi`, so fully CI-testable.
+/// Default suppression window: a given not-allowlisted chat's rejections are surfaced at
+/// most once per minute (`docs/telegram.md` §4).
+pub const ABUSE_WINDOW_MS: u64 = 60_000;
+
+/// Max distinct chats the suppressor tracks. Bounded so a flood of *distinct* spoofed chat
+/// ids cannot grow memory without limit (invariant 11); the least-recently-surfaced chat is
+/// evicted when full.
+pub const MAX_TRACKED_CHATS: usize = 4096;
+
+/// A bounded per-chat **abuse suppressor**: rate-limits how often a not-allowlisted chat's
+/// rejections are surfaced, so a chat flooding the bot with spoofed messages cannot spam the
+/// risk signal (`docs/telegram.md` §4). The allowlist still rejects every such message — this
+/// only smooths the *reporting*. Pure, in-memory, deterministic over injected time, bounded.
+#[derive(Debug)]
+pub struct AbuseSuppressor {
+    window_ms: u64,
+    last_surfaced: BTreeMap<i64, u64>,
+}
+
+impl AbuseSuppressor {
+    /// A suppressor with the given per-chat window.
+    #[must_use]
+    pub fn new(window_ms: u64) -> Self {
+        AbuseSuppressor {
+            window_ms,
+            last_surfaced: BTreeMap::new(),
+        }
+    }
+
+    /// Whether this chat's rejection should be **surfaced now**: `true` the first time a chat
+    /// is seen (or once `window_ms` has elapsed since it was last surfaced), `false` for
+    /// repeats within the window. Bounded: when at capacity it evicts the
+    /// least-recently-surfaced chat before tracking a new one.
+    pub fn should_surface(&mut self, chat: i64, now: Timestamp) -> bool {
+        let now_ms = now.as_millis();
+        if let Some(&last) = self.last_surfaced.get(&chat) {
+            if now_ms.saturating_sub(last) < self.window_ms {
+                return false; // within the window — suppress
+            }
+        } else if self.last_surfaced.len() >= MAX_TRACKED_CHATS {
+            // At capacity and this is a new chat — evict the oldest (smallest timestamp).
+            if let Some((&oldest, _)) = self.last_surfaced.iter().min_by_key(|(_, &t)| t) {
+                self.last_surfaced.remove(&oldest);
+            }
+        }
+        self.last_surfaced.insert(chat, now_ms);
+        true
+    }
+
+    /// How many chats are currently tracked (for bounding assertions).
+    #[must_use]
+    pub fn tracked(&self) -> usize {
+        self.last_surfaced.len()
+    }
+}
+
 pub struct TelegramPoller {
     offset: i64,
     deduper: Deduper,
     allowlist: ChatAllowlist,
     rejected: u32,
+    suppressor: AbuseSuppressor,
 }
 
 impl TelegramPoller {
@@ -847,6 +904,7 @@ impl TelegramPoller {
             deduper: Deduper::new(),
             allowlist,
             rejected: 0,
+            suppressor: AbuseSuppressor::new(ABUSE_WINDOW_MS),
         }
     }
 
@@ -909,7 +967,12 @@ impl TelegramPoller {
                     events.push((chat, route(envelope)));
                 }
                 Err(RejectReason::NotAllowlisted) => {
-                    self.rejected = self.rejected.saturating_add(1);
+                    // Surface the spoof signal at most once per chat per window — a chat
+                    // flooding the bot cannot spam the risk channel (the allowlist still
+                    // rejects every message; this only rate-limits reporting).
+                    if self.suppressor.should_surface(raw.chat_id, now) {
+                        self.rejected = self.rejected.saturating_add(1);
+                    }
                 }
                 // Empty / bad-callback updates are dropped (no kernel event).
                 Err(_) => {}
@@ -1391,6 +1454,49 @@ mod tests {
         assert_eq!(poller.offset(), 5);
         // The non-allowlisted update was rejected and counted (spoof signal).
         assert_eq!(poller.rejected_count(), 1);
+    }
+
+    #[test]
+    fn abuse_suppressor_surfaces_once_per_chat_per_window() {
+        let mut s = AbuseSuppressor::new(60_000);
+        assert!(s.should_surface(999, ts(1000)), "first rejection surfaces");
+        assert!(
+            !s.should_surface(999, ts(2000)),
+            "a repeat within the window is suppressed"
+        );
+        assert!(
+            s.should_surface(999, ts(1000 + 60_001)),
+            "once the window passes, it surfaces again"
+        );
+        // A different chat is tracked independently.
+        assert!(s.should_surface(888, ts(2000)));
+    }
+
+    #[test]
+    fn abuse_suppressor_is_bounded() {
+        let mut s = AbuseSuppressor::new(60_000);
+        // Flood distinct spoofed chat ids well past the cap; tracking stays bounded.
+        for chat in 0..(MAX_TRACKED_CHATS as i64 + 100) {
+            s.should_surface(chat, ts(chat as u64 + 1));
+        }
+        assert!(
+            s.tracked() <= MAX_TRACKED_CHATS,
+            "tracked chats are bounded"
+        );
+    }
+
+    #[test]
+    fn poll_rate_limits_repeated_rejections_from_one_chat() {
+        // Two not-allowlisted messages from the same chat in one poll → surfaced once.
+        let api = MockTelegram::new(vec![upd(1, 999, "spoof a"), upd(2, 999, "spoof b")]);
+        let mut poller = TelegramPoller::new(ChatAllowlist::of(&[100]));
+        let events = poller.poll_once(&api, ts(1000)).unwrap();
+        assert!(events.is_empty());
+        assert_eq!(
+            poller.rejected_count(),
+            1,
+            "a flooding chat is surfaced only once per window"
+        );
     }
 
     #[test]

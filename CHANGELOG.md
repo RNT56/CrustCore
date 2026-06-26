@@ -28,6 +28,22 @@ agent/PR/role/size/invariant audit trail.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Chat front-door polish — two gaps found by an end-to-end completeness audit, closed.**
+  (1) **Route-aware budgets:** the chat classifier emits 4 execution routes
+  (QuickFix/Feature/Project/Continue) and threaded them to `LoopAction::LaunchTask.route`, but
+  the runtime *discarded* `route` and launched every task with one default budget — a dangling
+  feature. `runtime::budget_for_route` now honors it with tiered per-task budgets (QuickFix
+  tight → Project the generous default; Continue → Feature tier), wired through `TaskRunner::
+  launch` and the PR-gated path. (2) **Abuse suppressor:** `telegram::AbuseSuppressor` (bounded,
+  per-chat, deterministic over injected time) rate-limits how often a not-allowlisted chat's
+  rejections are surfaced, so a flooding chat can't spam the risk signal (`docs/telegram.md`
+  §4) — the allowlist still rejects every message; this only smooths reporting. 5 new tests.
+  The audit also **refuted a false high-severity finding** (task progress reaching the user
+  unredacted — `renderer.notice` IS the sanctioned declassifier) and confirmed all 20 invariants
+  are structurally enforced + tested. Invariants 11. Nano: n/a (daemon-only).
+
 ### Added
 
 - **Supervisor fan-out coordinator (`P11`) — race verified proposers, the verifier picks the
