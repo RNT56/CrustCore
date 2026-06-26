@@ -30,6 +30,16 @@ agent/PR/role/size/invariant audit trail.
 
 ### Fixed
 
+- **Docs accuracy — corrected the nano size figures + test count (a final-polish audit
+  finding).** The contract/overview docs cited **412.0 KiB / 51.5%** as the flagship "Linux
+  x86_64" nano size, but that is the **macOS** figure — the CI size gate reports Linux x86_64
+  at **478.7 KiB (490184 bytes), 59.8%** of the 800 kB budget (still within the < 600 kB
+  *stretch* goal). The macOS figure is the smaller one (~412 KiB). Corrected across
+  `CLAUDE.md`, `README.md` (badge + prose + tier table + size-check example), and
+  `docs/roadmap-v0.2.md` (intro). Also refreshed the stale workspace **test count
+  (~663 → ~834)**. No code change — nano is byte-identical across this session's feature work
+  (confirmed: no nano-linked crate changed); the figures were simply mislabeled/stale.
+
 - **Chat front-door polish — two gaps found by an end-to-end completeness audit, closed.**
   (1) **Route-aware budgets:** the chat classifier emits 4 execution routes
   (QuickFix/Feature/Project/Continue) and threaded them to `LoopAction::LaunchTask.route`, but

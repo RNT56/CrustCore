@@ -9,8 +9,8 @@
 **A sub-800 kB Rust core that owns completion, integration, secrets, and approvals — so a patch ships because your verify command passed in a clean sandbox, not because a model said it was done.**
 
 [![CI](https://github.com/RNT56/CrustCore/actions/workflows/ci.yml/badge.svg)](https://github.com/RNT56/CrustCore/actions/workflows/ci.yml)
-&nbsp;![nano size](https://img.shields.io/badge/nano-412.0_KiB-2ea44f)
-&nbsp;![tests](https://img.shields.io/badge/tests-663_passing-2ea44f)
+&nbsp;![nano size](https://img.shields.io/badge/nano-478.7_KiB-2ea44f)
+&nbsp;![tests](https://img.shields.io/badge/tests-834_passing-2ea44f)
 &nbsp;![invariants](https://img.shields.io/badge/invariants-20_enforced-1f6feb)
 &nbsp;![kernel](https://img.shields.io/badge/kernel-std--only_%C2%B7_no_async%2Fnet%2Fdb-8957e5)
 &nbsp;![rust](https://img.shields.io/badge/rust-1.85+-orange)
@@ -81,7 +81,7 @@ proof, not a vibe.
 
 **Tiny by architecture, not by flag**
 
-The trusted binary is **412.0 KiB stripped** and *refuses* to link Tokio, TLS, a
+The trusted binary is **478.7 KiB stripped** (Linux x86_64) and *refuses* to link Tokio, TLS, a
 database, an MCP SDK, or any provider SDK — a CI size gate keeps it that way.
 Small enough to read end to end in an afternoon.
 
@@ -179,12 +179,12 @@ Full design: **[docs/architecture.md](./docs/architecture.md)** &nbsp;·&nbsp; s
 
 | | |
 | --- | --- |
-| **Footprint** | the trusted binary is **412.0 KiB** stripped — std-only, with no async runtime, network, or database linked in |
+| **Footprint** | the trusted binary is **478.7 KiB** stripped (Linux x86_64) — std-only, with no async runtime, network, or database linked in |
 | **Trusted core** | the kernel · a hash-chained event log + tool receipts · symlink-safe path confinement · a sandboxed command runner · the worktree verify loop · the type-sealed `VerifiedPatch` |
 | **Model & secrets** | a unified multi-modal provider registry — completion, embedding, and rerank — reached through a *spawned* helper · a secret broker with an encrypted vault and a redaction / taint boundary |
 | **Integrations** | a Telegram control channel · GitHub REST + hardened webhooks · an MCP gateway / client / server · subagent supervision & execution · a second-opinion advisor · repo & semantic memory |
 | **Compose & build** | a typed workflow graph · a session / artifact service · the `#[crust_tool]` authoring macro · RAG + vector-store adapters · OpenTelemetry / GenAI export · a loopback developer UI |
-| **Verified quality** | **663 tests** — property tests, no-panic fuzzes, tamper tests, goldens — plus red-team fixtures for prompt-injection, path-escape, fake tool results, secret-leak, hidden-MCP-instructions, memory-as-authority, and forged / replayed webhooks |
+| **Verified quality** | **834 tests** — property tests, no-panic fuzzes, tamper tests, goldens — plus red-team fixtures for prompt-injection, path-escape, fake tool results, secret-leak, hidden-MCP-instructions, memory-as-authority, and forged / replayed webhooks |
 
 ---
 
@@ -192,7 +192,7 @@ Full design: **[docs/architecture.md](./docs/architecture.md)** &nbsp;·&nbsp; s
 
 | Tier | Size | Purpose |
 | --- | --- | --- |
-| **`crustcore` / `crustcore-nano`** | **412.0 KiB** | the trusted local verifier harness — the flagship |
+| **`crustcore` / `crustcore-nano`** | **478.7 KiB** | the trusted local verifier harness — the flagship |
 | `crustcore-net` | 3–8 MB | network + provider sidecar (Tokio/TLS/providers) — a *spawned* helper, never linked into nano |
 | `crustcore-daemon` | 4–10 MB | long-running runtime: Telegram/GitHub loops, supervision |
 | `crustcore-mcp` | 3–10 MB | MCP gateway/client/server + code-mode |
@@ -216,7 +216,7 @@ never touch the flagship binary: `crustcore-flow` (typed workflow graph),
 cargo xtask verify
 
 # 2. Build the flagship and print its size.
-cargo xtask size-check          # crustcore-nano: 412.0 KiB
+cargo xtask size-check          # crustcore-nano: 478.7 KiB (Linux x86_64)
 
 # 3. Is this host ready to run verified tasks?
 cargo run -p crustcore --no-default-features --features nano -- doctor
