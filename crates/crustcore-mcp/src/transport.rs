@@ -13,7 +13,16 @@
 //! nothing here interprets a response as a command; the gateway decides from the
 //! registry's `tool_policies`, never the server's self-description, and all output is
 //! redacted before it can be model-visible.
+//!
+//! Credential injection (P13-net): a request may carry an optional broker-resolved
+//! [`HeaderInjection`] (e.g. `Authorization: Bearer …`). The secret bytes live only
+//! inside that injection and are read through [`HeaderInjection::reveal`] *here at the
+//! transport boundary* — never placed in `params`, the response, the model context, or
+//! a log (invariants 1–3). An HTTP transport sends the header on the wire; a stdio
+//! transport (which has no HTTP header channel) simply does not forward it — see
+//! [`StdioMcp::call`] and [`crate::McpAuthMode`].
 
+use crustcore_secrets::HeaderInjection;
 use crustcore_types::hash::sha256;
 
 /// Cap on a single framed JSON-RPC message **body** read from a server (bounded — a
@@ -56,12 +65,25 @@ impl core::fmt::Display for McpError {
 /// A JSON-RPC transport to one MCP server. `call` issues a single request and returns
 /// the `result` value (or a typed error). The session lifecycle (`initialize` →
 /// `tools/list` → `tools/call`) is orchestrated by the caller over this primitive.
+///
+/// `auth` carries an optional broker-resolved credential (P13-net): when present the
+/// transport injects it at the wire boundary (an HTTP `Authorization` header), reading
+/// the secret bytes via [`HeaderInjection::reveal`] **only here** — they never enter
+/// `params`, the returned `result`, the model context, or a log (invariants 1–3). A
+/// transport with no header channel (stdio) ignores `auth` by construction; see
+/// [`crate::McpAuthMode`].
 pub trait McpTransport {
     /// Issues a JSON-RPC `method` call with `params`, returning the `result` value.
+    /// `auth`, if any, is the broker-resolved credential injected at the transport.
     ///
     /// # Errors
     /// [`McpError`] on a transport failure, a JSON-RPC `error`, or a malformed reply.
-    fn call(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, McpError>;
+    fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        auth: Option<&HeaderInjection>,
+    ) -> Result<serde_json::Value, McpError>;
 }
 
 /// Extracts the `result` from a JSON-RPC response object, mapping an `error` member
@@ -99,7 +121,7 @@ pub struct ToolDescriptor {
 /// # Errors
 /// [`McpError`] on a transport/RPC/parse failure.
 pub fn list_tools(transport: &dyn McpTransport) -> Result<Vec<ToolDescriptor>, McpError> {
-    let result = transport.call("tools/list", serde_json::json!({}))?;
+    let result = transport.call("tools/list", serde_json::json!({}), None)?;
     let tools = result
         .get("tools")
         .and_then(|t| t.as_array())
@@ -146,9 +168,19 @@ pub fn manifest_hash(tools: &[ToolDescriptor]) -> [u8; 32] {
 /// A deterministic in-process [`McpTransport`] that returns canned results keyed by
 /// method — the transport the gateway-flow tests and the hidden-instructions red-team
 /// use. Makes no network/subprocess calls, so it runs in CI.
+///
+/// It also **records** the credential it was handed on the most recent call (its
+/// header name + the *revealed* bytes), so a test can assert that `call_tool` resolved
+/// a `BrokerSecret` and injected it at the transport — without that ever appearing in
+/// the model-visible result (P13-net). The recorded bytes stay inside the mock and are
+/// read only by the test that built it; they never flow into a receipt or `McpResult`.
 #[derive(Default)]
 pub struct MockMcp {
     responses: std::collections::BTreeMap<String, Result<serde_json::Value, McpError>>,
+    /// The `(header_name, revealed_value_bytes)` handed to the most recent `call`, or
+    /// `None` if the last call carried no credential. Interior-mutable so `&self`
+    /// `call` can record it (the trait takes `&self`).
+    last_auth: std::cell::RefCell<Option<(String, Vec<u8>)>>,
 }
 
 impl MockMcp {
@@ -171,6 +203,15 @@ impl MockMcp {
         self.responses.insert(method.to_string(), Err(err));
         self
     }
+
+    /// The `(header_name, revealed_bytes)` the transport was handed on the most recent
+    /// call, for test assertions that a broker credential was injected at the transport
+    /// boundary. `None` if no credential was passed. **Test-only introspection** — real
+    /// transports do not expose what they injected.
+    #[must_use]
+    pub fn last_auth(&self) -> Option<(String, Vec<u8>)> {
+        self.last_auth.borrow().clone()
+    }
 }
 
 impl McpTransport for MockMcp {
@@ -178,7 +219,13 @@ impl McpTransport for MockMcp {
         &self,
         method: &str,
         _params: serde_json::Value,
+        auth: Option<&HeaderInjection>,
     ) -> Result<serde_json::Value, McpError> {
+        // Record the injected credential (if any) so a test can prove it reached the
+        // transport. `reveal()` is the trusted-outbound byte accessor; here it is the
+        // simulated wire. This stays inside the mock — never returned to the caller.
+        *self.last_auth.borrow_mut() =
+            auth.map(|h| (h.header_name().to_string(), h.reveal().to_vec()));
         match self.responses.get(method) {
             Some(Ok(v)) => Ok(v.clone()),
             Some(Err(e)) => Err(e.clone()),
@@ -304,7 +351,21 @@ impl Drop for StdioMcp {
 }
 
 impl McpTransport for StdioMcp {
-    fn call(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, McpError> {
+    /// `auth` is accepted for trait uniformity but **not forwarded**: the MCP stdio
+    /// transport is a local subprocess speaking framed JSON-RPC over pipes — it has no
+    /// HTTP header channel, so an `Authorization` header has nowhere to go. By contract
+    /// (`docs/mcp.md`; [`crate::McpAuthMode`]) `BrokerSecret` auth applies to the
+    /// (future) HTTP transport; a stdio server uses [`crate::McpAuthMode::None`]. The
+    /// credential is deliberately **not** smuggled into `params` — that would put the
+    /// secret in the model-visible JSON-RPC body, violating invariants 1–3. The
+    /// resolution path still runs in [`crate::call_tool`]; this transport simply elects
+    /// not to use the resolved header.
+    fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        _auth: Option<&HeaderInjection>,
+    ) -> Result<serde_json::Value, McpError> {
         use std::io::Write;
         let id = self.next_id.get();
         self.next_id.set(id.saturating_add(1));
@@ -391,9 +452,10 @@ mod tests {
             "tools/call",
             serde_json::json!({"content":[{"type":"text","text":"hi"}]}),
         );
-        assert!(mock.call("tools/call", serde_json::json!({})).is_ok());
+        assert!(mock.call("tools/call", serde_json::json!({}), None).is_ok());
         assert!(matches!(
-            mock.call("unknown", serde_json::json!({})).unwrap_err(),
+            mock.call("unknown", serde_json::json!({}), None)
+                .unwrap_err(),
             McpError::Transport(_)
         ));
     }
@@ -417,7 +479,7 @@ mod tests {
         std::fs::write(&path, &frame).unwrap();
 
         let server = StdioMcp::spawn("sh", &["-c", &format!("cat {}", path.display())]).unwrap();
-        let result = server.call("ping", serde_json::json!({})).unwrap();
+        let result = server.call("ping", serde_json::json!({}), None).unwrap();
         assert_eq!(result, serde_json::json!({"pong": true}));
 
         let _ = std::fs::remove_file(&path);

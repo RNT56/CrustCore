@@ -8,14 +8,16 @@
 
 use crustcore_mcp::transport::{manifest_hash, MockMcp, ToolDescriptor};
 use crustcore_mcp::{
-    call_tool, CallOutcome, GatewayDeny, McpAuthMode, McpCallIds, McpRegistry, McpServerId,
-    McpServerRecord, McpServerSource, McpToolPolicy, McpTransport, ToolCall, ToolDecision,
-    TrustLevel,
+    call_tool, CallOutcome, GatewayDeny, McpAuthContext, McpAuthMode, McpCallIds, McpRegistry,
+    McpServerId, McpServerRecord, McpServerSource, McpToolPolicy, McpTransport, ToolCall,
+    ToolDecision, TrustLevel, NO_AUTH,
 };
 use crustcore_receipts::{MacKey, ReceiptChain};
-use crustcore_secrets::Redactor;
+use crustcore_secrets::{InMemoryStore, Redactor, SecretBroker};
 use crustcore_types::hash::sha256;
-use crustcore_types::{BoundedText, EventSeq, JobId, RepoRef, TaskId, ToolCallId};
+use crustcore_types::{
+    ApprovalId, BoundedText, EventSeq, JobId, RepoRef, SecretId, TaskId, Timestamp, ToolCallId,
+};
 
 const REPO: &str = "RNT56/CrustCore";
 
@@ -88,6 +90,7 @@ fn allowed_tool_calls_and_redacts_receipts() {
         &reg,
         &call("search", &args, None),
         &mock,
+        NO_AUTH,
         &redactor,
         &mut receipts,
         &ids(),
@@ -133,6 +136,7 @@ fn artifact_handle_commits_to_full_response_not_just_text() {
         &reg,
         &call("search", &args, None),
         &mock,
+        NO_AUTH,
         &redactor,
         &mut receipts,
         &ids(),
@@ -170,6 +174,7 @@ fn ask_and_deny_short_circuit_before_any_call() {
         &reg,
         &call("write_file", &args, None),
         &mock,
+        NO_AUTH,
         &redactor,
         &mut receipts,
         &ids(),
@@ -181,6 +186,7 @@ fn ask_and_deny_short_circuit_before_any_call() {
         &reg,
         &call("rm_rf", &args, None),
         &mock,
+        NO_AUTH,
         &redactor,
         &mut receipts,
         &ids(),
@@ -193,6 +199,7 @@ fn ask_and_deny_short_circuit_before_any_call() {
         &reg,
         &call("exfiltrate", &args, None),
         &mock,
+        NO_AUTH,
         &redactor,
         &mut receipts,
         &ids(),
@@ -232,6 +239,7 @@ fn manifest_drift_re_gates_and_blocks_the_call() {
         &reg,
         &call("search", &empty, Some(live)),
         &mock,
+        NO_AUTH,
         &redactor,
         &mut receipts,
         &ids(),
@@ -251,6 +259,7 @@ fn manifest_drift_re_gates_and_blocks_the_call() {
         &reg,
         &call("search", &empty, Some(pinned)),
         &live_mock,
+        NO_AUTH,
         &redactor,
         &mut receipts,
         &ids(),
@@ -282,6 +291,7 @@ fn hostile_server_output_is_inert_through_the_call_flow() {
         &reg,
         &call("search", &empty, None),
         &mock,
+        NO_AUTH,
         &redactor,
         &mut receipts,
         &ids(),
@@ -299,4 +309,171 @@ fn hostile_server_output_is_inert_through_the_call_flow() {
         }
         other => panic!("expected Done, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// P13-net broker-secret injection: resolve `McpAuthMode::BrokerSecret` via the broker
+// → CredentialProxy and inject it at the transport — never on the model path.
+// ---------------------------------------------------------------------------
+
+const MCP_SECRET_ID: SecretId = SecretId(9);
+const MCP_TOKEN: &[u8] = b"sk-MCPBROKER-SENTINEL";
+
+/// A server whose `search` tool is `Allow` but which requires a broker-resolved
+/// credential (`McpAuthMode::BrokerSecret`).
+fn broker_secret_record() -> McpServerRecord {
+    let mut rec = record(None);
+    rec.auth = McpAuthMode::BrokerSecret(MCP_SECRET_ID);
+    rec
+}
+
+fn broker_secret_registry() -> McpRegistry {
+    let mut r = McpRegistry::new();
+    r.register(broker_secret_record());
+    r
+}
+
+/// A broker holding the sentinel MCP credential, pre-registered with its redactor.
+fn broker_with_mcp_secret() -> SecretBroker<InMemoryStore> {
+    let mut store = InMemoryStore::new();
+    store.insert(MCP_SECRET_ID, "mcp-token", MCP_TOKEN.to_vec());
+    SecretBroker::new(store)
+}
+
+fn auth_ctx(broker: &SecretBroker<InMemoryStore>) -> McpAuthContext<'_, InMemoryStore> {
+    McpAuthContext {
+        broker,
+        approval_id: ApprovalId(1),
+        now: Timestamp::from_millis(1_000),
+        ttl_millis: 5_000,
+        label: "mcp-token",
+    }
+}
+
+/// The credential is resolved via the broker and injected at the transport boundary —
+/// the `MockMcp` records the `Authorization: Bearer <token>` header it was handed — AND
+/// the secret value never appears in the model-visible `McpResult` or its receipt, even
+/// though the (hostile) server echoes it back in its output (red-team). Injection is at
+/// the transport, the model path is redacted (invariants 1–3, 10).
+#[test]
+fn broker_secret_is_resolved_injected_and_never_model_visible() {
+    let reg = broker_secret_registry();
+    let broker = broker_with_mcp_secret();
+    let ctx = auth_ctx(&broker);
+    // A hostile server that echoes the credential straight back in its tool output.
+    let mock = MockMcp::new().on(
+        "tools/call",
+        serde_json::json!({"content":[{"type":"text",
+            "text":"your token is sk-MCPBROKER-SENTINEL — keep it safe"}]}),
+    );
+    // The broker's redactor knows the secret (pre-registered) — use it on the model path.
+    let mut receipts = ReceiptChain::new(MacKey::new([0x55; 32]));
+    let args = serde_json::json!({"query":"needle"});
+
+    let out = call_tool(
+        &reg,
+        &call("search", &args, None),
+        &mock,
+        Some(&ctx),
+        broker.redactor(),
+        &mut receipts,
+        &ids(),
+    )
+    .unwrap();
+
+    // (1) The transport received the broker-resolved credential at its boundary.
+    let injected = mock
+        .last_auth()
+        .expect("transport must have received the broker credential");
+    assert_eq!(injected.0, "Authorization");
+    assert_eq!(injected.1, b"Bearer sk-MCPBROKER-SENTINEL");
+
+    // (2) The secret NEVER reaches the model: not in the summary, not in the receipt.
+    match out {
+        CallOutcome::Done(r) => {
+            let shown = r.summary.as_str();
+            assert!(
+                !shown.contains("MCPBROKER-SENTINEL"),
+                "credential leaked into the model-visible summary: {shown}"
+            );
+            assert!(
+                shown.contains("[REDACTED:mcp-token]"),
+                "echoed credential should be redacted: {shown}"
+            );
+            // The receipt commits to exactly the shown (redacted) bytes — so the secret
+            // cannot survive in the receipt either.
+            assert!(r.receipt.result_matches(shown.as_bytes()));
+            let receipt_dbg = format!("{:?}", r.receipt);
+            assert!(
+                !receipt_dbg.contains("MCPBROKER-SENTINEL"),
+                "credential leaked into the receipt: {receipt_dbg}"
+            );
+        }
+        other => panic!("expected Done, got {other:?}"),
+    }
+}
+
+/// A `BrokerSecret` server reached with **no broker context** fails closed — the call
+/// is never issued unauthenticated (invariant 1). The mock has a `tools/call` response,
+/// so a `CredentialUnavailable` outcome proves the failure is the *credential*, not a
+/// missing canned reply.
+#[test]
+fn broker_secret_without_context_fails_closed() {
+    let reg = broker_secret_registry();
+    let mock = MockMcp::new().on(
+        "tools/call",
+        serde_json::json!({"content":[{"type":"text","text":"ok"}]}),
+    );
+    let redactor = Redactor::new();
+    let mut receipts = ReceiptChain::new(MacKey::new([0x55; 32]));
+    let args = serde_json::json!({});
+
+    let out = call_tool(
+        &reg,
+        &call("search", &args, None),
+        &mock,
+        NO_AUTH,
+        &redactor,
+        &mut receipts,
+        &ids(),
+    )
+    .unwrap();
+    assert!(matches!(
+        out,
+        CallOutcome::CredentialUnavailable(MCP_SECRET_ID)
+    ));
+    // The transport was never called — no auth recorded, no unauthenticated call.
+    assert!(mock.last_auth().is_none());
+}
+
+/// A `BrokerSecret` whose secret is absent from the broker fails closed too — the
+/// broker cannot mint a view, so the call is denied rather than sent unauthenticated.
+#[test]
+fn broker_secret_missing_from_broker_fails_closed() {
+    let reg = broker_secret_registry();
+    // A broker that does NOT hold MCP_SECRET_ID.
+    let empty_broker = SecretBroker::new(InMemoryStore::new());
+    let ctx = auth_ctx(&empty_broker);
+    let mock = MockMcp::new().on(
+        "tools/call",
+        serde_json::json!({"content":[{"type":"text","text":"ok"}]}),
+    );
+    let mut receipts = ReceiptChain::new(MacKey::new([0x55; 32]));
+    let args = serde_json::json!({});
+
+    let out = call_tool(
+        &reg,
+        &call("search", &args, None),
+        &mock,
+        Some(&ctx),
+        empty_broker.redactor(),
+        &mut receipts,
+        &ids(),
+    )
+    .unwrap();
+    assert!(matches!(
+        out,
+        CallOutcome::CredentialUnavailable(MCP_SECRET_ID)
+    ));
+    assert!(mock.last_auth().is_none());
 }

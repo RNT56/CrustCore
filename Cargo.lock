@@ -337,6 +337,7 @@ dependencies = [
 name = "crustcore-index"
 version = "0.4.0"
 dependencies = [
+ "crustcore-netproto",
  "crustcore-secrets",
  "crustcore-types",
 ]
@@ -459,6 +460,8 @@ dependencies = [
  "crustcore-receipts",
  "crustcore-secrets",
  "crustcore-types",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]

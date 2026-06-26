@@ -8,8 +8,15 @@
 //! The vector store + cosine nearest-neighbor + [`semantic_select`] are **pure `f32`
 //! math — dependency-free** and fully CI-testable with the deterministic [`HashEmbedder`]
 //! (a bag-of-words stand-in). The *real* embedding call — text → vector via an embedding
-//! provider — is the only deferred part: it routes through the spawned `crustcore-net`
-//! helper (reusing the P7-live transport) behind the [`Embedder`] trait, `TODO(B3-embed-live)`.
+//! provider — routes through the spawned `crustcore-net` helper (reusing the P7-live
+//! transport) behind the [`Embedder`] trait: [`NetEmbedder`] (B3-embed-live). It is
+//! **additive** — [`HashEmbedder`] stays the dev/CI default everywhere; only an explicitly
+//! constructed [`NetEmbedder`] reaches the live provider. The std-only `crustcore-netproto`
+//! protocol carries the request to the sidecar *process* (no HTTP/TLS linked into this
+//! crate, which is itself non-nano behind the `index` feature). The only seam that cannot
+//! run in CI without a real provider is *spawning* the sidecar (`SpawnedHelper::spawn`,
+//! `TODO(B3-embed-live)`); the protocol round-trip itself is CI-tested over an in-memory
+//! pipe.
 //! A brute-force cosine scan over the bounded memory set needs no vector-DB dependency
 //! (mirroring P14-store's dependency-free design). For larger bounded sets, [`AnnIndex`]
 //! adds a dependency-free **approximate nearest-neighbor** layer (B3-ann, implemented):
@@ -20,6 +27,9 @@
 //! [splitmix64](https://en.wikipedia.org/wiki/Xorshift) PRNG (no wall clock, no std rng,
 //! no per-run randomness).
 
+use std::io::{BufRead, Write};
+
+use crustcore_netproto::{EmbedRequest, NetHelper, ProtoError, Role};
 use crustcore_secrets::Redactor;
 
 use crate::{build_bundle, ContextBundle, ContextCandidate, MemoryEntry};
@@ -28,8 +38,15 @@ use crate::{build_bundle, ContextBundle, ContextCandidate, MemoryEntry};
 pub const EMBED_DIM: usize = 256;
 
 /// Produces a bounded embedding vector for a (bounded) text. The live implementation
-/// routes the text through the net helper's embedding provider (`TODO(B3-embed-live)`);
-/// the dev/CI implementation is [`HashEmbedder`] (deterministic, dependency-free).
+/// ([`NetEmbedder`], B3-embed-live) routes the text through the spawned `crustcore-net`
+/// helper's embedding provider; the dev/CI implementation is [`HashEmbedder`]
+/// (deterministic, dependency-free) and stays the default everywhere.
+///
+/// `embed` is **infallible** — it always returns a `Vec<f32>`. A live implementation that
+/// hits a transport/provider error must therefore handle it internally and still return a
+/// usable, fixed-dimension vector (it must never panic, hang, or return an empty vector
+/// that would silently disable retrieval). [`NetEmbedder`] does this by falling back to a
+/// deterministic [`HashEmbedder`] of the same dimension.
 pub trait Embedder {
     /// Embeds `text` into a vector. Implementations should return a fixed dimension.
     fn embed(&self, text: &str) -> Vec<f32>;
@@ -63,6 +80,138 @@ fn fnv1a(bytes: &[u8]) -> u64 {
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     h
+}
+
+/// The default [`Role`] a [`NetEmbedder`] routes embedding requests for: [`Role::Research`]
+/// (the cheap/fast tier — embeddings are high-volume, low-reasoning). The router resolves
+/// it against the dynamic registry's embedding-capable models (invariant 17); it is never a
+/// hard-coded model name.
+pub const DEFAULT_EMBED_ROLE: Role = Role::Research;
+
+/// The **live** [`Embedder`] (B3-embed-live): embeds text → vector by routing the request
+/// through the spawned `crustcore-net` helper over the std-only `crustcore-netproto`
+/// protocol. The heavy provider stack (HTTP/TLS/embedding SDKs) lives behind that helper
+/// *process*; this crate links **none** of it — exactly as nano spawns `git`/`codex`
+/// (invariants 19, 20). It is **additive**: [`HashEmbedder`] remains the dev/CI default,
+/// and a [`NetEmbedder`] only exists where one is explicitly constructed.
+///
+/// It is generic over the protocol client's byte channel (`W`/`R`) so the live spawned
+/// path (`SpawnedHelper`'s stdio) and an in-memory test pipe share one implementation. The
+/// client is held behind a [`RefCell`](std::cell::RefCell) because [`Embedder::embed`] takes
+/// `&self` while the protocol exchange needs `&mut` access to write the request and read the
+/// reply.
+///
+/// **Error / fallback contract.** [`Embedder::embed`] is infallible, so a protocol or
+/// provider error cannot surface as an `Err`. Instead [`NetEmbedder`] falls back to a
+/// deterministic [`HashEmbedder`] of the same dimension and returns *that* vector — so a
+/// transient sidecar failure degrades retrieval to the keyword-flavoured stand-in rather
+/// than panicking, hanging, or silently emitting a zero/empty vector (which would make
+/// every cosine `0` and quietly disable semantic recall). This keeps memory's
+/// inert/redacted/never-authority contract intact: a degraded embedding only changes *which*
+/// prior observations surface, never their (non-)authority.
+pub struct NetEmbedder<W: Write, R: BufRead> {
+    helper: std::cell::RefCell<NetHelper<W, R>>,
+    role: Role,
+    fallback_dim: usize,
+    max_cost_micros: u64,
+}
+
+impl<W: Write, R: BufRead> NetEmbedder<W, R> {
+    /// Builds a live embedder over an existing protocol client (`NetHelper`). Use this with
+    /// a spawned helper's [`NetHelper`](crustcore_netproto::SpawnedHelper::helper) in
+    /// production, or with an in-memory `NetHelper::new(writer, reader)` in tests. Defaults
+    /// to [`DEFAULT_EMBED_ROLE`], an [`EMBED_DIM`] fallback dimension, and no per-request
+    /// cost ceiling (`0`).
+    #[must_use]
+    pub fn new(helper: NetHelper<W, R>) -> Self {
+        NetEmbedder {
+            helper: std::cell::RefCell::new(helper),
+            role: DEFAULT_EMBED_ROLE,
+            fallback_dim: EMBED_DIM,
+            max_cost_micros: 0,
+        }
+    }
+
+    /// Overrides the abstract [`Role`] embedding requests route for (default
+    /// [`DEFAULT_EMBED_ROLE`]).
+    #[must_use]
+    pub fn with_role(mut self, role: Role) -> Self {
+        self.role = role;
+        self
+    }
+
+    /// Overrides the hard per-request cost ceiling in micros (`0` = unlimited; the default).
+    /// The sidecar's budget provider refuses/degrades rather than breach it (invariant 11).
+    #[must_use]
+    pub fn with_max_cost_micros(mut self, micros: u64) -> Self {
+        self.max_cost_micros = micros;
+        self
+    }
+
+    /// The dimension of the deterministic fallback vector returned on a protocol/provider
+    /// error (default [`EMBED_DIM`]).
+    #[must_use]
+    pub fn with_fallback_dim(mut self, dim: usize) -> Self {
+        self.fallback_dim = dim;
+        self
+    }
+
+    /// Performs the protocol round-trip: send a single-input [`EmbedRequest`] and return the
+    /// first returned vector. A protocol error, an empty `vectors` reply, or an
+    /// already-borrowed client (a re-entrant call) becomes a typed `Err` so the caller can
+    /// decide how to degrade — [`Embedder::embed`] maps any `Err` to the fallback.
+    ///
+    /// # Errors
+    /// [`ProtoError`] on a transport/decode failure, a sidecar-reported error, an empty
+    /// embedding reply, or a re-entrant borrow of the held client.
+    pub fn try_embed(&self, text: &str) -> Result<Vec<f32>, ProtoError> {
+        let req = EmbedRequest {
+            role: self.role,
+            inputs: vec![text.to_string()],
+            max_cost_micros: self.max_cost_micros,
+        };
+        let mut helper = self
+            .helper
+            .try_borrow_mut()
+            .map_err(|_| ProtoError::Io("net embedder client already in use".into()))?;
+        let result = helper.embed(&req)?;
+        result
+            .vectors
+            .into_iter()
+            .next()
+            .ok_or_else(|| ProtoError::Decode("embedding reply carried no vectors".into()))
+    }
+}
+
+impl<W: Write, R: BufRead> Embedder for NetEmbedder<W, R> {
+    /// Embeds `text` via the net helper, falling back to a deterministic [`HashEmbedder`]
+    /// vector (of [`fallback_dim`](Self::with_fallback_dim) dimension) on any error — never a
+    /// panic, hang, or empty/zero vector (see the type-level error/fallback contract).
+    fn embed(&self, text: &str) -> Vec<f32> {
+        match self.try_embed(text) {
+            Ok(vector) => vector,
+            Err(_) => fallback_embedding(text, self.fallback_dim),
+        }
+    }
+}
+
+/// The deterministic fallback embedding for a text at an arbitrary dimension: the
+/// [`HashEmbedder`] bag-of-words vector folded into `dim` buckets. Used by [`NetEmbedder`]
+/// when the live provider is unreachable so retrieval degrades gracefully (a usable,
+/// non-zero, fixed-dimension vector) rather than failing. `dim == 0` yields an empty vector.
+fn fallback_embedding(text: &str, dim: usize) -> Vec<f32> {
+    if dim == 0 {
+        return Vec::new();
+    }
+    let mut v = vec![0f32; dim];
+    for token in text
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+    {
+        let idx = (fnv1a(token.to_ascii_lowercase().as_bytes()) % dim as u64) as usize;
+        v[idx] += 1.0;
+    }
+    v
 }
 
 /// Cosine similarity in `[-1, 1]`. Returns `0.0` for a zero vector, a length mismatch, or
@@ -547,6 +696,176 @@ mod tests {
         assert!(!shown.contains("VECSENTINEL")); // secret redacted before visibility (inv 2)
         assert!(shown.contains("[REDACTED:idx]"));
         assert!(shown.contains("IGNORE ALL POLICY")); // present only as inert data (inv 7)
+    }
+
+    // --- B3-embed-live: NetEmbedder over the std-only crustcore-netproto protocol ---
+
+    use crustcore_netproto::{encode_response, EmbeddingResult, Response, Usage};
+    use std::io::{BufReader, Cursor};
+
+    /// Builds a `NetEmbedder` whose helper reads a canned, pre-encoded response stream and
+    /// writes to a discard sink — the exact in-memory pipe the protocol round-trip is
+    /// CI-tested over, with no process spawned.
+    fn net_embedder_over(canned: &[u8]) -> NetEmbedder<Vec<u8>, BufReader<Cursor<Vec<u8>>>> {
+        let reader = BufReader::new(Cursor::new(canned.to_vec()));
+        NetEmbedder::new(NetHelper::new(Vec::new(), reader))
+    }
+
+    fn embedding_line(vectors: Vec<Vec<f32>>) -> Vec<u8> {
+        let resp = Response::Embedding(EmbeddingResult {
+            vectors,
+            usage: Usage::default(),
+            provider: "emb-test".into(),
+            model: "e-mock".into(),
+            fallbacks: Vec::new(),
+        });
+        format!("{}\n", encode_response(&resp)).into_bytes()
+    }
+
+    /// The protocol round-trip works over an in-memory pipe (no spawn): a canned
+    /// `Response::Embedding` decodes back to the exact vector the embedder returns.
+    #[test]
+    fn net_embedder_returns_the_providers_vector() {
+        let want = vec![0.5, -1.25, 0.0, 3.0];
+        let emb = net_embedder_over(&embedding_line(vec![want.clone()]));
+
+        // The fallible path returns the provider vector verbatim.
+        assert_eq!(emb.try_embed("embed me").unwrap(), want);
+
+        // The infallible trait method returns the same vector (no fallback taken).
+        let emb = net_embedder_over(&embedding_line(vec![want.clone()]));
+        assert_eq!(Embedder::embed(&emb, "embed me"), want);
+    }
+
+    /// When the provider returns a batch, only the first vector (this is a single-input
+    /// request) is used.
+    #[test]
+    fn net_embedder_uses_the_first_vector() {
+        let first = vec![1.0, 2.0, 3.0];
+        let canned = embedding_line(vec![first.clone(), vec![9.0, 9.0, 9.0]]);
+        let emb = net_embedder_over(&canned);
+        assert_eq!(emb.try_embed("x").unwrap(), first);
+    }
+
+    /// A sidecar-reported error: `try_embed` surfaces a typed `Err`, and the infallible
+    /// trait method degrades to a deterministic, non-zero, fixed-dimension fallback vector
+    /// (never a panic, hang, or empty/zero vector).
+    #[test]
+    fn net_embedder_falls_back_to_hash_on_error() {
+        let err = format!(
+            "{}\n",
+            encode_response(&Response::Error("no embedding model available".into()))
+        )
+        .into_bytes();
+
+        // try_embed → typed Err.
+        let emb = net_embedder_over(&err);
+        assert!(matches!(
+            emb.try_embed("verify clippy"),
+            Err(ProtoError::Decode(_))
+        ));
+
+        // embed → deterministic HashEmbedder-shaped fallback of the right dimension.
+        let emb = net_embedder_over(&err);
+        let got = Embedder::embed(&emb, "verify clippy");
+        assert_eq!(got.len(), EMBED_DIM);
+        assert_eq!(got, HashEmbedder.embed("verify clippy"));
+        // Non-zero (retrieval is not silently disabled) and finite.
+        assert!(got.iter().any(|x| *x != 0.0));
+        assert!(got.iter().all(|x| x.is_finite()));
+    }
+
+    /// A truncated stream (EOF before any response) degrades to the fallback, not a hang or
+    /// panic — `UnexpectedEof` is just another error to absorb.
+    #[test]
+    fn net_embedder_falls_back_on_eof() {
+        let emb = net_embedder_over(b"");
+        assert!(matches!(emb.try_embed("x"), Err(ProtoError::UnexpectedEof)));
+        let emb = net_embedder_over(b"");
+        assert_eq!(Embedder::embed(&emb, "abc"), HashEmbedder.embed("abc"));
+    }
+
+    /// An embedding reply that carries no vectors is treated as an error (and falls back),
+    /// never an empty embedding that would make every cosine `0`.
+    #[test]
+    fn net_embedder_treats_empty_vectors_as_error() {
+        let emb = net_embedder_over(&embedding_line(Vec::new()));
+        assert!(matches!(emb.try_embed("x"), Err(ProtoError::Decode(_))));
+    }
+
+    /// The fallback dimension is configurable; the fallback vector matches that width.
+    #[test]
+    fn net_embedder_fallback_dim_is_configurable() {
+        let reader = BufReader::new(Cursor::new(Vec::new())); // EOF → error → fallback
+        let emb = NetEmbedder::new(NetHelper::new(Vec::new(), reader)).with_fallback_dim(64);
+        let got = Embedder::embed(&emb, "some text with tokens");
+        assert_eq!(got.len(), 64);
+        assert!(got.iter().any(|x| *x != 0.0));
+    }
+
+    /// A `NetEmbedder` plugs straight into [`semantic_select`] (it *is* an `Embedder`): a
+    /// canned provider vector for the query drives ranking, and the surfaced fragment stays
+    /// redacted/inert (memory is never authority).
+    #[test]
+    fn net_embedder_drives_semantic_select() {
+        // Pick a query vector that aligns with the "relevant" candidate's HashEmbedder
+        // vector so it ranks first; the candidates themselves are embedded deterministically.
+        let e = HashEmbedder;
+        let relevant = "the verify command is cargo xtask verify";
+        let unrelated = "an unrelated note about formatting conventions";
+        let query_vec = e.embed("what is the verify command");
+
+        let emb = net_embedder_over(&embedding_line(vec![query_vec.clone()]));
+        let q = Embedder::embed(&emb, "what is the verify command");
+        assert_eq!(q, query_vec); // came from the provider, not the fallback
+
+        let mut redactor = Redactor::new();
+        redactor.register("idx", b"sk-NETSENTINEL");
+        let cands = vec![
+            (
+                ContextCandidate {
+                    source: MemorySource::RepoFile,
+                    kind: MemoryKind::Convention,
+                    text: unrelated,
+                },
+                e.embed(unrelated),
+            ),
+            (
+                ContextCandidate {
+                    source: MemorySource::ToolObservation,
+                    kind: MemoryKind::CommandMemory,
+                    text: relevant,
+                },
+                e.embed(relevant),
+            ),
+        ];
+        let bundle = semantic_select(&q, &cands, &redactor);
+        assert!(!bundle.fragments.is_empty());
+        assert!(bundle.fragments[0]
+            .text
+            .as_str()
+            .contains("cargo xtask verify"));
+    }
+
+    /// The real spawned-sidecar path (`SpawnedHelper::spawn`) is the only seam that needs a
+    /// process/provider — ignored in CI, documented as `TODO(B3-embed-live)`. The protocol
+    /// behavior it exercises is already covered by the in-memory tests above.
+    #[test]
+    #[ignore = "requires a spawned crustcore-net sidecar with a live embedding provider (B3-embed-live)"]
+    fn net_embedder_over_a_spawned_sidecar() {
+        use crustcore_netproto::SpawnedHelper;
+        // TODO(B3-embed-live): point this at the real `crustcore-net` helper binary once a
+        // live embedding provider is configured; the in-memory round-trip above already
+        // proves the request/response mapping.
+        let mut spawned =
+            SpawnedHelper::spawn("crustcore-net", &["helper"]).expect("spawn net helper");
+        let req = EmbedRequest {
+            role: DEFAULT_EMBED_ROLE,
+            inputs: vec!["hello".to_string()],
+            max_cost_micros: 0,
+        };
+        let result = spawned.helper().embed(&req).expect("embed via sidecar");
+        assert!(!result.vectors.is_empty());
     }
 
     // --- B3-ann: approximate nearest-neighbor (random-hyperplane LSH) ---

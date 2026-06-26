@@ -11,8 +11,9 @@
 //! - [`InMemoryExporter`] — the CI default. It captures every emitted span/metric so
 //!   tests can assert span shape, names, bounding, and (crucially) that no secret
 //!   sentinel ever reaches it.
-//! - [`otlp::OtlpExporter`] — behind the `otlp` cargo feature. The real OTLP socket
-//!   is `TODO(C6-otlp-live)`; the deterministic core never needs it.
+//! - [`otlp::OtlpExporter`] — behind the `otlp` cargo feature. The OTLP/HTTP+JSON
+//!   exporter is implemented (IR→JSON serialization + a `ureq` POST); only the live
+//!   socket smoke is `TODO(C6-otlp-live)`. The deterministic core never needs it.
 
 #[cfg(feature = "otlp")]
 pub mod otlp;

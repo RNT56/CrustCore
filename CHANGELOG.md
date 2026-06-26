@@ -30,6 +30,34 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **`C6-otlp-live` — real OTLP/HTTP+JSON trace exporter (`crustcore-telemetry`,
+  `otlp` feature).** Replaces the buffer-dropping stub: serializes the post-redaction
+  span IR to the OTLP/HTTP **JSON** schema (resourceSpans → scopeSpans → spans;
+  `intValue` for numeric attrs like `gen_ai.usage.*`, `stringValue` otherwise) and POSTs
+  to the endpoint (default `127.0.0.1:4318/v1/traces`) via `ureq` — **not** the heavy
+  OTel/tonic/tokio SDK. Per-request auth resolves **only** through the broker →
+  `CredentialProxy::bearer` at send time; a `BrokerBearer` endpoint refuses to POST
+  unauthenticated (fail-closed); errors never panic or leak. `ureq` 2.12 + `serde_json`
+  are optional/gated to `otlp` (default tree links neither — confirmed). The IR→JSON
+  serialization is CI-tested; only the live socket is `#[ignore]`d.
+
+- **`B3-embed-live` — `NetEmbedder` (`crustcore-index`).** Live text→vector embedding
+  via the spawned `crustcore-net` helper over the std-only `crustcore-netproto`
+  protocol, behind the existing `Embedder` trait. `HashEmbedder` stays the CI default;
+  `NetEmbedder` falls back to it on any protocol/provider error (the trait is
+  infallible) — a degraded embedding only changes *which* inert observation surfaces.
+  Protocol round-trip CI-tested over an in-memory helper; the spawned path is
+  `#[ignore]`d. Only std-only `crustcore-netproto` added; nano unaffected.
+
+- **`P13-net` — MCP broker-secret injection (`crustcore-mcp`).** `call_tool` now
+  resolves `McpAuthMode::BrokerSecret` via the broker → `CredentialProxy` and injects
+  an `Authorization` header at the `McpTransport` boundary (the trait `call` gained an
+  `Option<&HeaderInjection>` auth arg). Fails closed
+  (`CallOutcome::CredentialUnavailable`) if the credential can't be minted — never an
+  unauthenticated call. The secret never reaches the model, the receipt, or `McpResult`
+  (red-team: a server echoing the token gets it `[REDACTED]`). Only the live HTTP
+  transport (`TODO(P13-net-http)`) remains.
+
 - **`P8-store` OS keychain loaders (`crustcore-secrets`, `macos-keychain` /
   `linux-keyring` features).** Dependency-free loaders that fetch secrets from the
   macOS Keychain (`security find-generic-password -w`) or Linux Secret Service

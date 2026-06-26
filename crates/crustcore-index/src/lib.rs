@@ -21,10 +21,14 @@
 //! format (like the event-log frame and the secret vault), so memory survives a restart;
 //! and **B3-vector-memory** adds [`embed`]-backed **semantic retrieval** ([`embed::cosine`],
 //! [`embed::VectorMemory`], [`embed::semantic_select`]) — pure `f32` math, dependency-free,
-//! still redact-then-bound and never-authority. Still deferred: the live embedding call
-//! (`TODO(B3-embed-live)`, via the net helper), the live `git ls-files`/`git grep`
-//! invocation (`TODO(P14-exec)`), and AST/tree-sitter/LSP code-intel (`TODO(P14-intel)`);
-//! the deterministic transforms they feed are implemented now.
+//! still redact-then-bound and never-authority; and **B3-embed-live** wires the live
+//! text→vector call through the spawned `crustcore-net` helper behind the same `Embedder`
+//! trait ([`embed::NetEmbedder`], std-only `crustcore-netproto`, no HTTP/TLS linked,
+//! [`embed::HashEmbedder`] still the dev/CI default). Still deferred: only *spawning* the
+//! live sidecar (`TODO(B3-embed-live)`; the protocol round-trip is CI-tested), the live
+//! `git ls-files`/`git grep` invocation (`TODO(P14-exec)`), and AST/tree-sitter/LSP
+//! code-intel (`TODO(P14-intel)`); the deterministic transforms they feed are implemented
+//! now.
 #![forbid(unsafe_code)]
 
 use crustcore_secrets::{ModelVisibleText, Redactor};

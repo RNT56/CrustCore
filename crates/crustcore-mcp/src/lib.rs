@@ -12,19 +12,27 @@
 //! model context or the sandbox — invariants 1–3) and only the **used** tool stubs
 //! ever entering model context (invariant 20).
 //!
-//! This module is the std-only trust/policy/redaction/receipt core. The live MCP
-//! JSON-RPC transport and sandboxed stub execution are `TODO(P13-net)` (they need
-//! network + the Phase-4 sandbox); the trust-critical gateway logic is fully tested.
+//! This module is the std-only trust/policy/redaction/receipt core. The gateway call
+//! flow ([`call_tool`]) resolves a server's `McpAuthMode::BrokerSecret` via the broker
+//! → [`crustcore_secrets::CredentialProxy`] and injects it at the transport boundary
+//! (P13-net), fully tested with an in-process `MockMcp`. What remains `TODO(P13-net)`
+//! is only the live network transport (the HTTP transport that would carry the injected
+//! header on the wire — `TODO(P13-net-http)` in `transport.rs`) and sandboxed stub
+//! execution (they need real network + the Phase-4 sandbox); the trust-critical gateway
+//! and credential-resolution logic are fully tested.
 #![forbid(unsafe_code)]
 
 pub mod server;
 pub mod transport;
 
 use crustcore_receipts::{ReceiptChain, ReceiptParams, ToolReceipt};
-use crustcore_secrets::{ModelVisibleText, Redactor};
+use crustcore_secrets::{
+    CredentialProxy, HeaderInjection, ModelVisibleText, Redactor, SecretBroker, SecretStore,
+};
 use crustcore_types::hash::sha256;
 use crustcore_types::{
-    ArtifactId, BoundedText, EventSeq, JobId, RepoRef, SecretId, TaskId, ToolCallId,
+    ApprovalId, ArtifactId, BoundedText, EventSeq, JobId, RepoRef, SecretId, TaskId, Timestamp,
+    ToolCallId,
 };
 
 /// Cap on a model-visible MCP result summary (bounded; not megabytes — invariant
@@ -333,6 +341,71 @@ pub enum CallOutcome {
     Denied(GatewayDeny),
     /// The tool's policy is `Ask` — an approval must be obtained before calling.
     NeedsApproval,
+    /// The gateway allowed the call, but the server's `McpAuthMode::BrokerSecret`
+    /// credential could **not** be resolved (missing/expired/no broker provided) — so
+    /// the call **fails closed**: it is never issued *unauthenticated* (invariant 1).
+    /// No transport call was made.
+    CredentialUnavailable(SecretId),
+}
+
+/// The trusted context [`call_tool`] needs to **resolve** a server's
+/// `McpAuthMode::BrokerSecret` into an injectable credential at call time (P13-net;
+/// `docs/mcp.md` §4 step 4). It carries the [`SecretBroker`] (the only thing that can
+/// materialize a secret), the **approval** that authorizes this use, the current time
+/// (for the broker's one-shot/expiry checks), and the TTL of the minted view.
+///
+/// The model never sees any of this: the broker hands back a non-model-visible
+/// [`HeaderInjection`] via [`CredentialProxy::bearer`], whose bytes flow only to the
+/// transport (invariants 1–3). A server with `McpAuthMode::None` ignores this context
+/// entirely; a `BrokerSecret` server with no context (or an unresolvable secret) fails
+/// closed ([`CallOutcome::CredentialUnavailable`]) — never an unauthenticated call.
+pub struct McpAuthContext<'b, S: SecretStore> {
+    /// The broker that materializes the credential (the only authority on secret bytes).
+    pub broker: &'b SecretBroker<S>,
+    /// The approval authorizing this credential use (binds the minted view).
+    pub approval_id: ApprovalId,
+    /// The current time, for the broker's one-shot view expiry checks.
+    pub now: Timestamp,
+    /// How long (ms) the minted view stays valid — bounded blast radius.
+    pub ttl_millis: u64,
+    /// The non-sensitive label used in the redaction marker (e.g. the secret's handle
+    /// label). Never the value.
+    pub label: &'b str,
+}
+
+/// A convenience "no broker context" for [`call_tool`] when every involved server is
+/// `McpAuthMode::None`. Spelling the absent context's store type once here keeps the
+/// common unauthenticated call site free of a turbofish: pass [`NO_AUTH`]. A
+/// `BrokerSecret` server reached with `NO_AUTH` correctly fails closed
+/// ([`CallOutcome::CredentialUnavailable`]).
+pub type NoAuth<'b> = McpAuthContext<'b, crustcore_secrets::InMemoryStore>;
+
+/// The "no broker context" value to pass to [`call_tool`] for unauthenticated
+/// (`McpAuthMode::None`) servers. See [`NoAuth`].
+pub const NO_AUTH: Option<&'static NoAuth<'static>> = None;
+
+/// Resolves a server's [`McpAuthMode`] into an optional injectable credential for the
+/// transport. `None` auth (or — defensively — a missing context) yields `Ok(None)`: an
+/// unauthenticated call is correct for a `None` server. A `BrokerSecret` server with no
+/// context or an unresolvable/expired secret yields `Err(secret_id)` so the caller can
+/// **fail closed** rather than call unauthenticated (invariant 1). The minted
+/// [`HeaderInjection`] holds the secret bytes off the model path (invariants 1–3).
+fn resolve_auth<S: SecretStore>(
+    auth: McpAuthMode,
+    ctx: Option<&McpAuthContext<'_, S>>,
+) -> Result<Option<HeaderInjection>, SecretId> {
+    let McpAuthMode::BrokerSecret(secret_id) = auth else {
+        // `McpAuthMode::None`: no credential is needed; the call goes unauthenticated.
+        return Ok(None);
+    };
+    // From here a credential is REQUIRED; any failure must fail closed, not fall back.
+    let ctx = ctx.ok_or(secret_id)?;
+    let view = ctx
+        .broker
+        .authorize(secret_id, ctx.approval_id, ctx.now, ctx.ttl_millis)
+        .map_err(|_| secret_id)?;
+    let injection = CredentialProxy::bearer(&view, ctx.now, ctx.label).map_err(|_| secret_id)?;
+    Ok(Some(injection))
 }
 
 /// A request to call one MCP tool: the target server/tool, the repo context the call
@@ -365,19 +438,25 @@ pub struct ToolCall<'a> {
 /// returned (invariant 10). The response is never interpreted as a command (invariant
 /// 7); redaction runs over every field before anything is model-visible (invariant 2).
 ///
-/// **Credential handling (`TODO(P13-net)`):** a server's `McpAuthMode::BrokerSecret`
-/// is **not yet consumed** — the broker secret-proxy injection (`docs/mcp.md` §4 step
-/// 4) is the deferred seam marked in the body; until it lands, only `McpAuthMode::None`
-/// servers authenticate. By construction the credential will be injected at the
-/// transport, never in `args`, the model context, or a log (invariants 1–3): the args
-/// and the redacted summary that flow through here carry no credential.
+/// **Credential handling (P13-net):** on `Allow`, the server's [`McpAuthMode`] is
+/// resolved via [`resolve_auth`] (`docs/mcp.md` §4 step 4) **after** the gateway and
+/// **before** the transport call. A `McpAuthMode::BrokerSecret` is materialized through
+/// the [`McpAuthContext`]'s [`SecretBroker`] → [`CredentialProxy::bearer`] into a
+/// non-model-visible [`HeaderInjection`] that is handed to the transport, never placed
+/// in `args`, the response, the model context, or a log (invariants 1–3). If the
+/// credential cannot be resolved (no context, missing/expired secret) the call **fails
+/// closed** as [`CallOutcome::CredentialUnavailable`] — it is never issued
+/// unauthenticated (invariant 1). A `McpAuthMode::None` server passes `auth = None` and
+/// calls unauthenticated, as before. The stdio transport ignores the header by
+/// construction (it has no header channel; see [`transport::StdioMcp::call`]).
 ///
 /// # Errors
 /// [`transport::McpError`] if an *authorized* call fails at the transport/RPC layer.
-pub fn call_tool(
+pub fn call_tool<S: SecretStore>(
     registry: &McpRegistry,
     call: &ToolCall,
     transport: &dyn transport::McpTransport,
+    auth_ctx: Option<&McpAuthContext<'_, S>>,
     redactor: &Redactor,
     receipts: &mut ReceiptChain,
     ids: &McpCallIds,
@@ -393,13 +472,24 @@ pub fn call_tool(
         GatewayDecision::Ask => return Ok(CallOutcome::NeedsApproval),
         GatewayDecision::Allow => {}
     }
-    // TODO(P13-net): resolve the server's `McpAuthMode::BrokerSecret` via the broker and
-    // hand the resolved credential to the transport here — never into `args` or the
-    // model context (invariants 1–3). Until that seam lands, only `McpAuthMode::None`
-    // servers authenticate.
+    // The gateway already proved the server is registered; read its auth mode. (A
+    // BrokerSecret server reached here only because the gate allowed *this tool* — the
+    // credential is what the call needs to actually authenticate to the server.)
+    let auth_mode = registry
+        .get(call.server)
+        .map_or(McpAuthMode::None, |r| r.auth);
+    // Resolve the credential via the broker → CredentialProxy at call time. Fail CLOSED
+    // if a required credential cannot be minted — never an unauthenticated call. The
+    // resolved header holds the secret bytes off the model path (invariants 1–3); it is
+    // injected at the transport boundary below, after the gateway Allow.
+    let injection = match resolve_auth(auth_mode, auth_ctx) {
+        Ok(maybe) => maybe,
+        Err(secret_id) => return Ok(CallOutcome::CredentialUnavailable(secret_id)),
+    };
     let raw = transport.call(
         "tools/call",
         serde_json::json!({ "name": call.tool, "arguments": call.args.clone() }),
+        injection.as_ref(),
     )?;
     // Hash + show the FULL canonical response (not a lossy text projection): the model
     // sees the complete result redacted then bounded, and the artifact handle commits to

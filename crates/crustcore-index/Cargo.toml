@@ -11,11 +11,20 @@ description = "Optional repo memory / code intelligence for CrustCore."
 [dependencies]
 crustcore-types = { workspace = true }
 crustcore-secrets = { workspace = true }
+# B3-embed-live: the std-only local helper protocol nano speaks to the spawned
+# `crustcore-net` sidecar. It links NO HTTP/TLS/provider stack (the heavy network
+# code lives behind the helper *process*), so it does not widen this crate's
+# dependency-light posture. `crustcore-index` is non-nano (behind the `index`
+# feature, never enabled by the nano build), so this never enters nano.
+crustcore-netproto = { workspace = true }
 # The std-only retrieval/compaction core (repo map/capsule, grep code-intel, memory
 # store, redacted+bounded context selection) is implemented; P14-store added a
-# dependency-free persistent memory snapshot, and B3-vector-memory added dependency-free
+# dependency-free persistent memory snapshot, B3-vector-memory added dependency-free
 # embedding-backed semantic retrieval (cosine NN + `semantic_select` over an `Embedder`
-# trait). Still deferred (all optional, never linked into nano): the live
-# `git ls-files`/`git grep` invocation (`TODO(P14-exec)`), the live text→vector embedding
-# call via the net helper (`TODO(B3-embed-live)`), and AST/tree-sitter/LSP code-intel
+# trait), and B3-embed-live wired the live text→vector call through the spawned
+# `crustcore-net` helper behind the same trait (`embed::NetEmbedder`, over the std-only
+# `crustcore-netproto`; `HashEmbedder` stays the dev/CI default). Still deferred (all
+# optional, never linked into nano): the live `git ls-files`/`git grep` invocation
+# (`TODO(P14-exec)`), *spawning* the live embedding sidecar (`TODO(B3-embed-live)`; the
+# protocol round-trip itself is CI-tested), and AST/tree-sitter/LSP code-intel
 # (`TODO(P14-intel)`). Memory is retrieved context, never authority.

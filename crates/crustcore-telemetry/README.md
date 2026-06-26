@@ -68,11 +68,14 @@ ids — never tool name, args, or result values (invariant 10).
 ## Layering
 
 The deterministic core (`project` + `semconv` + `redact` + `InMemoryExporter` +
-`run`) is fully CI-testable: **no network, no secrets, no SDK**. The heavy OTel/OTLP
-stack and broker-mediated endpoint auth live behind the `otlp` cargo feature
+`run`) is fully CI-testable: **no network, no secrets, no SDK**. The OTLP/HTTP+JSON
+exporter and broker-mediated endpoint auth live behind the `otlp` cargo feature
 (`export::otlp`, `auth`), **off by default**, and never enter the nano graph
-(invariants 19, 20). The live OTLP socket and per-request broker auth injection are
-`TODO(C6-otlp-live)`; the deterministic projection never needs them.
+(invariants 19, 20). It is **lightweight by design**: a small `ureq` POST + a
+`serde_json`-shaped body — **not** the heavy OTel/tonic/Tokio SDK. The IR→OTLP-JSON
+serialization (`OtlpExporter::spans_to_otlp_json`) is unit-tested without a network;
+only the live socket smoke (an actual POST to a running collector) is
+`TODO(C6-otlp-live)`. The default build links neither `ureq` nor `serde_json`.
 
 ```rust
 use crustcore_telemetry::{run_log, Config, InMemoryExporter, UsageBySeq};
