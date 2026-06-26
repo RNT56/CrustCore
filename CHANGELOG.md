@@ -30,6 +30,23 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **`crustcore-full` gains an `all` feature — the single "build everything" switch —
+  and is no longer stale.** `crustcore-full` now re-exports *every* runtime crate (it
+  was missing the chat front door + the Track C packs: `crustcore-chat`, `-flow`,
+  `-session`, `-telemetry`, `-dev`, `-index-rag`, `-toolkit`). Its new `all` feature
+  turns on **every** optional capability across every pack at once (net `live`+
+  `github-app`, secrets `vault-file`+`macos-keychain`+`linux-keyring`, index/`ast`,
+  index-rag `live`/`persist`/`ast`/`qdrant`/`lancedb`, telemetry `otlp`, mcp `http`,
+  sandbox `firecracker`+`windows-native`, daemon `live`, chat `terminal`, dev `serve`,
+  flow `live-flow`, session `live-session`). Default `crustcore-full` and the nano build
+  link **none** of the heavy stacks (verified by `cargo tree` + `forbidden-deps`).
+
+- **`cargo xtask verify` now runs an `all-features` composition gate** (`cargo build
+  --workspace --all-features --all-targets`) so a feature that only breaks when
+  *combined* with another can never regress. Verified the whole matrix composes:
+  `build`/`clippy -D warnings`/`test` all pass under `--workspace --all-features`
+  (0 failures). Does not touch the nano build (separate package + profile).
+
 - **Daemon live-runtime wiring (`crustcore-daemon`, new `live` feature; default stays
   mock-driven & CI-green).** Connects the std-only decision cores to the net-side live
   transports — each `TODO(*-live)` reduced to the irreducible socket (`#[ignore]`d), the

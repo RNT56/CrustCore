@@ -27,3 +27,44 @@ crustcore-net = { workspace = true }
 crustcore-daemon = { workspace = true }
 crustcore-mcp = { workspace = true }
 crustcore-index = { workspace = true }
+# Track C ergonomics packs + the chat front door — also part of "everything".
+crustcore-index-rag = { workspace = true }
+crustcore-telemetry = { workspace = true }
+crustcore-session = { workspace = true }
+crustcore-flow = { workspace = true }
+crustcore-dev = { workspace = true }
+crustcore-toolkit = { workspace = true }
+crustcore-chat = { workspace = true }
+
+[features]
+default = []
+
+# The "build absolutely everything" switch: enable EVERY optional capability across
+# EVERY pack at once. This is the one place where the whole feature matrix is turned on
+# (heavy — pulls ureq/rustls, rsa, tree-sitter, axum/tokio, …); it is **never** the
+# flagship size claim, and none of it can leak into nano (a separate package: `-p
+# crustcore --no-default-features --features nano`; proven by `xtask forbidden-deps`).
+# Platform backends (macos-keychain/linux-keyring/windows-native) compile cross-platform;
+# only their live OS calls are the `#[ignore]`d sockets.
+all = [
+    "crustcore-net/live",
+    "crustcore-net/github-app",
+    "crustcore-secrets/vault-file",
+    "crustcore-secrets/macos-keychain",
+    "crustcore-secrets/linux-keyring",
+    "crustcore-index/ast",
+    "crustcore-index-rag/live",
+    "crustcore-index-rag/persist",
+    "crustcore-index-rag/ast",
+    "crustcore-index-rag/qdrant",
+    "crustcore-index-rag/lancedb",
+    "crustcore-telemetry/otlp",
+    "crustcore-mcp/http",
+    "crustcore-sandbox/firecracker",
+    "crustcore-sandbox/windows-native",
+    "crustcore-daemon/live",
+    "crustcore-chat/terminal",
+    "crustcore-dev/serve",
+    "crustcore-flow/live-flow",
+    "crustcore-session/live-session",
+]

@@ -91,7 +91,7 @@ fn print_help() {
     println!(
         "cargo xtask <command>\n\n\
          COMMANDS:\n\
-         \x20 verify          fmt + clippy(+features) + test(+features) + forbidden-deps + size gate\n\
+         \x20 verify          fmt + clippy(+features) + test(+features) + all-features + forbidden-deps + size gate\n\
          \x20 fmt             cargo fmt --check\n\
          \x20 clippy          cargo clippy --workspace -- -D warnings\n\
          \x20 test            cargo test --workspace\n\
@@ -175,6 +175,7 @@ fn verify() -> Result<(), String> {
     step("clippy-features", clippy_features)?;
     step("test", test)?;
     step("test-features", test_features)?;
+    step("all-features", all_features)?;
     step("forbidden-deps", forbidden_deps)?;
     step("size-check", size_check)?;
     Ok(())
@@ -183,6 +184,20 @@ fn verify() -> Result<(), String> {
 fn step(name: &str, f: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
     println!("\n=== xtask: {name} ===");
     f()
+}
+
+/// **Composition gate:** build the ENTIRE workspace with EVERY feature enabled at once
+/// (`--workspace --all-features --all-targets`), so a feature that only breaks when
+/// *combined* with another can never slip in. This is the guarantee behind the
+/// `crustcore-full --features all` "build everything" switch. It compiles all targets
+/// (incl. tests) but does not run them — `clippy-features`/`test-features` already run
+/// the per-feature suites. It does NOT touch the nano build (a separate package +
+/// profile); `forbidden-deps` and `size-check` still own nano.
+fn all_features() -> Result<(), String> {
+    run(
+        "cargo",
+        &["build", "--workspace", "--all-features", "--all-targets"],
+    )
 }
 
 fn fmt_check() -> Result<(), String> {

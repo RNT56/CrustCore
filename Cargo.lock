@@ -340,9 +340,13 @@ name = "crustcore-full"
 version = "0.4.0"
 dependencies = [
  "crustcore-backend",
+ "crustcore-chat",
  "crustcore-daemon",
+ "crustcore-dev",
  "crustcore-eventlog",
+ "crustcore-flow",
  "crustcore-index",
+ "crustcore-index-rag",
  "crustcore-kernel",
  "crustcore-mcp",
  "crustcore-net",
@@ -352,6 +356,9 @@ dependencies = [
  "crustcore-runner",
  "crustcore-sandbox",
  "crustcore-secrets",
+ "crustcore-session",
+ "crustcore-telemetry",
+ "crustcore-toolkit",
  "crustcore-types",
  "crustcore-worktree",
 ]
