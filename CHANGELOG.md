@@ -30,6 +30,32 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **The runnable Telegram bot — `crustcore-daemon serve` actually runs now.** The chat
+  front door is no longer just building blocks: a real long-poll → dispatch → reply loop
+  drives it, launching verified tasks from chat.
+  - `runtime::dispatch_event` — the pure, CI-tested dispatch core (no I/O, injected
+    model): one `(chat, RuntimeEvent)` → redacted `Outbound` messages + an optional
+    `LoopAction` (launch/cancel a task). Handles `/help` `/status` `/tasks` `/budget`,
+    `/approve`/`/deny` (resolve through the nonce engine), `/cancel`, approval-button
+    callbacks, and converse/steer turns. `poll_routed` now pairs each event with its
+    allowlisted source chat so the loop knows where to reply.
+  - `runtime::run_serve_loop` (behind `live`) — wires the real transports (spawned
+    `crustcore-net` helper for the model; `RestTelegram` over `UreqClient`), runs the
+    loop, streams task progress, and gates irreversible actions on `/approve`. The bot
+    token is resolved into the URL path by the net client and never logged.
+  - `runtime::run_pair_discovery` + `serve --pair` — the chat-id discovery helper:
+    message the bot and it prints your chat id to bind with `--chat-id` (binding stays
+    CLI-side, never a DM-to-pair flow; `docs/telegram.md` §4).
+  - `task::TaskHandle`/`TaskSpec` (behind `live`) — chat-launched tasks run the **same**
+    worktree → sandbox → verifier flow as `crustcore run` (completion is verifier-owned;
+    the chat only picks the flow), on a background thread so the bot stays responsive,
+    streaming bounded status and cancellable via `/cancel`. One task at a time.
+  - `crustcore-daemon serve` rewired: `--pair`/`--chat-id`/`--dir`/`--verify`/`--backend`/
+    `--helper`, the bot token from `CRUSTCORE_TELEGRAM_TOKEN` (a credential, never an
+    arg), with a setup guide in `--help`. Pure `parse_serve_opts` unit-tested.
+  113 daemon tests (103 lib + 10 bin); the real HTTPS/sandbox sockets stay `#[ignore]`d.
+  `cargo xtask verify` green (incl. daemon-`live` + all-features); nano unchanged.
+
 - **`crustcore-full` gains an `all` feature — the single "build everything" switch —
   and is no longer stale.** `crustcore-full` now re-exports *every* runtime crate (it
   was missing the chat front door + the Track C packs: `crustcore-chat`, `-flow`,

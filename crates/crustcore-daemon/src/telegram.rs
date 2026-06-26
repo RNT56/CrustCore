@@ -733,6 +733,17 @@ impl<'r> OutboundRenderer<'r> {
     pub fn logs(&self, raw_logs: &str) -> ModelVisibleText {
         self.redactor.to_model_visible(raw_logs)
     }
+
+    /// Renders a daemon-authored **notice** — a structured status/progress/help line the
+    /// runtime itself emits (e.g. a `/help` listing, a "task started" line, a `/cancel`
+    /// ack). Like every render it passes through the redactor, so a notice that happened
+    /// to interpolate untrusted text still cannot leak a secret. This is **not** a path
+    /// for *model* text: converse answers arrive pre-sealed as [`ModelVisibleText`] from
+    /// the chat bridge; this renders the daemon's own typed messages (invariant 8).
+    #[must_use]
+    pub fn notice(&self, text: &str) -> ModelVisibleText {
+        self.redactor.to_model_visible(text)
+    }
 }
 
 fn hash_hex(bytes: &[u8; 32]) -> String {
@@ -846,6 +857,26 @@ impl TelegramPoller {
         api: &dyn TelegramApi,
         now: Timestamp,
     ) -> Result<Vec<RuntimeEvent>, TgError> {
+        Ok(self
+            .poll_routed(api, now)?
+            .into_iter()
+            .map(|(_, e)| e)
+            .collect())
+    }
+
+    /// Like [`poll_once`](Self::poll_once), but pairs each event with the **source chat
+    /// id** so the runtime loop knows where to reply. `poll_once` is this with the chat
+    /// dropped, so the existing callers/tests are unaffected. The chat id is the
+    /// *allowlisted* identity (taken from the [`InboundEnvelope`] after the allowlist
+    /// check), never the untrusted claimed username.
+    ///
+    /// # Errors
+    /// [`TgError`] if the underlying `getUpdates` failed.
+    pub fn poll_routed(
+        &mut self,
+        api: &dyn TelegramApi,
+        now: Timestamp,
+    ) -> Result<Vec<(ChatId, RuntimeEvent)>, TgError> {
         let updates = api.get_updates(self.offset)?;
         let mut events = Vec::new();
         for raw in &updates {
@@ -856,7 +887,10 @@ impl TelegramPoller {
                 continue; // a replayed update_id
             }
             match normalize(raw, &self.allowlist, now) {
-                Ok(envelope) => events.push(route(envelope)),
+                Ok(envelope) => {
+                    let chat = envelope.source_chat_id;
+                    events.push((chat, route(envelope)));
+                }
                 Err(RejectReason::NotAllowlisted) => {
                     self.rejected = self.rejected.saturating_add(1);
                 }

@@ -1,33 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The `crustcore-daemon` runtime entry point (`ROADMAP.md` §2.3, Phase 9/10;
-//! `docs/telegram.md`, `docs/maintainer-agent.md`).
+//! `docs/chat.md`, `docs/telegram.md`).
 //!
-//! This is the long-running runtime binary. It hosts the Telegram runtime channel,
-//! the converse front door, and (later) the GitHub task/PR loop, the admin socket,
-//! and task supervision. Today it wires the **std-only, fully-tested** runtime pieces
-//! together and reports readiness; the live Bot-API long-poll transport remains
-//! `TODO(P9-net-live)` (see [`crustcore_daemon::telegram`]). It is a non-nano pack
+//! The long-running runtime binary. `serve` runs the live Telegram bot loop
+//! (long-poll → dispatch → reply, launching verified tasks from chat); `serve --pair`
+//! discovers your chat id. The live transport is gated on the `live` cargo feature; a
+//! base build prints a readiness report and the rebuild hint. It is a non-nano pack
 //! (invariants 19, 20): nano links no part of this stack.
 //!
-//! The CLI is a tiny hand-rolled parser (no `clap`), mirroring the nano binary's
-//! style. The arg-parsing is factored into the pure [`parse_args`] function so it is
-//! unit-tested without any I/O.
+//! The CLI is a tiny hand-rolled parser (no `clap`). The arg-parsing is factored into
+//! the pure [`parse_args`] / [`parse_serve_opts`] functions so it is unit-tested without
+//! any I/O.
 #![forbid(unsafe_code)]
 
 use std::process::ExitCode;
 
-use crustcore_chat::ChatConfig;
-use crustcore_daemon::chat::ChatBridge;
-use crustcore_daemon::telegram::{ChatAllowlist, TelegramPoller};
-use crustcore_secrets::Redactor;
+use crustcore_daemon::telegram::ChatAllowlist;
 
 /// The daemon version (from the crate manifest).
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The env var carrying the BotFather token (a credential — never an arg, never logged).
+const TOKEN_ENV: &str = "CRUSTCORE_TELEGRAM_TOKEN";
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match parse_args(&args) {
-        DaemonCommand::Serve { allow } => serve(&allow),
+        DaemonCommand::Serve(opts) => serve(&opts),
         DaemonCommand::Doctor => doctor(),
         DaemonCommand::Version => {
             println!("crustcore-daemon {VERSION}");
@@ -49,39 +48,42 @@ fn main() -> ExitCode {
 // Pure, testable argument parsing
 // ---------------------------------------------------------------------------
 
-/// A parsed daemon subcommand. Produced purely from the argv tail and the
-/// environment snapshot (so it is fully unit-testable, no side effects).
+/// Options for `serve`, parsed purely from argv + env (no side effects, so fully
+/// unit-testable). The bot **token is not here** — it is a credential read from the
+/// environment at serve time, kept out of the parsed/logged struct.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ServeOpts {
+    /// Allowlisted Telegram chat ids (first-seen order, de-duplicated). Empty = deny-all.
+    pub allow: Vec<i64>,
+    /// `--pair`: run chat-id discovery instead of the bot loop.
+    pub pair: bool,
+    /// `--dir <repo>`: the repo a chat-launched task runs against.
+    pub dir: Option<String>,
+    /// `--verify <cmd>`: the verify command (split, no shell); empty = detect.
+    pub verify: Option<String>,
+    /// `--backend native|codex|claude`: the coding backend for chat-launched tasks.
+    pub backend: Option<String>,
+    /// `--helper <path>`: the `crustcore-net` helper to spawn for model calls.
+    pub helper: Option<String>,
+}
+
+/// A parsed daemon subcommand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonCommand {
-    /// `serve` — start the runtime. Carries the parsed, de-duplicated allowlist of
-    /// chat ids (from `--chat-id <n>` flags and/or `CRUSTCORE_TELEGRAM_ALLOW`). An
-    /// **empty** vector is the deny-all default (NullClaw lesson; never a wildcard).
-    Serve {
-        /// Allowlisted Telegram chat ids, in first-seen order, de-duplicated.
-        allow: Vec<i64>,
-    },
+    /// `serve` — start the runtime (or `--pair`).
+    Serve(ServeOpts),
     /// `doctor` — print runtime environment readiness.
     Doctor,
     /// `version` / `--version` / `-V`.
     Version,
     /// `help` / `--help` / `-h` (and the no-args default).
     Help,
-    /// An unrecognized subcommand (carries the verb for the error reply). Never
-    /// falls through to anything that executes.
+    /// An unrecognized subcommand (carries the verb for the error reply).
     Unknown(String),
 }
 
-/// Parses the argv tail (everything after the binary name) into a [`DaemonCommand`].
-///
-/// `serve` collects its allowlist from two sources, merged in this order (then
-/// de-duplicated, preserving first-seen order):
-/// 1. the `CRUSTCORE_TELEGRAM_ALLOW` env var — a comma/space-separated list of ids;
-/// 2. each `--chat-id <n>` / `--chat-id=<n>` flag.
-///
-/// This reads the environment (via [`std::env::var`]) but performs no other I/O and
-/// builds nothing, so the whole decision is deterministic given argv + env and is
-/// unit-tested directly. Malformed ids (non-`i64`) are skipped — the deny-all default
-/// means a typo can only *narrow* access, never widen it.
+/// Parses the argv tail into a [`DaemonCommand`]. Reads `CRUSTCORE_TELEGRAM_ALLOW` for
+/// the `serve` allowlist (merged before `--chat-id` flags) but performs no other I/O.
 #[must_use]
 pub fn parse_args(args: &[String]) -> DaemonCommand {
     let Some(verb) = args.first().map(String::as_str) else {
@@ -90,9 +92,7 @@ pub fn parse_args(args: &[String]) -> DaemonCommand {
     match verb {
         "serve" => {
             let env_ids = std::env::var("CRUSTCORE_TELEGRAM_ALLOW").unwrap_or_default();
-            DaemonCommand::Serve {
-                allow: parse_allowlist(&env_ids, &args[1..]),
-            }
+            DaemonCommand::Serve(parse_serve_opts(&env_ids, &args[1..]))
         }
         "doctor" => DaemonCommand::Doctor,
         "version" | "--version" | "-V" => DaemonCommand::Version,
@@ -101,29 +101,54 @@ pub fn parse_args(args: &[String]) -> DaemonCommand {
     }
 }
 
-/// Builds the allowlist id vector from the `CRUSTCORE_TELEGRAM_ALLOW` value and the
-/// `serve` flag tail. Pure (no I/O): the env value is passed in so this is directly
-/// testable. Order is env ids first, then `--chat-id` flags; duplicates are dropped.
+/// Builds [`ServeOpts`] from the `CRUSTCORE_TELEGRAM_ALLOW` value and the `serve` flag
+/// tail. Pure (env value passed in) so it is directly testable. Both `--flag <v>` and
+/// `--flag=<v>` are accepted; an unknown flag is ignored.
+#[must_use]
+pub fn parse_serve_opts(env_allow: &str, serve_args: &[String]) -> ServeOpts {
+    let mut opts = ServeOpts {
+        allow: parse_allowlist(env_allow, serve_args),
+        ..ServeOpts::default()
+    };
+    let mut it = serve_args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--pair" => opts.pair = true,
+            a if a.starts_with("--dir") => opts.dir = flag_value(a, "--dir", &mut it),
+            a if a.starts_with("--verify") => opts.verify = flag_value(a, "--verify", &mut it),
+            a if a.starts_with("--backend") => opts.backend = flag_value(a, "--backend", &mut it),
+            a if a.starts_with("--helper") => opts.helper = flag_value(a, "--helper", &mut it),
+            _ => {}
+        }
+    }
+    opts
+}
+
+/// Resolves a `--name=value` (inline) or `--name value` (next-token) flag value.
+fn flag_value(arg: &str, name: &str, it: &mut std::slice::Iter<'_, String>) -> Option<String> {
+    if let Some(inline) = arg.strip_prefix(&format!("{name}=")) {
+        Some(inline.to_string())
+    } else if arg == name {
+        it.next().cloned()
+    } else {
+        None
+    }
+}
+
+/// Builds the allowlist id vector from `CRUSTCORE_TELEGRAM_ALLOW` and the `--chat-id`
+/// flags. Pure. Env ids first, then flags; duplicates dropped; malformed ids skipped.
 fn parse_allowlist(env_value: &str, serve_args: &[String]) -> Vec<i64> {
     let mut ids: Vec<i64> = Vec::new();
-    let push = |id: i64, ids: &mut Vec<i64>| {
+    let mut push = |id: i64| {
         if !ids.contains(&id) {
             ids.push(id);
         }
     };
-
-    // Env var: comma/whitespace-separated ids.
     for tok in env_value.split([',', ' ', '\t', '\n']) {
-        let tok = tok.trim();
-        if tok.is_empty() {
-            continue;
-        }
-        if let Ok(id) = tok.parse::<i64>() {
-            push(id, &mut ids);
+        if let Ok(id) = tok.trim().parse::<i64>() {
+            push(id);
         }
     }
-
-    // `--chat-id <n>` / `--chat-id=<n>` flags.
     let mut it = serve_args.iter();
     while let Some(arg) = it.next() {
         let raw = if let Some(rest) = arg.strip_prefix("--chat-id=") {
@@ -135,11 +160,10 @@ fn parse_allowlist(env_value: &str, serve_args: &[String]) -> Vec<i64> {
         };
         if let Some(raw) = raw {
             if let Ok(id) = raw.trim().parse::<i64>() {
-                push(id, &mut ids);
+                push(id);
             }
         }
     }
-
     ids
 }
 
@@ -147,69 +171,165 @@ fn parse_allowlist(env_value: &str, serve_args: &[String]) -> Vec<i64> {
 // Subcommand handlers (side-effecting — kept out of the tested parse path)
 // ---------------------------------------------------------------------------
 
-/// `crustcore-daemon serve` — construct the runtime pieces that are real and testable
-/// today and print a readiness report. This wires the std-only core: a
-/// [`ChatAllowlist`] (empty = deny-all), a [`TelegramPoller`] over it, and a
-/// [`ChatBridge`] (persona + operator steering loaded via [`ChatConfig::default`]).
-///
-/// The **live Bot-API long-poll/send transport is `TODO(P9-net-live)`** — there is no
-/// fake network loop here. With a non-empty allowlist the runtime is configured and
-/// ready; the loop is reported as pending and the process exits cleanly so an operator
-/// can confirm wiring before the live transport lands.
-fn serve(allow: &[i64]) -> ExitCode {
-    // Empty allowlist => deny-all (the single most important fail-safe default). We
-    // never synthesize a wildcard; an unbound daemon is inert by design.
-    let allowlist = if allow.is_empty() {
+/// `crustcore-daemon serve` — run the runtime. With the `live` feature and a bot token,
+/// this is the **actual running bot**: it long-polls Telegram, answers/steers/launches
+/// tasks from the allowlisted chat, and gates irreversible actions on `/approve`. Without
+/// a token it prints the setup hint; without the `live` feature, a readiness report.
+fn serve(opts: &ServeOpts) -> ExitCode {
+    let allowlist = if opts.allow.is_empty() {
         ChatAllowlist::deny_all()
     } else {
-        ChatAllowlist::of(allow)
+        ChatAllowlist::of(&opts.allow)
     };
+    let token = std::env::var(TOKEN_ENV)
+        .ok()
+        .filter(|t| !t.trim().is_empty());
 
-    // The inbound runtime loop over the allowlist (offset/dedupe/normalize/route). The
-    // live `TelegramApi` HTTP transport is wired in P9-net-live; here we just hold the
-    // configured poller so the wiring is proven.
-    let _poller = TelegramPoller::new(allowlist);
-
-    // The converse front door bridge. No secret broker is wired in this standalone
-    // entry point yet, so the redactor starts empty (mirrors `crustcore chat`); when
-    // the supervisor hosts the surface it passes the broker's pre-loaded redactor so
-    // stored secrets are scrubbed from answers (invariants 2, 15).
-    let redactor = Redactor::new();
-    let bridge = ChatBridge::new(&redactor, ChatConfig::default());
-
-    println!("crustcore-daemon {VERSION} — runtime readiness");
-    println!("  allowlisted chats: {}", allow.len());
-    if allow.is_empty() {
-        println!("  posture: DENY-ALL (no chat bound — the daemon is inert by design)");
-        println!("           bind a chat with --chat-id <n> or CRUSTCORE_TELEGRAM_ALLOW");
-    } else {
-        println!("  posture: bound to {} chat id(s)", allow.len());
+    #[cfg(feature = "live")]
+    {
+        match token {
+            Some(token) => serve_live(opts, allowlist, token),
+            None => {
+                eprintln!(
+                    "crustcore-daemon serve: no bot token. Create one with @BotFather, then:"
+                );
+                eprintln!("  export {TOKEN_ENV}=<token>");
+                eprintln!("  crustcore-daemon serve --pair            # discover your chat id");
+                eprintln!("  crustcore-daemon serve --chat-id <id> --dir <repo> --verify '<cmd>'");
+                ExitCode::from(2)
+            }
+        }
     }
-    println!("  runtime channel: Telegram (live Bot-API pending — TODO(P9-net-live))");
-    println!("  persona/steering: loaded (front-door bridge ready)");
-    // Touch the bridge so its construction is observably part of readiness.
-    println!(
-        "  converse preamble: {} byte(s) (safety core + persona)",
-        bridge.system_preamble().len()
-    );
-    println!("ready: configured; live long-poll transport pending (TODO(P9-net-live)).");
-    ExitCode::SUCCESS
+    #[cfg(not(feature = "live"))]
+    {
+        let _ = token;
+        readiness_report(opts, &allowlist);
+        ExitCode::SUCCESS
+    }
 }
 
-/// `crustcore-daemon doctor` — a minimal runtime-readiness probe. Reports whether the
-/// spawned net-helper path is configured (the Telegram/model transport runs as the
-/// `crustcore-net` sidecar; `docs/model-routing.md` §6). A fuller doctor lands with the
-/// live transport.
+#[cfg(feature = "live")]
+fn serve_live(opts: &ServeOpts, allowlist: ChatAllowlist, token: String) -> ExitCode {
+    use crustcore_chat::{OperatorSteering, Persona};
+    use crustcore_daemon::runtime::{run_pair_discovery, run_serve_loop, ServeConfig};
+
+    if opts.pair {
+        return match run_pair_discovery(&token, 1000) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("crustcore-daemon serve --pair: {e}");
+                ExitCode::from(1)
+            }
+        };
+    }
+
+    if opts.allow.is_empty() {
+        eprintln!("crustcore-daemon serve: DENY-ALL (no --chat-id bound) — the bot will ignore");
+        eprintln!("  every message. Run `serve --pair` to find your id, then bind it.");
+    }
+
+    let helper = opts
+        .helper
+        .clone()
+        .or_else(|| std::env::var("CRUSTCORE_NET_HELPER").ok())
+        .filter(|h| !h.trim().is_empty())
+        .unwrap_or_else(|| "crustcore-net".to_string());
+
+    // Persona + operator steering from the trusted project root (both optional, tone/
+    // guidance only — scoped below the fixed safety preamble).
+    let persona = std::fs::read_to_string("persona.md")
+        .map(|s| Persona::from_markdown(&s))
+        .unwrap_or_default();
+    let steering = ["CRUSTCORE.md", "AGENTS.md"]
+        .iter()
+        .find_map(|f| std::fs::read_to_string(f).ok())
+        .map(|s| OperatorSteering::from_content(&s))
+        .unwrap_or_default();
+
+    let task = build_task_spec(opts);
+    if task.is_none() {
+        eprintln!(
+            "crustcore-daemon serve: no --dir given — I'll chat, but task execution is off \
+             (add --dir <repo> --verify '<cmd>' to enable it)."
+        );
+    }
+
+    let config = ServeConfig {
+        allowlist,
+        bot_token: token,
+        helper_program: helper,
+        persona,
+        steering,
+        task,
+        poll_backoff_ms: 1000,
+    };
+    match run_serve_loop(config) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("crustcore-daemon serve: {e}");
+            eprintln!("  (the model transport runs as the spawned `crustcore-net` helper; set");
+            eprintln!("   CRUSTCORE_NET_HELPER or put a `live`-built crustcore-net on PATH.)");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Build the chat-launched task target from `--dir`/`--verify`/`--backend`, or `None`
+/// when `--dir` is absent (chat still works; execution is off).
+#[cfg(feature = "live")]
+fn build_task_spec(opts: &ServeOpts) -> Option<crustcore_daemon::task::TaskSpec> {
+    use crustcore_daemon::task::{TaskBackend, TaskSpec};
+    let dir = opts.dir.as_deref()?;
+    let repo_root = std::fs::canonicalize(dir).ok()?;
+    let verify = opts
+        .verify
+        .as_deref()
+        .map(|v| v.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_default();
+    let backend = match opts.backend.as_deref() {
+        Some("codex") => TaskBackend::Codex,
+        Some("claude") => TaskBackend::ClaudeCode,
+        // `native` (default) verifies the worktree as-is; `cmd` needs a worker command
+        // this minimal entry does not yet take, so it degrades to native.
+        _ => TaskBackend::Native,
+    };
+    Some(TaskSpec {
+        repo_root,
+        verify,
+        backend,
+    })
+}
+
+/// The readiness report printed by a non-`live` build (the std-only pieces are wired and
+/// tested; only the HTTP transport is feature-gated).
+#[cfg(not(feature = "live"))]
+fn readiness_report(opts: &ServeOpts, _allowlist: &ChatAllowlist) {
+    println!("crustcore-daemon {VERSION} — runtime readiness (base build)");
+    println!("  allowlisted chats: {}", opts.allow.len());
+    if opts.allow.is_empty() {
+        println!("  posture: DENY-ALL (no chat bound — inert by design)");
+    } else {
+        println!("  posture: bound to {} chat id(s)", opts.allow.len());
+    }
+    println!("  runtime channel: Telegram — rebuild with `--features live` to run the bot.");
+    println!("ready: std-only pieces wired; live transport is feature-gated.");
+}
+
+/// `crustcore-daemon doctor` — a minimal readiness probe.
 fn doctor() -> ExitCode {
     match std::env::var("CRUSTCORE_NET_HELPER") {
         Ok(path) if !path.trim().is_empty() => {
             println!("net-helper: configured (CRUSTCORE_NET_HELPER={path})");
         }
+        _ => println!(
+            "net-helper: not set (defaults to `crustcore-net` on PATH); set \
+             CRUSTCORE_NET_HELPER to override."
+        ),
+    }
+    match std::env::var(TOKEN_ENV) {
+        Ok(t) if !t.trim().is_empty() => println!("bot-token: set ({TOKEN_ENV})"),
         _ => {
-            println!(
-                "net-helper: not set (will default to `crustcore-net` on PATH when the \
-                 live transport runs); set CRUSTCORE_NET_HELPER to override."
-            );
+            println!("bot-token: not set — `export {TOKEN_ENV}=<BotFather token>` to run the bot.")
         }
     }
     ExitCode::SUCCESS
@@ -224,16 +344,24 @@ USAGE:
     crustcore-daemon <command>
 
 COMMANDS:
-    serve      Start the runtime channel (Telegram + converse front door).
-               --chat-id <n>   Allowlist a Telegram chat id (repeatable).
-                               Also reads CRUSTCORE_TELEGRAM_ALLOW (comma/space list).
-                               An empty allowlist is DENY-ALL (never a wildcard).
-    doctor     Report runtime environment readiness (net-helper path).
+    serve      Run the Telegram bot (long-poll → answer/steer/launch tasks).
+               --pair             Discover your chat id (message the bot; it prints it).
+               --chat-id <n>      Allowlist a chat id (repeatable). Empty = DENY-ALL.
+                                  Also reads CRUSTCORE_TELEGRAM_ALLOW (comma/space list).
+               --dir <repo>       Repo a chat-launched task runs against.
+               --verify <cmd>     Verify command (split, no shell); empty = auto-detect.
+               --backend <b>      native|codex|claude (default native).
+               --helper <path>    crustcore-net helper to spawn (or CRUSTCORE_NET_HELPER).
+               Requires CRUSTCORE_TELEGRAM_TOKEN=<BotFather token> and a `live` build.
+    doctor     Report runtime environment readiness.
     version    Print the daemon version.
     help       Print this help.
 
-Note: the live Telegram Bot-API long-poll/send transport is TODO(P9-net-live);
-`serve` configures and reports the std-only runtime pieces, then exits cleanly.
+SETUP:
+    1. @BotFather → create a bot → copy the token.
+    2. export CRUSTCORE_TELEGRAM_TOKEN=<token>
+    3. crustcore-daemon serve --pair          (message the bot; note your chat id)
+    4. crustcore-daemon serve --chat-id <id> --dir . --verify 'cargo test'
 "
     .to_string()
 }
@@ -276,44 +404,37 @@ mod tests {
 
     #[test]
     fn serve_collects_chat_id_flags_in_order_deduped() {
-        // Both `--chat-id <n>` and `--chat-id=<n>` forms; a duplicate is dropped.
-        let cmd = parse_args(&args(&[
-            "serve",
-            "--chat-id",
-            "100",
-            "--chat-id=200",
-            "--chat-id",
-            "100", // duplicate
-        ]));
-        assert_eq!(
-            cmd,
-            DaemonCommand::Serve {
-                allow: vec![100, 200]
-            }
+        let opts = parse_serve_opts(
+            "",
+            &args(&["--chat-id", "100", "--chat-id=200", "--chat-id", "100"]),
         );
+        assert_eq!(opts.allow, vec![100, 200]);
+        assert!(!opts.pair);
     }
 
     #[test]
-    fn serve_with_no_ids_is_deny_all_empty_vec() {
-        // No flags, no env (cleared) => empty allowlist (deny-all), NOT a wildcard.
-        // Note: this asserts the flag path; the env merge is covered by the pure
-        // `parse_allowlist` tests below (which take the env value as an argument and
-        // so do not touch process-global state).
-        let cmd = parse_args(&args(&["serve"]));
-        match cmd {
-            DaemonCommand::Serve { allow } => {
-                // The process env may carry a value in some runners; the deterministic
-                // contract is exercised by `parse_allowlist` directly. Here we only
-                // assert the command shape.
-                let _ = allow;
-            }
-            other => panic!("expected Serve, got {other:?}"),
-        }
+    fn serve_parses_pair_dir_verify_backend_helper() {
+        let opts = parse_serve_opts(
+            "",
+            &args(&[
+                "--pair",
+                "--dir",
+                "/repo",
+                "--verify=cargo test",
+                "--backend",
+                "codex",
+                "--helper=/bin/crustcore-net",
+            ]),
+        );
+        assert!(opts.pair);
+        assert_eq!(opts.dir.as_deref(), Some("/repo"));
+        assert_eq!(opts.verify.as_deref(), Some("cargo test"));
+        assert_eq!(opts.backend.as_deref(), Some("codex"));
+        assert_eq!(opts.helper.as_deref(), Some("/bin/crustcore-net"));
     }
 
     #[test]
     fn parse_allowlist_merges_env_then_flags_and_dedupes() {
-        // Env ids come first (comma + space separated), then flags; dupes dropped.
         let ids = parse_allowlist(
             "100, 200 300",
             &args(&["--chat-id", "200", "--chat-id=400"]),
@@ -322,31 +443,28 @@ mod tests {
     }
 
     #[test]
-    fn parse_allowlist_empty_env_and_no_flags_is_empty() {
-        // The deny-all default: nothing in, nothing out (never a wildcard).
+    fn parse_allowlist_empty_is_deny_all() {
         assert_eq!(parse_allowlist("", &[]), Vec::<i64>::new());
-        // Whitespace/garbage-only env is also empty.
         assert_eq!(parse_allowlist("  , ,  ", &[]), Vec::<i64>::new());
     }
 
     #[test]
-    fn parse_allowlist_skips_malformed_ids() {
-        // A non-i64 token can only narrow access (it is skipped), never widen it.
-        let ids = parse_allowlist("100, notanid, 200", &args(&["--chat-id", "abc"]));
-        assert_eq!(ids, vec![100, 200]);
-    }
-
-    #[test]
-    fn parse_allowlist_accepts_negative_ids() {
-        // Telegram group/channel chat ids are negative i64 — must be accepted.
-        let ids = parse_allowlist("-100200300", &args(&["--chat-id", "-42"]));
-        assert_eq!(ids, vec![-100200300, -42]);
+    fn parse_allowlist_skips_malformed_and_accepts_negative() {
+        assert_eq!(
+            parse_allowlist("100, notanid, 200", &args(&["--chat-id", "abc"])),
+            vec![100, 200]
+        );
+        assert_eq!(
+            parse_allowlist("-100200300", &args(&["--chat-id", "-42"])),
+            vec![-100200300, -42]
+        );
     }
 
     #[test]
     fn dangling_chat_id_flag_is_ignored_not_a_panic() {
-        // `--chat-id` with no following value must not panic and yields no id.
-        let ids = parse_allowlist("", &args(&["--chat-id"]));
-        assert_eq!(ids, Vec::<i64>::new());
+        assert_eq!(
+            parse_allowlist("", &args(&["--chat-id"])),
+            Vec::<i64>::new()
+        );
     }
 }

@@ -39,8 +39,13 @@ pub mod advisor;
 pub mod chat;
 pub mod exec;
 pub mod github;
+pub mod runtime;
 pub mod selfimprove;
 pub mod supervisor;
+/// Chat-launched verified tasks (the "do the work" half of the front door). Behind the
+/// `live` feature — it reuses the worktree/sandbox/verifier flow (non-nano deps).
+#[cfg(feature = "live")]
+pub mod task;
 pub mod telegram;
 pub mod webhook;
 
