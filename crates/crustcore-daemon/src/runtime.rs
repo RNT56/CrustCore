@@ -23,6 +23,7 @@ use crustcore_types::{
 };
 
 use crate::chat::{ChatBridge, ChatReply, STEER_BUTTON_DATA};
+use crate::registry::{RegistrySnapshot, TaskId, TaskPhase};
 use crate::telegram::{
     ApprovalEngine, ApprovalOutcome, ChatAllowlist, ChatId, Command, OutboundRenderer,
     RuntimeEvent, StatusSnapshot,
@@ -135,10 +136,19 @@ pub enum LoopAction {
         /// The chat to report progress/result to.
         chat: ChatId,
     },
-    /// Cancel the active task (`/cancel`).
+    /// Cooperatively cancel task `id` (`/cancel <id>`) — graceful, at the next safe boundary.
     CancelTask {
         /// The chat that asked to cancel.
         chat: ChatId,
+        /// The task to cancel.
+        id: TaskId,
+    },
+    /// Hard-kill task `id` (`/kill <id>`) — immediate teardown.
+    KillTask {
+        /// The chat that asked to kill.
+        chat: ChatId,
+        /// The task to kill.
+        id: TaskId,
     },
 }
 
@@ -190,9 +200,11 @@ pub const HELP_TEXT: &str = "\
 CrustCore runtime — talk to me, or use a command:
   (plain text)   chat: I answer, or start the work if it's a task.
   !<text>        steer: redirect the in-flight reasoning.
-  /cancel        abort the active task (stay in the conversation).
+  /cancel <id>   gracefully cancel task <id> (stay in the conversation).
+  /kill <id>     immediately kill task <id>.
   /status        active tasks, budget, channel health.
-  /tasks         how many tasks are active.
+  /tasks         list active tasks with status.
+  /task <id>     detail on one task.
   /budget        budget consumption.
   /approve <id>  approve a pending irreversible action.
   /deny <id>     deny a pending approval.
@@ -210,6 +222,8 @@ pub struct DispatchCtx<'a, 'r> {
     pub allowlist: &'a ChatAllowlist,
     /// The current runtime status snapshot (active task count, etc.).
     pub status: &'a StatusSnapshot,
+    /// A bounded read-only view of the supervised tasks (for `/tasks` and `/task <id>`).
+    pub registry: &'a RegistrySnapshot,
     /// The host clock — the daemon adapter's wall time (the kernel never reads one).
     pub now: Timestamp,
 }
@@ -288,9 +302,10 @@ fn dispatch_command(
     match cmd {
         Command::Help => Dispatch::say(chat, r.notice(HELP_TEXT)),
         Command::Status => Dispatch::say(chat, r.status(ctx.status)),
-        Command::Tasks => Dispatch::say(
+        Command::Tasks => Dispatch::say(chat, r.notice(&render_task_list(ctx.registry))),
+        Command::Task(id) => Dispatch::say(
             chat,
-            r.notice(&format!("{} active task(s).", ctx.status.active_tasks)),
+            r.notice(&render_task_detail(ctx.registry, TaskId(id as u64))),
         ),
         Command::Budget => Dispatch::say(
             chat,
@@ -324,35 +339,102 @@ fn dispatch_command(
             );
             Dispatch::say(chat, render_approval_outcome(&outcome, r))
         }
-        Command::Cancel(_) => Dispatch {
-            outbound: vec![Outbound {
-                chat,
-                text: r.notice("⏹️ cancelling the active task (if any)."),
-                keyboard: None,
-            }],
-            action: Some(LoopAction::CancelTask { chat }),
-        },
-        // Commands that need richer multi-task runtime state than this single-task
-        // runtime exposes are acknowledged as typed notices — they never fall through to
-        // a model (invariant: commands are typed verbs, not prompts).
-        Command::Task(_)
-        | Command::Pause(_)
+        // `/cancel` and `/kill` are **owner-scoped**: the action is emitted only if `chat`
+        // launched the named task (checked against the registry snapshot here, in the tested
+        // core; the registry re-checks at execution). One operator cannot touch another's task.
+        Command::Cancel(id) => {
+            let tid = TaskId(id as u64);
+            if ctx.registry.get(tid).map(|row| row.chat) == Some(chat) {
+                Dispatch {
+                    outbound: vec![Outbound {
+                        chat,
+                        text: r.notice(&format!("⏹️ cancelling task #{id} (graceful).")),
+                        keyboard: None,
+                    }],
+                    action: Some(LoopAction::CancelTask { chat, id: tid }),
+                }
+            } else {
+                Dispatch::say(chat, r.notice(&format!("no task #{id} you can cancel.")))
+            }
+        }
+        Command::Kill(id) => {
+            let tid = TaskId(id as u64);
+            if ctx.registry.get(tid).map(|row| row.chat) == Some(chat) {
+                Dispatch {
+                    outbound: vec![Outbound {
+                        chat,
+                        text: r.notice(&format!("🛑 killing task #{id} (immediate).")),
+                        keyboard: None,
+                    }],
+                    action: Some(LoopAction::KillTask { chat, id: tid }),
+                }
+            } else {
+                Dispatch::say(chat, r.notice(&format!("no task #{id} you can kill.")))
+            }
+        }
+        // Commands that need richer per-task runtime state this runtime does not yet expose
+        // are acknowledged as typed notices — they never fall through to a model (invariant:
+        // commands are typed verbs, not prompts).
+        Command::Pause(_)
         | Command::Resume(_)
-        | Command::Kill(_)
         | Command::Diff(_)
         | Command::Logs(_)
         | Command::Policy
         | Command::Repo => Dispatch::say(
             chat,
             r.notice(
-                "received. This runtime supports /help /status /tasks /budget /approve \
-                 /deny /cancel and plain-text chat.",
+                "received. This runtime supports /help /status /tasks /task /budget /approve \
+                 /deny /cancel /kill and plain-text chat.",
             ),
         ),
         Command::Unknown(raw) => Dispatch::say(
             chat,
             r.notice(&format!("unknown command '{raw}'. Try /help.")),
         ),
+    }
+}
+
+/// A short, non-sensitive phase label for a task row.
+fn phase_label(phase: TaskPhase) -> &'static str {
+    match phase {
+        TaskPhase::Pending => "pending",
+        TaskPhase::Running => "running",
+        TaskPhase::Cancelling => "cancelling",
+        TaskPhase::Done(done) => done.label(),
+    }
+}
+
+/// Renders the `/tasks` listing from the registry snapshot (bounded by the concurrency cap).
+fn render_task_list(snap: &RegistrySnapshot) -> String {
+    if snap.rows.is_empty() {
+        return "no active tasks.".to_string();
+    }
+    let mut s = format!("{} task(s):", snap.rows.len());
+    for row in &snap.rows {
+        s.push_str(&format!(
+            "\n  #{} [{}] {}ms · {}B · lease {}s",
+            row.id.0,
+            phase_label(row.phase),
+            row.wall_ms,
+            row.output_bytes,
+            row.lease_ttl_ms / 1000,
+        ));
+    }
+    s
+}
+
+/// Renders the `/task <id>` detail, or a not-found notice.
+fn render_task_detail(snap: &RegistrySnapshot, id: TaskId) -> String {
+    match snap.get(id) {
+        Some(row) => format!(
+            "task #{}: {} · wall {}ms · output {}B · lease expires in {}s",
+            row.id.0,
+            phase_label(row.phase),
+            row.wall_ms,
+            row.output_bytes,
+            row.lease_ttl_ms / 1000,
+        ),
+        None => format!("no task #{}.", id.0),
     }
 }
 
@@ -384,6 +466,7 @@ pub use live::{run_pair_discovery, run_serve_loop, ServeConfig, ServeError};
 
 #[cfg(feature = "live")]
 mod live {
+    use std::collections::BTreeMap;
     use std::rc::Rc;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -392,6 +475,7 @@ mod live {
     use crustcore_net::telegram::{RestTelegram, TELEGRAM_API};
     use crustcore_net::transport::UreqClient;
     use crustcore_netproto::{CompleteRequest, SpawnedHelper};
+    use crustcore_policy::{Approved, GitHubWriteCap};
     use crustcore_secrets::Redactor;
     use crustcore_types::{ApprovalResolution, Timestamp};
 
@@ -400,16 +484,133 @@ mod live {
         render_approval_outcome, DispatchCtx, LoopAction,
     };
     use crate::chat::ChatBridge;
+    use crate::registry::{
+        default_task_budget, AdmitError, LeaseOwner, RegistryAction, RegistrySnapshot, TaskId,
+        TaskRegistry,
+    };
     use crate::task::{TaskHandle, TaskSpec};
     use crate::telegram::{
         ApprovalOutcome, ChatAllowlist, ChatId, LiveTelegramApi, OutboundRenderer, StatusSnapshot,
         TelegramApi, TelegramPoller,
     };
 
+    /// Max concurrently-supervised chat tasks (bounded fan-out; invariant 11). Small by
+    /// design — a single-operator runtime is not a build farm.
+    const MAX_CONCURRENT_TASKS: usize = 4;
+
     /// How long a chat task's PR-launch approval stays valid (bounded; invariant 14). If
     /// the operator doesn't approve within this window the nonce expires and the launch is
     /// dropped — they re-ask.
     const PR_APPROVAL_TTL_MS: u64 = 300_000;
+
+    /// Couples the pure [`TaskRegistry`] (the supervision brain) with the live
+    /// [`TaskHandle`]s it names. The registry decides lifecycle; the runner executes the
+    /// [`RegistryAction`]s against the real threads.
+    struct TaskRunner {
+        registry: TaskRegistry,
+        handles: BTreeMap<TaskId, TaskHandle>,
+    }
+
+    impl TaskRunner {
+        fn new() -> Self {
+            TaskRunner {
+                // A single supervisor instance owns every lease (instance id 1).
+                registry: TaskRegistry::new(MAX_CONCURRENT_TASKS, LeaseOwner(1)),
+                handles: BTreeMap::new(),
+            }
+        }
+
+        /// Admit + spawn a task (respecting the concurrency cap). Returns the new id, or
+        /// `Err(AdmitError)` if at capacity.
+        fn launch(
+            &mut self,
+            spec: TaskSpec,
+            prompt: String,
+            chat: ChatId,
+            pr_cap: Option<Approved<GitHubWriteCap>>,
+            now: Timestamp,
+        ) -> Result<TaskId, AdmitError> {
+            let id = self.registry.admit(chat, default_task_budget(), now)?;
+            let handle = TaskHandle::spawn(spec, prompt, chat, pr_cap);
+            self.registry.mark_running(id, now);
+            self.handles.insert(id, handle);
+            Ok(id)
+        }
+
+        /// One supervision step: forward each task's drained (redacted) progress, feed
+        /// proof-of-life + finish into the registry, then execute the registry's tick
+        /// actions (cancel/kill/finalize/notify) against the live handles.
+        fn pump(
+            &mut self,
+            now: Timestamp,
+            renderer: &OutboundRenderer,
+            api: &LiveTelegramApi<RestTelegram>,
+        ) {
+            // Phase 1: collect each handle's progress (immutable over handles). Read
+            // `finished()` BEFORE `drain()`: `TaskHandle` sets its done flag only *after* the
+            // final line is queued, so a `finished` observed before draining guarantees the
+            // drain already includes that final line — the opposite order could drop it if the
+            // worker finishes between the two calls.
+            let drained: Vec<(TaskId, ChatId, Vec<String>, bool)> = self
+                .handles
+                .iter()
+                .map(|(id, h)| {
+                    let finished = h.finished();
+                    (*id, h.chat(), h.drain(), finished)
+                })
+                .collect();
+            // Phase 2: feed progress to the registry + forward the redacted lines. A still-
+            // running handle is heartbeated every tick (proof the supervisor holds the live
+            // thread), so a healthy but silent task never falsely expires.
+            for (id, chat, lines, finished) in drained {
+                for line in lines {
+                    self.registry.observe_progress(id, line.len() as u64, now);
+                    let text = renderer.notice(&line);
+                    let _ = api.send_message(chat, &text, None);
+                }
+                if finished {
+                    self.registry.observe_finished(id);
+                } else {
+                    self.registry.heartbeat(id, now);
+                }
+            }
+            // Phase 3: step the supervisor and execute its bounded actions.
+            for act in self.registry.tick(now) {
+                match act {
+                    RegistryAction::SendLine { chat, line } => {
+                        let text = renderer.notice(&line);
+                        let _ = api.send_message(chat, &text, None);
+                    }
+                    RegistryAction::RequestCancel { id } => {
+                        if let Some(h) = self.handles.get(&id) {
+                            h.cancel();
+                        }
+                    }
+                    // Drop the handle (Drop joins the thread + tears the worktree down — the
+                    // existing cooperative teardown; invariant 12 process handle).
+                    RegistryAction::HardKill { id } | RegistryAction::Finalize { id, .. } => {
+                        self.handles.remove(&id);
+                    }
+                }
+            }
+        }
+
+        fn cancel(&mut self, id: TaskId, chat: ChatId) -> bool {
+            self.registry.request_cancel(id, chat)
+        }
+
+        fn kill(&mut self, id: TaskId, chat: ChatId) -> bool {
+            self.registry.request_kill(id, chat)
+        }
+
+        fn snapshot(&self, now: Timestamp) -> RegistrySnapshot {
+            self.registry.snapshot(now)
+        }
+
+        fn len_active(&self) -> usize {
+            self.registry.len_active()
+        }
+    }
 
     /// A chat task launch awaiting the operator's PR approval (PR mode only). Holds only
     /// the prompt + the source chat + the nonce id — **not** a `VerifiedPatch` (the patch
@@ -502,26 +703,20 @@ mod live {
         let mut poller = TelegramPoller::new(config.allowlist.clone());
         let allowlist = config.allowlist;
         let task_spec = config.task;
-        let mut active: Option<TaskHandle> = None;
+        // The multi-task supervised registry + its live handles (replaces the old single
+        // `active` task) — bounded concurrency, leases, heartbeats, cancellation (invariant 12).
+        let mut runner = TaskRunner::new();
         // PR mode only: a launch awaiting the operator's approval, and the next nonce id.
         let mut pending_task: Option<PendingTask> = None;
         let mut next_approval_id: u128 = 1;
 
         eprintln!("crustcore-daemon: runtime loop started (long-poll). Ctrl-C to stop.");
         loop {
-            // 1. Drain any progress from a running task and forward it.
-            if let Some(handle) = active.as_mut() {
-                for msg in handle.drain() {
-                    let text = renderer.notice(&msg);
-                    let _ = api.send_message(handle.chat(), &text, None);
-                }
-                if handle.finished() {
-                    active = None;
-                }
-            }
+            // 1. Supervise: forward progress, feed heartbeats, expire leases, run lifecycle.
+            let now = now_ts();
+            runner.pump(now, &renderer, &api);
 
             // 2. Poll for new updates and dispatch them.
-            let now = now_ts();
             match poller.poll_routed(&api, now) {
                 Ok(events) => {
                     for (chat, event) in events {
@@ -540,7 +735,7 @@ mod live {
                                     &allowlist,
                                     &mut approvals,
                                     &task_spec,
-                                    &mut active,
+                                    &mut runner,
                                     &renderer,
                                     &api,
                                     now,
@@ -550,19 +745,24 @@ mod live {
                             }
                         }
 
-                        let status = StatusSnapshot {
-                            active_tasks: usize::from(active.is_some()),
-                            budget_used_micros: 0,
-                            budget_limit_micros: 0,
-                            channel_healthy: true,
-                        };
-                        let ctx = DispatchCtx {
-                            renderer: &renderer,
-                            allowlist: &allowlist,
-                            status: &status,
-                            now,
-                        };
+                        // Build the dispatch context (incl. a fresh registry snapshot for the
+                        // /tasks //task commands) in a scope, so its borrow of `runner` ends
+                        // before `handle_action` takes `&mut runner`.
                         let dispatch = {
+                            let snap = runner.snapshot(now);
+                            let status = StatusSnapshot {
+                                active_tasks: runner.len_active(),
+                                budget_used_micros: 0,
+                                budget_limit_micros: 0,
+                                channel_healthy: true,
+                            };
+                            let ctx = DispatchCtx {
+                                renderer: &renderer,
+                                allowlist: &allowlist,
+                                status: &status,
+                                registry: &snap,
+                                now,
+                            };
                             let mut model = |req: &CompleteRequest| {
                                 crustcore_chat::complete_text(helper.helper(), req)
                             };
@@ -583,7 +783,7 @@ mod live {
                         if let Some(pending) = handle_action(
                             dispatch.action,
                             &task_spec,
-                            &mut active,
+                            &mut runner,
                             pending_task.is_some(),
                             &mut approvals,
                             &mut next_approval_id,
@@ -610,7 +810,7 @@ mod live {
     fn handle_action(
         action: Option<LoopAction>,
         task_spec: &Option<TaskSpec>,
-        active: &mut Option<TaskHandle>,
+        runner: &mut TaskRunner,
         approval_pending: bool,
         approvals: &mut crate::telegram::ApprovalEngine,
         next_approval_id: &mut u128,
@@ -620,12 +820,6 @@ mod live {
     ) -> Option<PendingTask> {
         match action {
             Some(LoopAction::LaunchTask { prompt, chat, .. }) => {
-                if active.is_some() {
-                    let t = renderer
-                        .notice("a task is already running — /cancel it first, then retry.");
-                    let _ = api.send_message(chat, &t, None);
-                    return None;
-                }
                 if approval_pending {
                     let t = renderer
                         .notice("an approval is already pending — approve or deny it first.");
@@ -656,10 +850,21 @@ mod live {
                             approval_id,
                         });
                     }
-                    // No PR target: a sandboxed verify is reversible — start immediately.
-                    Some(spec) => {
-                        *active = Some(TaskHandle::spawn(spec.clone(), prompt, chat, None));
-                    }
+                    // No PR target: a sandboxed verify is reversible — start it, subject to
+                    // the concurrency cap (invariant 11).
+                    Some(spec) => match runner.launch(spec.clone(), prompt, chat, None, now) {
+                        Ok(id) => {
+                            let t = renderer.notice(&format!("▶️ started task #{}.", id.0));
+                            let _ = api.send_message(chat, &t, None);
+                        }
+                        Err(AdmitError::ConcurrencyCap) => {
+                            let t = renderer.notice(&format!(
+                                "at capacity ({MAX_CONCURRENT_TASKS} tasks running) — \
+                                 /cancel one first, then retry."
+                            ));
+                            let _ = api.send_message(chat, &t, None);
+                        }
+                    },
                     None => {
                         let t = renderer.notice(
                             "I can chat here, but task execution needs a bound repo + verify \
@@ -669,13 +874,14 @@ mod live {
                     }
                 }
             }
-            Some(LoopAction::CancelTask { chat }) => {
-                if let Some(handle) = active.as_mut() {
-                    handle.cancel();
-                } else {
-                    let t = renderer.notice("nothing to cancel — no task is running.");
-                    let _ = api.send_message(chat, &t, None);
-                }
+            // Graceful cancel / hard kill resolve against the registry by id; `tick` (in
+            // `pump`) executes the cooperative cancel or the hard teardown next cycle. The
+            // registry re-checks ownership (defense in depth; dispatch_command already gated).
+            Some(LoopAction::CancelTask { id, chat }) => {
+                let _ = runner.cancel(id, chat);
+            }
+            Some(LoopAction::KillTask { id, chat }) => {
+                let _ = runner.kill(id, chat);
             }
             None => {}
         }
@@ -695,7 +901,7 @@ mod live {
         allowlist: &ChatAllowlist,
         approvals: &mut crate::telegram::ApprovalEngine,
         task_spec: &Option<TaskSpec>,
-        active: &mut Option<TaskHandle>,
+        runner: &mut TaskRunner,
         renderer: &OutboundRenderer,
         api: &LiveTelegramApi<RestTelegram>,
         now: Timestamp,
@@ -717,18 +923,26 @@ mod live {
                             pending.approval_id,
                             expires,
                         ) {
-                            Some(cap) => {
-                                *active = Some(TaskHandle::spawn(
-                                    spec,
-                                    pending.prompt.clone(),
-                                    pending.chat,
-                                    Some(cap),
-                                ));
-                                let t = renderer.notice(
-                                    "✅ approved — running; I'll open a draft PR if it verifies.",
-                                );
-                                let _ = api.send_message(chat, &t, None);
-                            }
+                            Some(cap) => match runner.launch(
+                                spec,
+                                pending.prompt.clone(),
+                                pending.chat,
+                                Some(cap),
+                                now,
+                            ) {
+                                Ok(_) => {
+                                    let t = renderer.notice(
+                                        "✅ approved — running; I'll open a draft PR if it verifies.",
+                                    );
+                                    let _ = api.send_message(chat, &t, None);
+                                }
+                                Err(AdmitError::ConcurrencyCap) => {
+                                    let t = renderer.notice(
+                                        "✅ approved, but at task capacity — retry once a task frees up.",
+                                    );
+                                    let _ = api.send_message(chat, &t, None);
+                                }
+                            },
                             None => {
                                 let t = renderer
                                     .notice("⚠️ could not authorize a PR for this chat (ignored).");
@@ -822,10 +1036,12 @@ mod tests {
         let renderer = OutboundRenderer::new(broker.redactor());
         let mut bridge = ChatBridge::new(broker.redactor(), ChatConfig::default());
         let st = status();
+        let registry = RegistrySnapshot::default();
         let ctx = DispatchCtx {
             renderer: &renderer,
             allowlist,
             status: &st,
+            registry: &registry,
             now: Timestamp::from_millis(1000),
         };
         dispatch_event(ChatId(7), event, &mut bridge, approvals, &ctx, model)
@@ -902,19 +1118,131 @@ mod tests {
     }
 
     #[test]
-    fn cancel_command_requests_cancel_action() {
+    fn cancel_command_requests_cancel_action_for_an_owned_task() {
+        let reg = RegistrySnapshot {
+            rows: vec![task_row(5, TaskPhase::Running)], // owned by chat 7
+        };
+        let d = drive_cmd(&reg, Command::Cancel(5));
+        assert_eq!(
+            d.action,
+            Some(LoopAction::CancelTask {
+                chat: ChatId(7),
+                id: TaskId(5),
+            })
+        );
+    }
+
+    #[test]
+    fn cancel_kill_of_an_unowned_or_missing_task_emits_no_action() {
+        // No such task → no action.
+        let empty = RegistrySnapshot::default();
+        let d = drive_cmd(&empty, Command::Cancel(5));
+        assert_eq!(d.action, None);
+        assert!(d.outbound[0].text.as_str().contains("no task #5"));
+
+        // A task owned by a DIFFERENT chat → the requester (chat 7) cannot cancel/kill it.
+        let other = RegistrySnapshot {
+            rows: vec![crate::registry::TaskRow {
+                id: TaskId(5),
+                chat: ChatId(999),
+                phase: TaskPhase::Running,
+                wall_ms: 0,
+                output_bytes: 0,
+                lease_ttl_ms: 1000,
+            }],
+        };
+        assert_eq!(drive_cmd(&other, Command::Cancel(5)).action, None);
+        assert_eq!(drive_cmd(&other, Command::Kill(5)).action, None);
+    }
+
+    fn task_row(id: u64, phase: TaskPhase) -> crate::registry::TaskRow {
+        crate::registry::TaskRow {
+            id: TaskId(id),
+            chat: ChatId(7),
+            phase,
+            wall_ms: 1234,
+            output_bytes: 50,
+            lease_ttl_ms: 42_000,
+        }
+    }
+
+    /// Drive a `/command` through the dispatch core with a supplied registry snapshot.
+    fn drive_cmd(registry: &RegistrySnapshot, cmd: Command) -> Dispatch {
         let broker = SecretBroker::new(InMemoryStore::new());
         let allow = ChatAllowlist::of(&[7]);
         let mut approvals = ApprovalEngine::new();
+        let renderer = OutboundRenderer::new(broker.redactor());
+        let mut bridge = ChatBridge::new(broker.redactor(), ChatConfig::default());
+        let st = status();
+        let ctx = DispatchCtx {
+            renderer: &renderer,
+            allowlist: &allow,
+            status: &st,
+            registry,
+            now: Timestamp::from_millis(1000),
+        };
         let mut model = |_req: &CompleteRequest| None;
-        let d = drive(
-            &broker,
-            &allow,
+        dispatch_event(
+            ChatId(7),
+            RuntimeEvent::Command(cmd),
+            &mut bridge,
             &mut approvals,
-            RuntimeEvent::Command(Command::Cancel(0)),
+            &ctx,
             &mut model,
+        )
+    }
+
+    #[test]
+    fn tasks_lists_active_tasks_from_the_registry() {
+        let reg = RegistrySnapshot {
+            rows: vec![
+                task_row(1, TaskPhase::Running),
+                task_row(2, TaskPhase::Pending),
+            ],
+        };
+        let text = drive_cmd(&reg, Command::Tasks).outbound[0]
+            .text
+            .as_str()
+            .to_string();
+        assert!(text.contains("2 task(s)"), "got: {text}");
+        assert!(text.contains("#1 [running]"));
+        assert!(text.contains("#2 [pending]"));
+    }
+
+    #[test]
+    fn empty_registry_reports_no_tasks() {
+        let d = drive_cmd(&RegistrySnapshot::default(), Command::Tasks);
+        assert!(d.outbound[0].text.as_str().contains("no active tasks"));
+    }
+
+    #[test]
+    fn task_detail_shows_one_or_reports_missing() {
+        let reg = RegistrySnapshot {
+            rows: vec![task_row(3, TaskPhase::Running)],
+        };
+        assert!(drive_cmd(&reg, Command::Task(3)).outbound[0]
+            .text
+            .as_str()
+            .contains("task #3"));
+        assert!(drive_cmd(&reg, Command::Task(9)).outbound[0]
+            .text
+            .as_str()
+            .contains("no task #9"));
+    }
+
+    #[test]
+    fn kill_command_emits_kill_action_for_an_owned_task() {
+        let reg = RegistrySnapshot {
+            rows: vec![task_row(8, TaskPhase::Running)], // owned by chat 7
+        };
+        let d = drive_cmd(&reg, Command::Kill(8));
+        assert_eq!(
+            d.action,
+            Some(LoopAction::KillTask {
+                chat: ChatId(7),
+                id: TaskId(8),
+            })
         );
-        assert_eq!(d.action, Some(LoopAction::CancelTask { chat: ChatId(7) }));
     }
 
     #[test]

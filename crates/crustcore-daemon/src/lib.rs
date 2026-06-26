@@ -39,6 +39,9 @@ pub mod advisor;
 pub mod chat;
 pub mod exec;
 pub mod github;
+/// Multi-task supervised registry (leases/heartbeats/cancellation; invariant 12). A pure
+/// decision core — always compiled + CI-tested; the live loop that drives it is `live`-gated.
+pub mod registry;
 pub mod runtime;
 pub mod selfimprove;
 pub mod supervisor;
