@@ -250,6 +250,26 @@ Requires a stable Rust toolchain (≥ 1.85) with `rustfmt` and `clippy`, pinned 
 [`rust-toolchain.toml`](./rust-toolchain.toml). Release & operations:
 **[docs/releasing.md](./docs/releasing.md)**.
 
+### Just want it running? One binary.
+
+The trusted core is multi-binary by design (a tiny `crustcore` that *spawns* a model
+helper). For casual use there's a convenience all-in-one — **one binary** that bundles the
+chat front door, the Telegram bot, and the model helper, and spawns *itself* as that helper
+(nothing to put on PATH):
+
+```bash
+cargo build --release -p crustcore-full --features all   # the heavy convenience tier
+
+crustcore-full setup     # write a config file (model keys + optional bot token)
+crustcore-full chat      # a terminal coding agent — type, get answers, ask it to fix code
+crustcore-full serve --pair   # or: run a Telegram bot (then --chat-id <id> --dir . --verify '<cmd>')
+```
+
+With no model provider configured it answers from a deterministic **mock** (offline);
+set `CRUSTCORE_NET_PROVIDERS` (in the config file) to a provider config to go live. The
+trusted boundary is unchanged — this binary only *wires* the same redacted, sandboxed,
+verifier-owned components together.
+
 ---
 
 ## The 20 invariants

@@ -34,6 +34,23 @@ _Nothing yet — the next release accumulates here._
 
 ### Added
 
+- **`crustcore-full` — a single-binary, casual-user front door.** The architecture is
+  multi-binary by design (a sub-800kB `crustcore` that *spawns* a `crustcore-net` model
+  helper + an optional `crustcore-daemon` bot) — right for the trusted core, but three
+  artifacts + PATH + env wiring for a casual default. The new `crustcore-full` binary
+  (`--features all`) bundles the chat front door, the Telegram bot, and the model helper into
+  **one executable that spawns itself** as that helper (busybox-style, via a
+  `CRUSTCORE_FULL_HELPER` marker), so there is nothing to put on PATH: `crustcore-full setup`
+  / `chat` / `serve --pair`. It reads a `KEY=VALUE` config file (model keys + bot token) so a
+  casual user never juggles shell env vars; with no provider configured it answers from the
+  deterministic mock (offline), going live when `CRUSTCORE_NET_PROVIDERS` is set. It only
+  *wires* the existing tested entry points (`crustcore_chat::run_terminal`,
+  `crustcore_daemon::runtime::run_serve_loop`, the `crustcore_net` helper engine) — the trust
+  boundary (redaction, allowlist, sandbox, verifier-owned completion) is unchanged and lives
+  in those. Pure config/command parsing is CI-tested; the self-spawn was validated end-to-end
+  (chat answers via the bundled mock helper, no network). Adversarial review: no defects.
+  Invariants 19/20 intact — **zero nano impact** (a separate package; forbidden-deps green).
+
 - **Track the all-capability-packs flagship binary size (`cargo xtask full-size`).** A new
   xtask command + CI step builds `crustcore --features full` — *every* capability pack (net +
   daemon + mcp + index + chat) linked into **one** binary — under the nano profile and reports
