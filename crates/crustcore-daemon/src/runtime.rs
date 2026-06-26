@@ -16,14 +16,67 @@
 use crustcore_chat::ChatRoute;
 use crustcore_net::telegram::InlineKeyboard;
 use crustcore_netproto::CompleteRequest;
+use crustcore_policy::{Approved, GitHubWriteCap};
 use crustcore_secrets::ModelVisibleText;
-use crustcore_types::{ApprovalResolution, Timestamp};
+use crustcore_types::{
+    ApprovalId, ApprovalResolution, BoundedText, BranchPrefix, RepoRef, ScopeId, Timestamp,
+};
 
 use crate::chat::{ChatBridge, ChatReply, STEER_BUTTON_DATA};
 use crate::telegram::{
     ApprovalEngine, ApprovalOutcome, ChatAllowlist, ChatId, Command, OutboundRenderer,
     RuntimeEvent, StatusSnapshot,
 };
+
+/// Mint an `Approved<GitHubWriteCap>` for an allowlisted chat that just approved opening
+/// a draft PR. This is the **only** place the chat front door mints GitHub write
+/// authority: it requires the chat be allowlisted (→ `AuthorizedUser`, invariant 4) and
+/// binds the cap to the configured repo + branch prefix + the approval's id/expiry
+/// (invariant 14). Returns `None` for a non-allowlisted chat — so a stray approval can
+/// never produce write authority. Pure + CI-tested (no transport).
+#[must_use]
+pub fn mint_github_write_cap(
+    allowlist: &ChatAllowlist,
+    chat: ChatId,
+    repo: &str,
+    branch_prefix: &str,
+    approval_id: u128,
+    expires_at: Timestamp,
+) -> Option<Approved<GitHubWriteCap>> {
+    let user = allowlist.authorized_user(chat)?;
+    let cap = GitHubWriteCap {
+        repo: RepoRef(BoundedText::truncated(repo, BoundedText::DEFAULT_MAX)),
+        branch_prefix: BranchPrefix(BoundedText::truncated(
+            branch_prefix,
+            BoundedText::DEFAULT_MAX,
+        )),
+        scope: ScopeId(1),
+    };
+    Some(user.approve(cap, ApprovalId(approval_id), expires_at))
+}
+
+/// If `event` is an approve/deny resolution for `approval_id` — a button callback or the
+/// `/approve`//`deny` command — returns `(decision, op_hash)`; else `None`. The loop uses
+/// this to route a PR-gating approval to the pending-task resolver (so a real
+/// `VerifiedPatch` never has to outlive the approval).
+#[must_use]
+pub fn pr_approval_match(
+    event: &RuntimeEvent,
+    approval_id: u128,
+) -> Option<(ApprovalResolution, Option<[u8; 32]>)> {
+    match event {
+        RuntimeEvent::ApprovalCallback(cb) if cb.approval_id == approval_id => {
+            Some((cb.decision, Some(cb.op_hash)))
+        }
+        RuntimeEvent::Command(Command::Approve(id)) if *id == approval_id => {
+            Some((ApprovalResolution::Approve, None))
+        }
+        RuntimeEvent::Command(Command::Deny(id)) if *id == approval_id => {
+            Some((ApprovalResolution::Deny, None))
+        }
+        _ => None,
+    }
+}
 
 /// A 🛑 Steer inline keyboard attached to converse answers, so the user can interrupt
 /// with a tap (NilCore parity). Tapping arms the next message as a steer. The button
@@ -340,15 +393,32 @@ mod live {
     use crustcore_net::transport::UreqClient;
     use crustcore_netproto::{CompleteRequest, SpawnedHelper};
     use crustcore_secrets::Redactor;
-    use crustcore_types::Timestamp;
+    use crustcore_types::{ApprovalResolution, Timestamp};
 
-    use super::{dispatch_event, DispatchCtx, LoopAction};
+    use super::{
+        approval_keyboard, dispatch_event, mint_github_write_cap, pr_approval_match,
+        render_approval_outcome, DispatchCtx, LoopAction,
+    };
     use crate::chat::ChatBridge;
     use crate::task::{TaskHandle, TaskSpec};
     use crate::telegram::{
-        ChatAllowlist, LiveTelegramApi, OutboundRenderer, StatusSnapshot, TelegramApi,
-        TelegramPoller,
+        ApprovalOutcome, ChatAllowlist, ChatId, LiveTelegramApi, OutboundRenderer, StatusSnapshot,
+        TelegramApi, TelegramPoller,
     };
+
+    /// How long a chat task's PR-launch approval stays valid (bounded; invariant 14). If
+    /// the operator doesn't approve within this window the nonce expires and the launch is
+    /// dropped — they re-ask.
+    const PR_APPROVAL_TTL_MS: u64 = 300_000;
+
+    /// A chat task launch awaiting the operator's PR approval (PR mode only). Holds only
+    /// the prompt + the source chat + the nonce id — **not** a `VerifiedPatch` (the patch
+    /// is produced *after* approval, inside the task thread, so it never outlives the gate).
+    struct PendingTask {
+        prompt: String,
+        chat: ChatId,
+        approval_id: u128,
+    }
 
     /// The runtime configuration for [`run_serve_loop`].
     pub struct ServeConfig {
@@ -433,6 +503,9 @@ mod live {
         let allowlist = config.allowlist;
         let task_spec = config.task;
         let mut active: Option<TaskHandle> = None;
+        // PR mode only: a launch awaiting the operator's approval, and the next nonce id.
+        let mut pending_task: Option<PendingTask> = None;
+        let mut next_approval_id: u128 = 1;
 
         eprintln!("crustcore-daemon: runtime loop started (long-poll). Ctrl-C to stop.");
         loop {
@@ -452,6 +525,31 @@ mod live {
             match poller.poll_routed(&api, now) {
                 Ok(events) => {
                     for (chat, event) in events {
+                        // PR-gate interception: if a launch is awaiting approval and this
+                        // event resolves *that* nonce, mint the cap + launch (or drop) here
+                        // — the engine still enforces allowlist/op-hash/expiry/single-use.
+                        if let Some(pending) = pending_task.as_ref() {
+                            if let Some((decision, op_hash)) =
+                                pr_approval_match(&event, pending.approval_id)
+                            {
+                                resolve_pending_pr(
+                                    pending,
+                                    decision,
+                                    op_hash,
+                                    chat,
+                                    &allowlist,
+                                    &mut approvals,
+                                    &task_spec,
+                                    &mut active,
+                                    &renderer,
+                                    &api,
+                                    now,
+                                );
+                                pending_task = None;
+                                continue;
+                            }
+                        }
+
                         let status = StatusSnapshot {
                             active_tasks: usize::from(active.is_some()),
                             budget_used_micros: 0,
@@ -480,7 +578,21 @@ mod live {
                         for o in &dispatch.outbound {
                             let _ = api.send_message(o.chat, &o.text, o.keyboard.as_ref());
                         }
-                        handle_action(dispatch.action, &task_spec, &mut active, &renderer, &api);
+                        // A launch requested in PR mode is gated: it returns a `PendingTask`
+                        // (approval requested + buttons sent) instead of starting now.
+                        if let Some(pending) = handle_action(
+                            dispatch.action,
+                            &task_spec,
+                            &mut active,
+                            pending_task.is_some(),
+                            &mut approvals,
+                            &mut next_approval_id,
+                            &renderer,
+                            &api,
+                            now,
+                        ) {
+                            pending_task = Some(pending);
+                        }
                     }
                 }
                 Err(e) => eprintln!("crustcore-daemon: poll error (retrying): {e}"),
@@ -490,23 +602,64 @@ mod live {
         }
     }
 
+    /// Performs a [`LoopAction`]. Returns `Some(PendingTask)` when a PR-mode launch was
+    /// **gated** — the operator was asked to approve (buttons sent) and the task starts
+    /// only once they do (invariant 14). A non-PR launch starts immediately and returns
+    /// `None`.
+    #[allow(clippy::too_many_arguments)]
     fn handle_action(
         action: Option<LoopAction>,
         task_spec: &Option<TaskSpec>,
         active: &mut Option<TaskHandle>,
+        approval_pending: bool,
+        approvals: &mut crate::telegram::ApprovalEngine,
+        next_approval_id: &mut u128,
         renderer: &OutboundRenderer,
         api: &LiveTelegramApi<RestTelegram>,
-    ) {
+        now: Timestamp,
+    ) -> Option<PendingTask> {
         match action {
             Some(LoopAction::LaunchTask { prompt, chat, .. }) => {
                 if active.is_some() {
                     let t = renderer
                         .notice("a task is already running — /cancel it first, then retry.");
                     let _ = api.send_message(chat, &t, None);
-                    return;
+                    return None;
+                }
+                if approval_pending {
+                    let t = renderer
+                        .notice("an approval is already pending — approve or deny it first.");
+                    let _ = api.send_message(chat, &t, None);
+                    return None;
                 }
                 match task_spec {
-                    Some(spec) => *active = Some(TaskHandle::spawn(spec.clone(), prompt, chat)),
+                    // PR mode: opening a draft PR is irreversible — gate the launch on a
+                    // human approval. Register a nonce, send approve/deny buttons, and
+                    // park the launch; nothing runs until the operator approves.
+                    Some(spec) if spec.pr.is_some() => {
+                        let approval_id = *next_approval_id;
+                        *next_approval_id = next_approval_id.wrapping_add(1);
+                        let op = format!("run this task and open a draft PR: {prompt}");
+                        let expires = Timestamp::from_millis(
+                            now.as_millis().saturating_add(PR_APPROVAL_TTL_MS),
+                        );
+                        let nonce = approvals.request(approval_id, &op, &op, expires);
+                        let text = renderer.notice(&format!(
+                            "🔒 This runs the task and, if it verifies, opens a *draft* PR — \
+                             that needs your approval.\n• {op}"
+                        ));
+                        let kb = approval_keyboard(&nonce);
+                        let _ = api.send_message(chat, &text, Some(&kb));
+                        return Some(PendingTask {
+                            prompt,
+                            chat,
+                            approval_id,
+                        });
+                    }
+                    // No PR target: a sandboxed verify is reversible — start immediately.
+                    Some(spec) => {
+                        *active = Some(TaskHandle::spawn(spec.clone(), prompt, chat, None));
+                    }
                     None => {
                         let t = renderer.notice(
                             "I can chat here, but task execution needs a bound repo + verify \
@@ -525,6 +678,75 @@ mod live {
                 }
             }
             None => {}
+        }
+        None
+    }
+
+    /// Resolves a PR-launch approval: on approve, mint the human-approved
+    /// `Approved<GitHubWriteCap>` (invariant 14) and launch the task **with** it (so the
+    /// verified patch opens a draft PR); on deny/expiry, report and run nothing. The
+    /// engine has already validated allowlist/op-hash/expiry/single-use.
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_pending_pr(
+        pending: &PendingTask,
+        decision: ApprovalResolution,
+        op_hash: Option<[u8; 32]>,
+        chat: ChatId,
+        allowlist: &ChatAllowlist,
+        approvals: &mut crate::telegram::ApprovalEngine,
+        task_spec: &Option<TaskSpec>,
+        active: &mut Option<TaskHandle>,
+        renderer: &OutboundRenderer,
+        api: &LiveTelegramApi<RestTelegram>,
+        now: Timestamp,
+    ) {
+        let outcome =
+            approvals.resolve(pending.approval_id, decision, chat, allowlist, now, op_hash);
+        match outcome {
+            ApprovalOutcome::Approved(_) => {
+                let target = task_spec.as_ref().and_then(|s| s.pr.clone());
+                let expires =
+                    Timestamp::from_millis(now.as_millis().saturating_add(PR_APPROVAL_TTL_MS));
+                match (task_spec.clone(), target) {
+                    (Some(spec), Some(t)) => {
+                        match mint_github_write_cap(
+                            allowlist,
+                            chat,
+                            &t.repo,
+                            &t.branch_prefix,
+                            pending.approval_id,
+                            expires,
+                        ) {
+                            Some(cap) => {
+                                *active = Some(TaskHandle::spawn(
+                                    spec,
+                                    pending.prompt.clone(),
+                                    pending.chat,
+                                    Some(cap),
+                                ));
+                                let t = renderer.notice(
+                                    "✅ approved — running; I'll open a draft PR if it verifies.",
+                                );
+                                let _ = api.send_message(chat, &t, None);
+                            }
+                            None => {
+                                let t = renderer
+                                    .notice("⚠️ could not authorize a PR for this chat (ignored).");
+                                let _ = api.send_message(chat, &t, None);
+                            }
+                        }
+                    }
+                    _ => {
+                        let t = renderer.notice("⚠️ PR mode is not configured — nothing to run.");
+                        let _ = api.send_message(chat, &t, None);
+                    }
+                }
+            }
+            // Denied / rejected (expired, op-mismatch, not-allowlisted): report; run nothing.
+            other => {
+                let t = render_approval_outcome(&other, renderer);
+                let _ = api.send_message(chat, &t, None);
+            }
         }
     }
 
@@ -788,6 +1010,59 @@ mod tests {
         );
         assert!(d.outbound[0].text.as_str().contains("steer armed"));
         assert!(d.action.is_none());
+    }
+
+    #[test]
+    fn mint_github_write_cap_requires_an_allowlisted_chat() {
+        let allow = ChatAllowlist::of(&[7]);
+        let cap = mint_github_write_cap(
+            &allow,
+            ChatId(7),
+            "owner/repo",
+            "crustcore",
+            5,
+            Timestamp::from_millis(10_000),
+        )
+        .expect("an allowlisted chat mints a cap");
+        assert_eq!(cap.value().repo.0.as_str(), "owner/repo");
+        assert_eq!(cap.value().branch_prefix.0.as_str(), "crustcore");
+        assert!(cap.is_valid_at(Timestamp::from_millis(1000)));
+        // A non-allowlisted chat gets NO GitHub write authority (invariant 4).
+        assert!(mint_github_write_cap(
+            &ChatAllowlist::deny_all(),
+            ChatId(7),
+            "owner/repo",
+            "crustcore",
+            5,
+            Timestamp::from_millis(10_000),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn pr_approval_match_recognizes_callback_and_commands() {
+        let cb = CallbackData {
+            approval_id: 9,
+            decision: ApprovalResolution::Approve,
+            op_hash: [0u8; 32],
+        };
+        assert_eq!(
+            pr_approval_match(&RuntimeEvent::ApprovalCallback(cb), 9),
+            Some((ApprovalResolution::Approve, Some([0u8; 32])))
+        );
+        assert_eq!(
+            pr_approval_match(&RuntimeEvent::Command(Command::Deny(9)), 9),
+            Some((ApprovalResolution::Deny, None))
+        );
+        // A different id or an unrelated event never matches.
+        assert_eq!(
+            pr_approval_match(&RuntimeEvent::Command(Command::Approve(8)), 9),
+            None
+        );
+        assert_eq!(
+            pr_approval_match(&RuntimeEvent::Command(Command::Help), 9),
+            None
+        );
     }
 
     #[test]

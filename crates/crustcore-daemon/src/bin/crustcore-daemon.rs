@@ -65,6 +65,16 @@ pub struct ServeOpts {
     pub backend: Option<String>,
     /// `--helper <path>`: the `crustcore-net` helper to spawn for model calls.
     pub helper: Option<String>,
+    /// `--open-pr`: when a chat task verifies, open a **draft** PR (each launch is gated
+    /// on a human approval). Requires `--repo`.
+    pub open_pr: bool,
+    /// `--repo <owner/name>`: the repository draft PRs target.
+    pub repo: Option<String>,
+    /// `--base <branch>`: the base branch a draft PR targets (default `main`).
+    pub base: Option<String>,
+    /// `--branch-prefix <prefix>`: the prefix the PR head branch is confined under
+    /// (default `crustcore`).
+    pub branch_prefix: Option<String>,
 }
 
 /// A parsed daemon subcommand.
@@ -118,6 +128,12 @@ pub fn parse_serve_opts(env_allow: &str, serve_args: &[String]) -> ServeOpts {
             a if a.starts_with("--verify") => opts.verify = flag_value(a, "--verify", &mut it),
             a if a.starts_with("--backend") => opts.backend = flag_value(a, "--backend", &mut it),
             a if a.starts_with("--helper") => opts.helper = flag_value(a, "--helper", &mut it),
+            "--open-pr" => opts.open_pr = true,
+            a if a.starts_with("--repo") => opts.repo = flag_value(a, "--repo", &mut it),
+            a if a.starts_with("--base") => opts.base = flag_value(a, "--base", &mut it),
+            a if a.starts_with("--branch-prefix") => {
+                opts.branch_prefix = flag_value(a, "--branch-prefix", &mut it)
+            }
             _ => {}
         }
     }
@@ -278,7 +294,7 @@ fn serve_live(opts: &ServeOpts, allowlist: ChatAllowlist, token: String) -> Exit
 /// when `--dir` is absent (chat still works; execution is off).
 #[cfg(feature = "live")]
 fn build_task_spec(opts: &ServeOpts) -> Option<crustcore_daemon::task::TaskSpec> {
-    use crustcore_daemon::task::{TaskBackend, TaskSpec};
+    use crustcore_daemon::task::{PrTarget, TaskBackend, TaskSpec};
     let dir = opts.dir.as_deref()?;
     let repo_root = std::fs::canonicalize(dir).ok()?;
     let verify = opts
@@ -293,10 +309,25 @@ fn build_task_spec(opts: &ServeOpts) -> Option<crustcore_daemon::task::TaskSpec>
         // this minimal entry does not yet take, so it degrades to native.
         _ => TaskBackend::Native,
     };
+    // PR mode is opt-in (`--open-pr --repo owner/name`): a verified task opens a *draft*
+    // PR, gated on a per-launch human approval. Without `--repo` it stays off (no PR).
+    let pr = if opts.open_pr {
+        opts.repo.as_deref().map(|repo| PrTarget {
+            repo: repo.to_string(),
+            base_branch: opts.base.clone().unwrap_or_else(|| "main".to_string()),
+            branch_prefix: opts
+                .branch_prefix
+                .clone()
+                .unwrap_or_else(|| "crustcore".to_string()),
+        })
+    } else {
+        None
+    };
     Some(TaskSpec {
         repo_root,
         verify,
         backend,
+        pr,
     })
 }
 
@@ -352,6 +383,11 @@ COMMANDS:
                --verify <cmd>     Verify command (split, no shell); empty = auto-detect.
                --backend <b>      native|codex|claude (default native).
                --helper <path>    crustcore-net helper to spawn (or CRUSTCORE_NET_HELPER).
+               --open-pr          On a verified task, open a DRAFT PR (each launch is
+                                  gated on your approval). Requires --repo.
+               --repo <o/n>       Repository draft PRs target (owner/name).
+               --base <branch>    Base branch a draft PR targets (default main).
+               --branch-prefix <p>  Head-branch prefix (default crustcore).
                Requires CRUSTCORE_TELEGRAM_TOKEN=<BotFather token> and a `live` build.
     doctor     Report runtime environment readiness.
     version    Print the daemon version.
@@ -431,6 +467,28 @@ mod tests {
         assert_eq!(opts.verify.as_deref(), Some("cargo test"));
         assert_eq!(opts.backend.as_deref(), Some("codex"));
         assert_eq!(opts.helper.as_deref(), Some("/bin/crustcore-net"));
+    }
+
+    #[test]
+    fn serve_parses_pr_flags() {
+        let opts = parse_serve_opts(
+            "",
+            &args(&[
+                "--open-pr",
+                "--repo",
+                "owner/name",
+                "--base=develop",
+                "--branch-prefix",
+                "bots",
+            ]),
+        );
+        assert!(opts.open_pr);
+        assert_eq!(opts.repo.as_deref(), Some("owner/name"));
+        assert_eq!(opts.base.as_deref(), Some("develop"));
+        assert_eq!(opts.branch_prefix.as_deref(), Some("bots"));
+        // Off by default (no --open-pr → no PR mode even if --repo is given).
+        let off = parse_serve_opts("", &args(&["--repo", "owner/name"]));
+        assert!(!off.open_pr);
     }
 
     #[test]

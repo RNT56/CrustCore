@@ -30,6 +30,21 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Chat → draft PR (the approval flow, lit up end-to-end).** A chat task can now open a
+  **draft** PR, gated on a per-launch human approval (invariant 14). New
+  `crustcore-daemon serve --open-pr --repo <owner/name> [--base main] [--branch-prefix
+  crustcore]`: in PR mode an execution request first asks the operator to approve (the
+  ✅/🚫 inline buttons), and only on approval does the task run — verifying, then minting an
+  `Approved<GitHubWriteCap>` and producing a verifier-evidenced draft `PrIntent` via
+  `crustcore_backend::integrate::open_pr`. The approve-first design keeps the
+  `VerifiedPatch` from ever crossing a thread/approval boundary: the cap (Send data) moves
+  into the task thread, where the patch is produced and consumed in one place. Two new
+  pure, CI-tested security helpers — `runtime::mint_github_write_cap` (the **only** chat
+  path to GitHub write authority; requires an allowlisted chat → `AuthorizedUser`, returns
+  `None` otherwise) and `runtime::pr_approval_match`. The actual git push + GitHub REST
+  `create_pull` remain the reduced live socket (`TODO(P10-net-live)`). Invariants 4, 13,
+  14, 17. Nano: n/a (daemon-only, `live`).
+
 - **Inline keyboards — 🛑 Steer + approve/deny buttons.** `crustcore_net::telegram::
   InlineKeyboard` (bounded: ≤8 rows × 8 cols, fields ≤64 bytes) threads through
   `send_message`'s new `reply_markup` arg; every converse answer carries a **🛑 Steer**
