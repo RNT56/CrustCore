@@ -33,7 +33,9 @@
 //! - `live` — live text->vector embedding via B3's net-helper seam (`TODO(B3-embed-live)`).
 //! - `ast` — tree-sitter/AST symbol spans (`TODO(C5-ast)`); the default is the conservative
 //!   grep/line-chunk fallback.
-//! - `persist` — a persistent local store snapshot (`TODO(C5-persist)`).
+//! - `persist` — a persistent local store snapshot ([`LocalVectorStore::save`] /
+//!   [`LocalVectorStore::load`]): a dependency-free, versioned, bounded, panic-free,
+//!   fail-closed "CCRG" frame, mirroring [`crustcore_index::MemoryStore`]'s snapshot.
 //! - `qdrant` / `lancedb` — external store backends, each `TODO(C5-<backend>-live)`, with
 //!   auth flowing only via [`CredentialProxy`](crustcore_secrets::CredentialProxy).
 //!
@@ -58,6 +60,9 @@ pub use plan::{ChunkResolver, QueryPlanner, RetrievalPlan, MAX_QUERY_BYTES};
 pub use store::local::LocalVectorStore;
 pub use store::mock::{MockHit, MockVectorStore};
 pub use store::{ByteSpan, ChunkId, ChunkMeta, VectorStore, MAX_NEAREST_K, MAX_STORE_HITS};
+
+#[cfg(feature = "persist")]
+pub use store::local::SnapshotError;
 
 #[cfg(feature = "qdrant")]
 pub use store::qdrant::{QdrantConfig, QdrantVectorStore};

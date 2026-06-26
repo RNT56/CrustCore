@@ -73,6 +73,39 @@ agent/PR/role/size/invariant audit trail.
   and the contract amendment of invariants 15/16 + `docs/telegram.md` §8 (owner-
   authorized) with new `docs/chat.md` / `docs/persona.md`.
 
+- **`C5-persist` implemented — persistent `LocalVectorStore` snapshot
+  (`crustcore-index-rag`, `persist` feature).** A dependency-free, versioned (`CCRG`
+  v1), length-prefixed little-endian snapshot of the per-namespace
+  `(ChunkId, embedding, ChunkMeta)` entries, mirroring `crustcore-index::MemoryStore`'s
+  discipline: a panic-free, fail-closed, bounded decoder that pre-checks every
+  count/dim/field cap **before** allocation and rejects bad magic / unknown version /
+  truncation. 8 feature-gated tests. Off by default; never in nano.
+
+- **`B3-ann` implemented — approximate nearest-neighbor index (`crustcore-index`,
+  dependency-free).** An additive `AnnIndex` using multi-table random-hyperplane LSH
+  (10 tables × 8 bits, Hamming-radius-2 probe, hyperplanes from a fixed seed via an
+  internal `SplitMix64` — deterministic, no wall clock / std rng), candidates
+  **re-ranked by the existing exact `cosine`**. `VectorMemory` is untouched. Measured
+  **top-3 recall 0.90 / top-1 1.00** vs brute force; 5 tests. Std-only.
+
+- **`C6-genai-usage` implemented — trusted GenAI model/usage attributes in
+  `crustcore-telemetry`.** The model spans now carry `gen_ai.request.model` /
+  `gen_ai.response.model`, `gen_ai.usage.input_tokens`, and
+  `gen_ai.usage.output_tokens` — sourced **only** from a new trusted carrier
+  (`usage::RecordedUsage` + `usage::UsageBySeq`, keyed by frame `seq`) that only
+  trusted code populates (the mediator's recorded `ModelCard` id + provider-reported
+  token counts), **never** from untrusted model output/payload (invariants 7, 17).
+  `FrameMeta` is unchanged; the carrier is threaded alongside it through
+  `semconv::project_frame`, `EventProjector::project_with_usage`, `FrameInput.usage`,
+  and `run_log(.., usage, ..)`. A frame without recorded usage emits no model/usage
+  attrs (no fabricated tokens); the model id still passes the single `redact`
+  chokepoint and is dropped on a tainted/secret value; Internal/Redacted model frames
+  still project to kind+seq only. `gen_ai.system = "crustcore"` (the mediator) is
+  preserved, and span/metric names remain enum-derived. New tests cover the trusted
+  source, the absence case, the untrusted-name-cannot-inject case, the
+  tool-seq-cannot-leak case, the redact-chokepoint case, and the Internal/Redacted
+  case (unit + end-to-end through `run_log`).
+
 ### Changed
 
 - **Invariants 15 & 16 amended (owner-authorized) to sanction the chat front door.**
@@ -95,6 +128,23 @@ agent/PR/role/size/invariant audit trail.
   runs on both — and the macOS live `sandbox-exec` confinement tests run in CI. The
   bubblewrap install and the `cargo-bloat` size report stay Linux-only (macOS uses
   the built-in `sandbox-exec`; the flagship size claim is the Linux nano binary).
+
+### Agent Log
+
+- **`C6-genai-usage`** — branch `claude/complete-crustcore-and-chat-frontdoor`,
+  agent role: implementer. Scope: `crustcore-telemetry` only (no new deps, no
+  `Cargo.toml`/`Cargo.lock` edits). Added `src/usage.rs`
+  (`RecordedUsage`/`UsageBySeq`); threaded a trusted `Option<&RecordedUsage>` through
+  `semconv::project_frame`, `project::EventProjector::project_with_usage`,
+  `run::FrameInput.usage`, and `run::run_log` (new `&UsageBySeq` arg); emitted the
+  three `gen_ai.*` model/usage attrs from that trusted source only. Nano size impact:
+  **n/a** (non-nano, feature-gated crate; never linked into nano). Invariants
+  verified: 6 (telemetry mints nothing / never authoritative — carrier is read-only),
+  7 & 17 (attrs from trusted recorded metadata, never untrusted payload/model output),
+  1–3 (model id passes the single redact chokepoint, dropped on taint), 11 (bounded,
+  count-capped, range-bounded). Verify: `cargo test -p crustcore-telemetry` (37 + 14 +
+  4 green), same with `--features otlp`, `cargo clippy --all-targets -- -D warnings`
+  clean (also with `otlp`), `cargo fmt --check` clean.
 
 ## [0.4.0] - 2026-06-21
 

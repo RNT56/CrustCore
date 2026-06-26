@@ -28,25 +28,32 @@ use crate::export::Exporter;
 use crate::project::EventProjector;
 use crate::redact::redact_frame;
 use crate::semconv;
+use crate::usage::{RecordedUsage, UsageBySeq};
 
 /// One unit of input for the low-level [`run`] driver: a typed frame header plus the
-/// [`ToolReceipt`] it joins to (if any). Decoupled from the on-disk log so the core
-/// is testable without constructing a full `EventLog`.
+/// [`ToolReceipt`] it joins to (if any) and the trusted [`RecordedUsage`] recorded
+/// for it (if any). Decoupled from the on-disk log so the core is testable without
+/// constructing a full `EventLog`.
 #[derive(Debug, Clone)]
 pub struct FrameInput {
     /// The frame's typed header (kind/seq/ids/visibility/redaction/actor/time).
     pub meta: FrameMeta,
     /// The joined receipt for a `ToolCallCompleted` frame, if one was bound.
     pub receipt: Option<ToolReceipt>,
+    /// Trusted recorded GenAI usage for a model frame, if trusted code recorded it.
+    /// Populated only from recorded capability metadata, never from model output
+    /// (`C6-genai-usage`; invariants 7, 17).
+    pub usage: Option<RecordedUsage>,
 }
 
 impl FrameInput {
-    /// A frame with no joined receipt.
+    /// A frame with no joined receipt and no recorded usage.
     #[must_use]
     pub fn new(meta: FrameMeta) -> Self {
         FrameInput {
             meta,
             receipt: None,
+            usage: None,
         }
     }
 
@@ -56,7 +63,16 @@ impl FrameInput {
         FrameInput {
             meta,
             receipt: Some(receipt),
+            usage: None,
         }
+    }
+
+    /// Attaches trusted recorded GenAI usage (builder style). The caller asserts the
+    /// usage comes from recorded capability metadata, never model output.
+    #[must_use]
+    pub fn with_usage(mut self, usage: RecordedUsage) -> Self {
+        self.usage = Some(usage);
+        self
     }
 }
 
@@ -98,8 +114,10 @@ pub fn run<E: Exporter>(
         if (i as u64) % rate != 0 {
             continue;
         }
-        // Project (pre-redaction), then redact at the single chokepoint.
-        let projected = projector.project(&input.meta, input.receipt.as_ref());
+        // Project (pre-redaction), then redact at the single chokepoint. Trusted
+        // recorded usage (if any) rides on the typed input, never from payload.
+        let projected =
+            projector.project_with_usage(&input.meta, input.receipt.as_ref(), input.usage.as_ref());
         if projected.is_empty() {
             continue;
         }
@@ -113,19 +131,25 @@ pub fn run<E: Exporter>(
     report
 }
 
-/// The convenience driver over an [`EventLog`] + receipts.
+/// The convenience driver over an [`EventLog`] + receipts + trusted recorded usage.
 ///
 /// Decodes the log's frames in `[seq_lo, seq_hi]` (inclusive), builds the receipt↔log
 /// join via [`verify_against_log`] (P5-join), pairs each `ToolCallCompleted` frame
-/// with its receipt, and drives [`run`]. Receipts that do not join cleanly are simply
-/// not bound to a span (the projection records the absence honestly — invariant 10);
-/// telemetry never asserts a join that the audit layer did not confirm.
+/// with its receipt, attaches each model frame's trusted [`RecordedUsage`] from
+/// `usage` (keyed by the frame's own `seq`), and drives [`run`]. Receipts that do not
+/// join cleanly are simply not bound to a span (the projection records the absence
+/// honestly — invariant 10); telemetry never asserts a join that the audit layer did
+/// not confirm. Usage is taken **only** from the trusted `usage` carrier the caller
+/// supplies (recorded capability metadata), never from any frame payload
+/// (`C6-genai-usage`; invariants 7, 17); pass [`UsageBySeq::new`] when none is known.
 ///
 /// Range filtering and `batch_bound` keep the work bounded over an arbitrarily large
 /// log (invariant 11).
+#[allow(clippy::too_many_arguments)]
 pub fn run_log<E: Exporter>(
     log: &EventLog,
     receipts: &[ToolReceipt],
+    usage: &UsageBySeq,
     seq_lo: u64,
     seq_hi: u64,
     config: &Config,
@@ -184,7 +208,24 @@ pub fn run_log<E: Exporter>(
         } else {
             None
         };
-        inputs.push(FrameInput { meta, receipt });
+        // Attach trusted recorded usage to model frames only, keyed by this exact
+        // seq. A non-model frame never gets usage; a model frame with no recorded
+        // entry stays bare (no fabricated tokens). Provenance: the trusted carrier
+        // only, never payload (`C6-genai-usage`).
+        let frame_usage = if matches!(
+            f.kind,
+            crustcore_kernel::EventKind::ModelRequestStarted
+                | crustcore_kernel::EventKind::ModelOutputReceived
+        ) {
+            usage.get(f.seq).cloned()
+        } else {
+            None
+        };
+        inputs.push(FrameInput {
+            meta,
+            receipt,
+            usage: frame_usage,
+        });
     }
 
     run(&inputs, config, redactor, exporter)

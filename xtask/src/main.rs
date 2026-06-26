@@ -205,53 +205,53 @@ fn clippy() -> Result<(), String> {
 
 /// Clippy the **feature-gated** code the default `--workspace` clippy does not see
 /// (it does not enable per-crate features): the live HTTP transport
-/// (`crustcore-net --features live`, P7-live) and the encrypted-file vault
-/// (`crustcore-secrets --features vault-file`, P8-store).
+/// (`crustcore-net --features live`, P7-live), the encrypted-file vault
+/// (`crustcore-secrets --features vault-file`, P8-store), the persistent RAG store
+/// (`crustcore-index-rag --features persist`, C5-persist), the OTLP telemetry seam
+/// (`crustcore-telemetry --features otlp`, C6), and the conversational front door
+/// (`crustcore --features chat`).
 fn clippy_features() -> Result<(), String> {
-    run(
-        "cargo",
-        &[
-            "clippy",
-            "--package",
-            "crustcore-net",
-            "--features",
-            "live",
-            "--all-targets",
-            "--",
-            "-D",
-            "warnings",
-        ],
-    )?;
-    run(
-        "cargo",
-        &[
-            "clippy",
-            "--package",
-            "crustcore-secrets",
-            "--features",
-            "vault-file",
-            "--all-targets",
-            "--",
-            "-D",
-            "warnings",
-        ],
-    )
+    for (package, feature) in [
+        ("crustcore-net", "live"),
+        ("crustcore-secrets", "vault-file"),
+        ("crustcore-index-rag", "persist"),
+        ("crustcore-telemetry", "otlp"),
+        ("crustcore", "chat"),
+    ] {
+        run(
+            "cargo",
+            &[
+                "clippy",
+                "--package",
+                package,
+                "--features",
+                feature,
+                "--all-targets",
+                "--",
+                "-D",
+                "warnings",
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 /// Run the tests behind cargo features the default `--workspace` test run does not
-/// enable. The vault's seal/open/tamper tests live behind `vault-file`; the net
-/// adapter tests run under `--workspace` already (only `UreqClient` is feature-gated).
+/// enable. The vault's seal/open/tamper tests live behind `vault-file`; the persistent
+/// RAG snapshot tests behind `persist` (C5); the OTLP projection behind `otlp` (C6).
+/// The net adapter tests run under `--workspace` already (only `UreqClient` is gated).
 fn test_features() -> Result<(), String> {
-    run(
-        "cargo",
-        &[
-            "test",
-            "--package",
-            "crustcore-secrets",
-            "--features",
-            "vault-file",
-        ],
-    )
+    for (package, feature) in [
+        ("crustcore-secrets", "vault-file"),
+        ("crustcore-index-rag", "persist"),
+        ("crustcore-telemetry", "otlp"),
+    ] {
+        run(
+            "cargo",
+            &["test", "--package", package, "--features", feature],
+        )?;
+    }
+    Ok(())
 }
 
 fn test() -> Result<(), String> {

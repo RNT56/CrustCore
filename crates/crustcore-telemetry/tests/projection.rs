@@ -7,7 +7,7 @@ use crustcore_eventlog::{EventLog, FrameMeta, RedactionState};
 use crustcore_kernel::{Actor, EventKind, Visibility};
 use crustcore_receipts::{MacKey, ReceiptChain, ReceiptParams, ToolReceipt};
 use crustcore_secrets::Redactor;
-use crustcore_telemetry::{run_log, Config, Emitted, InMemoryExporter};
+use crustcore_telemetry::{run_log, Config, Emitted, InMemoryExporter, RecordedUsage, UsageBySeq};
 use crustcore_types::{EventSeq, JobId, TaskId, Timestamp, ToolCallId};
 
 /// Builds a small, realistic log: a model request/response, a tool start/complete,
@@ -48,6 +48,7 @@ fn drive(log: &EventLog, receipts: &[ToolReceipt]) -> InMemoryExporter {
     let report = run_log(
         log,
         receipts,
+        &UsageBySeq::new(),
         0,
         u64::MAX,
         &Config::enabled_in_memory(),
@@ -92,6 +93,150 @@ fn model_spans_carry_genai_attributes() {
 }
 
 #[test]
+fn trusted_recorded_usage_flows_through_run_log_to_model_spans() {
+    // End-to-end through the redact chokepoint: trusted recorded usage keyed by the
+    // model frames' seqs lands on the request/response spans, and the values equal the
+    // trusted source. (C6-genai-usage.)
+    let (log, receipts) = fixture();
+    let usage = UsageBySeq::new()
+        .record(
+            EventSeq(1),
+            RecordedUsage::new("anthropic/claude-x", 4096, 128),
+        )
+        .record(
+            EventSeq(2),
+            RecordedUsage::new("anthropic/claude-x", 4096, 128),
+        );
+    let mut exp = InMemoryExporter::new();
+    run_log(
+        &log,
+        &receipts,
+        &usage,
+        0,
+        u64::MAX,
+        &Config::enabled_in_memory(),
+        &Redactor::new(),
+        &mut exp,
+    );
+
+    let req = exp
+        .spans()
+        .into_iter()
+        .find(|s| s.name == "gen_ai.model_request")
+        .unwrap();
+    assert!(req
+        .attrs
+        .iter()
+        .any(|(k, v)| k == "gen_ai.request.model" && v == "anthropic/claude-x"));
+    assert!(req
+        .attrs
+        .iter()
+        .any(|(k, v)| k == "gen_ai.usage.input_tokens" && v == "4096"));
+    assert!(req
+        .attrs
+        .iter()
+        .any(|(k, v)| k == "gen_ai.usage.output_tokens" && v == "128"));
+
+    let resp = exp
+        .spans()
+        .into_iter()
+        .find(|s| s.name == "gen_ai.model_response")
+        .unwrap();
+    assert!(resp
+        .attrs
+        .iter()
+        .any(|(k, v)| k == "gen_ai.response.model" && v == "anthropic/claude-x"));
+}
+
+#[test]
+fn model_spans_carry_no_usage_when_none_recorded() {
+    // With an empty usage carrier, the model spans carry NO model id / token attrs —
+    // no fabricated usage. (C6-genai-usage absence case.)
+    let (log, receipts) = fixture();
+    let exp = drive(&log, &receipts); // drive() passes an empty UsageBySeq
+    let req = exp
+        .spans()
+        .into_iter()
+        .find(|s| s.name == "gen_ai.model_request")
+        .unwrap();
+    assert!(!req.attrs.iter().any(|(k, _)| k == "gen_ai.request.model"));
+    assert!(!req
+        .attrs
+        .iter()
+        .any(|(k, _)| k == "gen_ai.usage.input_tokens"));
+    assert!(!req
+        .attrs
+        .iter()
+        .any(|(k, _)| k == "gen_ai.usage.output_tokens"));
+}
+
+#[test]
+fn recorded_usage_for_a_tool_seq_never_becomes_a_genai_attr() {
+    // A usage entry keyed to a NON-model frame seq (seq 4 = ToolCallCompleted) must
+    // never surface as gen_ai.* on any span: usage attaches only to model frames, and
+    // the model frames here (seqs 1,2) have no recorded entry.
+    let (log, receipts) = fixture();
+    let usage = UsageBySeq::new().record(EventSeq(4), RecordedUsage::new("evil/fake-model", 1, 1));
+    let mut exp = InMemoryExporter::new();
+    run_log(
+        &log,
+        &receipts,
+        &usage,
+        0,
+        u64::MAX,
+        &Config::enabled_in_memory(),
+        &Redactor::new(),
+        &mut exp,
+    );
+    // No span anywhere carries the fake model name.
+    for s in exp.spans() {
+        assert!(
+            !s.attrs.iter().any(|(_, v)| v == "evil/fake-model"),
+            "fake model name leaked onto span {}",
+            s.name
+        );
+        if s.name.starts_with("gen_ai.") {
+            assert!(!s.attrs.iter().any(|(k, _)| k == "gen_ai.request.model"));
+            assert!(!s.attrs.iter().any(|(k, _)| k == "gen_ai.response.model"));
+        }
+    }
+}
+
+#[test]
+fn recorded_usage_model_id_passes_the_redact_chokepoint() {
+    // Defense in depth: even a (mis-recorded) model id that contains a registered
+    // secret is scrubbed at the single chokepoint before export.
+    let (log, _receipts) = fixture();
+    let usage =
+        UsageBySeq::new().record(EventSeq(1), RecordedUsage::new("model-sk-SENTINEL", 1, 1));
+    let mut redactor = Redactor::new();
+    redactor.register("model-key", b"sk-SENTINEL");
+    let mut exp = InMemoryExporter::new();
+    run_log(
+        &log,
+        &[],
+        &usage,
+        0,
+        u64::MAX,
+        &Config::enabled_in_memory(),
+        &redactor,
+        &mut exp,
+    );
+    let req = exp
+        .spans()
+        .into_iter()
+        .find(|s| s.name == "gen_ai.model_request")
+        .unwrap();
+    let model = req
+        .attrs
+        .iter()
+        .find(|(k, _)| k == "gen_ai.request.model")
+        .map(|(_, v)| v.clone())
+        .unwrap();
+    assert!(!model.contains("sk-SENTINEL"), "secret survived: {model}");
+}
+
+#[test]
 fn tool_completed_span_is_receipt_bound_via_join() {
     let (log, receipts) = fixture();
     let exp = drive(&log, &receipts);
@@ -132,6 +277,7 @@ fn forged_receipt_seq_does_not_bind_to_an_unrelated_span() {
     run_log(
         &log,
         &[forged],
+        &UsageBySeq::new(),
         0,
         u64::MAX,
         &Config::enabled_in_memory(),
@@ -163,6 +309,7 @@ fn internal_visibility_frame_emits_only_kind_and_seq() {
     run_log(
         &log,
         &[],
+        &UsageBySeq::new(),
         0,
         u64::MAX,
         &Config::enabled_in_memory(),
@@ -202,6 +349,7 @@ fn redacted_state_frame_emits_no_payload_derived_attributes() {
     run_log(
         &log,
         &[r],
+        &UsageBySeq::new(),
         0,
         u64::MAX,
         &Config::enabled_in_memory(),
@@ -221,6 +369,7 @@ fn range_filter_bounds_the_frames_projected() {
     run_log(
         &log,
         &receipts,
+        &UsageBySeq::new(),
         3,
         4,
         &Config::enabled_in_memory(),
@@ -246,6 +395,7 @@ fn projection_is_read_only_log_and_receipts_unchanged() {
     run_log(
         &log,
         &receipts,
+        &UsageBySeq::new(),
         0,
         u64::MAX,
         &Config::enabled_in_memory(),
@@ -263,6 +413,7 @@ fn projection_is_read_only_log_and_receipts_unchanged() {
     run_log(
         &log,
         &receipts,
+        &UsageBySeq::new(),
         0,
         u64::MAX,
         &Config::enabled_in_memory(),
@@ -280,6 +431,7 @@ fn disabled_by_default_emits_nothing_fail_closed() {
     let report = run_log(
         &log,
         &receipts,
+        &UsageBySeq::new(),
         0,
         u64::MAX,
         &Config::default(), // enabled = false
@@ -307,7 +459,16 @@ fn span_count_is_bounded_against_an_adversarially_large_log() {
         ..Config::enabled_in_memory()
     };
     let mut exp = InMemoryExporter::new();
-    let report = run_log(&log, &[], 0, u64::MAX, &cfg, &Redactor::new(), &mut exp);
+    let report = run_log(
+        &log,
+        &[],
+        &UsageBySeq::new(),
+        0,
+        u64::MAX,
+        &cfg,
+        &Redactor::new(),
+        &mut exp,
+    );
     assert_eq!(report.frames_seen, 100);
     assert!(matches!(exp.emitted()[0], Emitted::Span(_)));
     assert_eq!(exp.spans().len(), 100);
