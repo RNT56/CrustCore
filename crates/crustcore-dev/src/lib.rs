@@ -66,6 +66,7 @@ pub mod config;
 pub mod mutation;
 pub mod request;
 pub mod route_class;
+pub mod stream;
 pub mod views;
 
 #[cfg(feature = "serve")]
@@ -84,3 +85,4 @@ pub use config::{ConfigError, DevConfig};
 pub use mutation::{route, ApprovalDispatch, MutationError, MutationGate};
 pub use request::{DevRequest, DevResponse, RequestError, Status};
 pub use route_class::{RouteClass, RouteSpec};
+pub use stream::{next_snapshot, DevSnapshot, SnapshotBatch, SnapshotCursor};

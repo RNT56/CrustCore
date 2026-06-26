@@ -43,13 +43,20 @@ tokio = { version = "1", optional = true, default-features = false, features = [
     "rt-multi-thread",
     "net",
     "macros",
+    "time",
+    "io-util",
+] }
+# Drives the live `/ws` SSE snapshot stream off a `tokio::time::interval`. A tiny,
+# official tokio crate; `serve`-gated and never in the nano graph.
+tokio-stream = { version = "0.1", optional = true, default-features = false, features = [
+    "time",
 ] }
 
 [features]
 default = []
-# Wire the real loopback HTTP server. Self-verified by the author; NOT part of the
-# default workspace gate. Real provider/MCP/spawned-helper wiring under this feature
-# is marked TODO(C7-serve-live).
-serve = ["dep:axum", "dep:tokio"]
+# Wire the real loopback HTTP server + the live `/ws` SSE snapshot stream. Self-verified
+# by the author; NOT part of the default workspace gate. Real provider/MCP/spawned-helper
+# wiring under this feature is marked TODO(C7-serve-live).
+serve = ["dep:axum", "dep:tokio", "dep:tokio-stream"]
 # Live integration tests (real net helper / MCP transport). All `#[ignore]`d; never CI.
 live-dev = ["serve"]
