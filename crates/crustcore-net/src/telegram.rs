@@ -44,6 +44,18 @@ pub const LONG_POLL_SECS: u32 = 50;
 /// (invariant 11) — mirrors the contract on `crustcore_daemon::telegram::TelegramApi`.
 pub const UPDATE_BATCH_LIMIT: u32 = 100;
 
+/// Max rows serialized from an [`InlineKeyboard`] (invariant 11). A hostile/huge
+/// keyboard is truncated to this many rows so the `sendMessage` body stays bounded.
+pub const INLINE_KEYBOARD_MAX_ROWS: usize = 8;
+
+/// Max buttons per row serialized from an [`InlineKeyboard`] (invariant 11).
+pub const INLINE_KEYBOARD_MAX_COLS: usize = 8;
+
+/// Max bytes of a button's `text` or `callback_data` serialized from an
+/// [`InlineKeyboard`] (invariant 11). Each is truncated to this many bytes (on a
+/// char boundary) so neither can balloon the body.
+pub const INLINE_KEYBOARD_MAX_FIELD_BYTES: usize = 64;
+
 /// One update decoded from a `getUpdates` response — the net-side shape the daemon
 /// maps onto its own `RawUpdate`. Everything here is **untrusted** until the daemon's
 /// allowlist check; the claimed `from_username` is never used for identity.
@@ -63,6 +75,75 @@ pub struct TgUpdate {
     pub text: Option<String>,
     /// Inline-button callback payload, if this update is a callback query.
     pub callback_data: Option<String>,
+}
+
+/// A Telegram inline keyboard: rows of callback buttons (`(text, callback_data)`).
+/// Bounded; serialized into `reply_markup` on send.
+///
+/// Bounds (invariant 11): when serialized, at most [`INLINE_KEYBOARD_MAX_ROWS`] rows,
+/// each with at most [`INLINE_KEYBOARD_MAX_COLS`] buttons, and each button's `text` and
+/// `callback_data` truncated to [`INLINE_KEYBOARD_MAX_FIELD_BYTES`] bytes (on a char
+/// boundary). An empty keyboard serializes to **no** `reply_markup` at all.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InlineKeyboard {
+    /// Rows of `(text, callback_data)` buttons.
+    pub rows: Vec<Vec<(String, String)>>,
+}
+
+impl InlineKeyboard {
+    /// A keyboard with a single row of `buttons`.
+    #[must_use]
+    pub fn single_row(buttons: Vec<(String, String)>) -> Self {
+        InlineKeyboard {
+            rows: vec![buttons],
+        }
+    }
+
+    /// True when there are no rows (or every row is empty) — serializes to no
+    /// `reply_markup`.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows.iter().all(Vec::is_empty)
+    }
+
+    /// Serializes to `{"inline_keyboard":[[{"text":..,"callback_data":..}, ...], ...]}`,
+    /// applying the bounds: rows/cols are capped and each field truncated on a char
+    /// boundary (invariant 11). Empty rows are dropped.
+    fn to_json(&self) -> serde_json::Value {
+        let rows: Vec<serde_json::Value> = self
+            .rows
+            .iter()
+            .filter(|r| !r.is_empty())
+            .take(INLINE_KEYBOARD_MAX_ROWS)
+            .map(|row| {
+                let buttons: Vec<serde_json::Value> = row
+                    .iter()
+                    .take(INLINE_KEYBOARD_MAX_COLS)
+                    .map(|(text, data)| {
+                        serde_json::json!({
+                            "text": truncate_field(text),
+                            "callback_data": truncate_field(data),
+                        })
+                    })
+                    .collect();
+                serde_json::Value::Array(buttons)
+            })
+            .collect();
+        serde_json::json!({ "inline_keyboard": rows })
+    }
+}
+
+/// Truncates `s` to at most [`INLINE_KEYBOARD_MAX_FIELD_BYTES`] bytes, on a UTF-8 char
+/// boundary so the result is always valid (never splits a multibyte char).
+fn truncate_field(s: &str) -> &str {
+    if s.len() <= INLINE_KEYBOARD_MAX_FIELD_BYTES {
+        return s;
+    }
+    let mut end = INLINE_KEYBOARD_MAX_FIELD_BYTES;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Why a Telegram Bot API call failed. A non-2xx (or `ok: false`) maps here — it never
@@ -109,11 +190,18 @@ pub trait TelegramBotApi {
     fn get_updates(&self, offset: i64) -> Result<Vec<TgUpdate>, TgError>;
 
     /// Sends `text` (already redacted/rendered upstream) to `chat_id`; returns the new
-    /// message id.
+    /// message id. When `reply_markup` is `Some` and non-empty, the bounded inline
+    /// keyboard (see [`InlineKeyboard`]) is attached to the message; otherwise the body
+    /// is a plain message with no `reply_markup`.
     ///
     /// # Errors
     /// [`TgError`] on any non-success, `ok: false`, or unparseable response.
-    fn send_message(&self, chat_id: i64, text: &str) -> Result<i64, TgError>;
+    fn send_message(
+        &self,
+        chat_id: i64,
+        text: &str,
+        reply_markup: Option<&InlineKeyboard>,
+    ) -> Result<i64, TgError>;
 }
 
 /// The live Telegram Bot API client over an [`HttpClient`] transport + a credential
@@ -179,13 +267,25 @@ pub fn get_updates_body(offset: i64) -> Vec<u8> {
 }
 
 /// Builds the `sendMessage` request body (testable independently of the transport).
+/// When `reply_markup` is `Some` and non-empty, a bounded `"reply_markup"` field (the
+/// keyboard's JSON) is added; otherwise it is omitted and the body is byte-identical to
+/// a plain text-only message.
 #[must_use]
-pub fn send_message_body(chat_id: i64, text: &str) -> Vec<u8> {
-    serde_json::to_vec(&serde_json::json!({
+pub fn send_message_body(
+    chat_id: i64,
+    text: &str,
+    reply_markup: Option<&InlineKeyboard>,
+) -> Vec<u8> {
+    let mut obj = serde_json::json!({
         "chat_id": chat_id,
         "text": text,
-    }))
-    .unwrap_or_default()
+    });
+    if let Some(kb) = reply_markup {
+        if !kb.is_empty() {
+            obj["reply_markup"] = kb.to_json();
+        }
+    }
+    serde_json::to_vec(&obj).unwrap_or_default()
 }
 
 /// Maps a non-2xx HTTP status to a typed [`TgError`]. Status-only: the provider body
@@ -271,11 +371,16 @@ impl TelegramBotApi for RestTelegram {
             .collect())
     }
 
-    fn send_message(&self, chat_id: i64, text: &str) -> Result<i64, TgError> {
+    fn send_message(
+        &self,
+        chat_id: i64,
+        text: &str,
+        reply_markup: Option<&InlineKeyboard>,
+    ) -> Result<i64, TgError> {
         let url = self
             .method_url("sendMessage")
             .ok_or(TgError::Unauthorized)?;
-        let body = send_message_body(chat_id, text);
+        let body = send_message_body(chat_id, text, reply_markup);
         let resp = self
             .http
             .post_json(&url, &Self::headers(), &body)
@@ -318,10 +423,110 @@ mod tests {
 
     #[test]
     fn send_message_body_carries_chat_and_text() {
-        let body = send_message_body(100, "verify PASSED");
+        let body = send_message_body(100, "verify PASSED", None);
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["chat_id"], 100);
         assert_eq!(v["text"], "verify PASSED");
+        // A plain (None) body carries no reply_markup.
+        assert!(v.get("reply_markup").is_none());
+    }
+
+    #[test]
+    fn send_message_body_none_is_byte_identical_to_plain_body() {
+        // The `None` path must be byte-for-byte the same as a text-only message — no
+        // reply_markup key, same field order — so existing senders are unchanged.
+        let with_none = send_message_body(100, "verify PASSED", None);
+        let expected = serde_json::to_vec(&serde_json::json!({
+            "chat_id": 100,
+            "text": "verify PASSED",
+        }))
+        .unwrap();
+        assert_eq!(with_none, expected);
+        // An empty keyboard is treated like None: still no reply_markup.
+        let empty_kb = InlineKeyboard::default();
+        assert_eq!(
+            send_message_body(100, "verify PASSED", Some(&empty_kb)),
+            expected
+        );
+    }
+
+    #[test]
+    fn send_message_body_with_keyboard_carries_inline_keyboard() {
+        let kb = InlineKeyboard::single_row(vec![
+            ("Approve".to_string(), "ap:7:approve:00".to_string()),
+            ("Deny".to_string(), "ap:7:deny:00".to_string()),
+        ]);
+        let body = send_message_body(100, "approve?", Some(&kb));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["chat_id"], 100);
+        assert_eq!(v["text"], "approve?");
+        let rows = &v["reply_markup"]["inline_keyboard"];
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        let buttons = rows[0].as_array().unwrap();
+        assert_eq!(buttons.len(), 2);
+        assert_eq!(buttons[0]["text"], "Approve");
+        assert_eq!(buttons[0]["callback_data"], "ap:7:approve:00");
+        assert_eq!(buttons[1]["text"], "Deny");
+        assert_eq!(buttons[1]["callback_data"], "ap:7:deny:00");
+    }
+
+    #[test]
+    fn over_cap_keyboard_is_bounded() {
+        // A hostile/huge keyboard: many rows, many buttons per row, oversized fields.
+        let big_text = "x".repeat(500);
+        let big_data = "y".repeat(500);
+        let rows: Vec<Vec<(String, String)>> = (0..50)
+            .map(|_| {
+                (0..50)
+                    .map(|_| (big_text.clone(), big_data.clone()))
+                    .collect()
+            })
+            .collect();
+        let kb = InlineKeyboard { rows };
+        let body = send_message_body(1, "hi", Some(&kb));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let rows = v["reply_markup"]["inline_keyboard"].as_array().unwrap();
+        // Rows capped.
+        assert_eq!(rows.len(), INLINE_KEYBOARD_MAX_ROWS);
+        for row in rows {
+            let buttons = row.as_array().unwrap();
+            // Buttons-per-row capped.
+            assert_eq!(buttons.len(), INLINE_KEYBOARD_MAX_COLS);
+            for b in buttons {
+                // Each field truncated to the byte cap.
+                assert_eq!(
+                    b["text"].as_str().unwrap().len(),
+                    INLINE_KEYBOARD_MAX_FIELD_BYTES
+                );
+                assert_eq!(
+                    b["callback_data"].as_str().unwrap().len(),
+                    INLINE_KEYBOARD_MAX_FIELD_BYTES
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn field_truncation_respects_char_boundaries() {
+        // A multibyte field truncated to the byte cap must stay valid UTF-8 (never split
+        // a char) — the serialized string is <= the cap and round-trips as valid JSON.
+        let multibyte = "é".repeat(40); // 80 bytes (2 bytes/char)
+        let kb = InlineKeyboard::single_row(vec![(multibyte.clone(), multibyte)]);
+        let body = send_message_body(1, "hi", Some(&kb));
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let text = v["reply_markup"]["inline_keyboard"][0][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text.len() <= INLINE_KEYBOARD_MAX_FIELD_BYTES);
+        // 64 bytes / 2 bytes-per-char lands on a boundary → 32 'é's.
+        assert_eq!(text.chars().count(), 32);
+    }
+
+    #[test]
+    fn empty_keyboard_is_empty() {
+        assert!(InlineKeyboard::default().is_empty());
+        assert!(InlineKeyboard { rows: vec![vec![]] }.is_empty());
+        assert!(!InlineKeyboard::single_row(vec![("a".into(), "b".into())]).is_empty());
     }
 
     #[test]
@@ -367,7 +572,7 @@ mod tests {
             200,
             r#"{"ok":true,"result":{"message_id":987,"chat":{"id":100}}}"#,
         )]);
-        assert_eq!(tg.send_message(100, "hello").unwrap(), 987);
+        assert_eq!(tg.send_message(100, "hello", None).unwrap(), 987);
     }
 
     #[test]
@@ -404,7 +609,7 @@ mod tests {
         // 5xx → ServerError.
         assert_eq!(
             client(vec![Canned::with_body(503, "bad gateway")])
-                .send_message(1, "x")
+                .send_message(1, "x", None)
                 .unwrap_err(),
             TgError::ServerError(503)
         );
@@ -413,7 +618,7 @@ mod tests {
             200,
             r#"{"ok":false,"description":"chat not found"}"#,
         )])
-        .send_message(1, "x")
+        .send_message(1, "x", None)
         {
             Err(TgError::Api(m)) => assert!(m.contains("chat not found")),
             other => panic!("expected Api error, got {other:?}"),
@@ -437,7 +642,10 @@ mod tests {
             Rc::new(StaticCredentials::new()),
         );
         assert_eq!(tg.get_updates(0).unwrap_err(), TgError::Unauthorized);
-        assert_eq!(tg.send_message(1, "x").unwrap_err(), TgError::Unauthorized);
+        assert_eq!(
+            tg.send_message(1, "x", None).unwrap_err(),
+            TgError::Unauthorized
+        );
     }
 
     #[test]

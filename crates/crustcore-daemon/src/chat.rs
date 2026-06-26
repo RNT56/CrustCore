@@ -100,6 +100,12 @@ impl<'r> ChatBridge<'r> {
         match event {
             RuntimeEvent::Command(_) => ChatReply::Command,
             RuntimeEvent::ApprovalCallback(_) => ChatReply::Approval,
+            // The 🛑 Steer button arms the next turn as a steer (handled by the runtime
+            // loop directly too; this keeps the bridge's dispatch exhaustive + safe).
+            RuntimeEvent::SteerButton => {
+                self.arm_steer();
+                ChatReply::Quiet
+            }
             RuntimeEvent::Steer(text) => self.turn(text.as_str(), true, model),
             RuntimeEvent::QueuedTurn(text) => {
                 if self.steer_armed {
