@@ -12,10 +12,15 @@
 //! (`docs/telegram.md` §1). The **runtime loop** ([`TelegramPoller`], P9-net) drives
 //! the long-poll → dedupe → normalize → route pipeline over a [`TelegramApi`] and
 //! sends only rendered, redacted [`ModelVisibleText`] back — fully testable with a
-//! mock, no network. The live Bot API HTTP (getUpdates/sendMessage over the spawned
-//! `crustcore-net` helper, the bot token in the URL path via the credential proxy)
-//! is `TODO(P9-net-live)`; this module works on already-decoded [`RawUpdate`]s so the
-//! trust-critical logic is deterministic and fully tested.
+//! mock, no network. The live Bot API HTTP (getUpdates/sendMessage) is realized by
+//! [`LiveTelegramApi`] (behind the `live` feature), a thin adapter wrapping
+//! `crustcore_net::telegram::RestTelegram`: it maps the net-side `TgUpdate` onto this
+//! module's [`RawUpdate`] and forwards a rendered [`ModelVisibleText`] reply to
+//! `RestTelegram::send_message`. The bot token is resolved per call by the net client
+//! through the credential proxy (URL-path credential), never seen here. The only part
+//! that needs a real socket — `RestTelegram`'s HTTP round-trip — is the reduced
+//! `TODO(P9-net-live)` seam, exercised by an `#[ignore]`d test; the `TgUpdate →
+//! RawUpdate` mapping is CI-tested.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -740,10 +745,11 @@ fn hash_hex(bytes: &[u8; 32]) -> String {
 
 // ---------------------------------------------------------------------------
 // The Bot API runtime loop (P9-net): long-poll → normalize/dedupe/route, and the
-// redacted-only outbound send. The live HTTP transport (getUpdates/sendMessage over
-// the spawned `crustcore-net` helper, authenticated by the credential proxy — the
-// bot token goes in the URL path) is `TODO(P9-net-live)`; this loop drives the
-// already-tested core over a `TelegramApi` so it is fully testable with no network.
+// redacted-only outbound send. The live HTTP transport is `LiveTelegramApi` below
+// (behind `live`, wrapping `crustcore_net::telegram::RestTelegram`); the only seam
+// left is `RestTelegram`'s real socket — `TODO(P9-net-live)`, `#[ignore]`d. This
+// loop drives the already-tested core over a `TelegramApi` so it is fully testable
+// with no network.
 // ---------------------------------------------------------------------------
 
 /// A transport-level failure talking to the Bot API.
@@ -859,6 +865,100 @@ impl TelegramPoller {
             }
         }
         Ok(events)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Live Bot API adapter (P9-net-live) — wraps `crustcore_net::telegram::RestTelegram`
+// ---------------------------------------------------------------------------
+
+/// The live [`TelegramApi`] implementation (behind the `live` feature): a thin adapter
+/// over `crustcore_net::telegram::RestTelegram`. It does **no** decision-making — every
+/// trust-critical step (allowlist, dedupe, normalize, queue/steer, nonce approvals,
+/// redacted rendering) stays in this module's already-tested core. The adapter only:
+///
+/// 1. maps the net-side [`TgUpdate`](crustcore_net::telegram::TgUpdate) onto this
+///    module's [`RawUpdate`] (still untrusted until the poller's allowlist check), and
+/// 2. forwards a rendered, redacted [`ModelVisibleText`] reply to
+///    [`RestTelegram::send_message`](crustcore_net::telegram::RestTelegram::send_message)
+///    as a plain `&str` (the redaction already happened upstream — the type guarantees
+///    nothing but redacted text reaches the wire; invariants 2, 5, 15).
+///
+/// The bot token is **never** seen here: `RestTelegram` resolves it per call from the
+/// credential proxy and splices it into the URL path. The only thing this adapter cannot
+/// run in CI is `RestTelegram`'s real HTTPS round-trip — the reduced `TODO(P9-net-live)`
+/// seam, covered by an `#[ignore]`d test. The `TgUpdate → RawUpdate` mapping itself is
+/// CI-tested with a `RestTelegram` over a canned `ReplayClient` (no network).
+#[cfg(feature = "live")]
+pub struct LiveTelegramApi<T> {
+    bot: T,
+}
+
+#[cfg(feature = "live")]
+impl<T> LiveTelegramApi<T> {
+    /// Wraps a net-side Telegram Bot API client (normally a
+    /// `crustcore_net::telegram::RestTelegram`, but any
+    /// `crustcore_net::telegram::TelegramBotApi` works — a mock drives the CI mapping
+    /// test). Construct the inner `RestTelegram` from the operator's credential source
+    /// + the `live` HTTP transport.
+    pub fn new(bot: T) -> Self {
+        LiveTelegramApi { bot }
+    }
+}
+
+/// Maps a net-side [`TgUpdate`](crustcore_net::telegram::TgUpdate) onto this module's
+/// [`RawUpdate`]. A pure, total field copy — the two shapes are deliberately identical
+/// so the daemon's normalization is reused byte-for-byte. Exposed (behind `live`) so the
+/// CI mapping test can assert it directly without a live socket.
+#[cfg(feature = "live")]
+#[must_use]
+pub fn raw_update_from_net(u: &crustcore_net::telegram::TgUpdate) -> RawUpdate {
+    RawUpdate {
+        update_id: u.update_id,
+        chat_id: u.chat_id,
+        message_id: u.message_id,
+        from_user_id: u.from_user_id,
+        from_username: u.from_username.clone(),
+        text: u.text.clone(),
+        callback_data: u.callback_data.clone(),
+    }
+}
+
+/// Maps a net-side [`TgError`](crustcore_net::telegram::TgError) onto this module's
+/// [`TgError`]. The net error is already token-free (status-only); this only re-shapes it
+/// into the two-variant runtime-loop error. A 401 means the credential proxy must
+/// re-resolve the token, so it is surfaced as a transport-class failure, never a
+/// fabricated success.
+#[cfg(feature = "live")]
+fn tg_error_from_net(e: &crustcore_net::telegram::TgError) -> TgError {
+    use crustcore_net::telegram::TgError as N;
+    match e {
+        // `ok: false` is a logical API error (e.g. "chat not found") — Telegram-authored,
+        // token-free text.
+        N::Api(m) => TgError::Api(m.clone()),
+        // Everything else (status, parse, io) is a transport-class failure. The Display
+        // forms are already token-free.
+        other => TgError::Transport(other.to_string()),
+    }
+}
+
+#[cfg(feature = "live")]
+impl<T: crustcore_net::telegram::TelegramBotApi> TelegramApi for LiveTelegramApi<T> {
+    fn get_updates(&self, offset: i64) -> Result<Vec<RawUpdate>, TgError> {
+        let updates = self
+            .bot
+            .get_updates(offset)
+            .map_err(|e| tg_error_from_net(&e))?;
+        // The net client already bounds the batch (Telegram's `limit`); map each.
+        Ok(updates.iter().map(raw_update_from_net).collect())
+    }
+
+    fn send_message(&self, chat: ChatId, text: &ModelVisibleText) -> Result<i64, TgError> {
+        // `text` can only be a redacted `ModelVisibleText` (constructed solely via the
+        // `Redactor`), so the wire send carries nothing unredacted (invariants 2, 5, 15).
+        self.bot
+            .send_message(chat.0, text.as_str())
+            .map_err(|e| tg_error_from_net(&e))
     }
 }
 
@@ -1252,5 +1352,147 @@ mod tests {
             !sent[0].1.contains("TGSENTINEL"),
             "outbound must be redacted"
         );
+    }
+
+    // --- P9-net-live: net TgUpdate -> daemon RawUpdate mapping + redacted send ---
+    #[cfg(feature = "live")]
+    mod live {
+        use super::*;
+        use crustcore_net::telegram::TgUpdate;
+
+        #[test]
+        fn net_tg_update_maps_to_daemon_raw_update() {
+            // A net-side text message decodes to a daemon RawUpdate field-for-field; the
+            // (untrusted) username carries over but is never used for identity downstream.
+            let net_msg = TgUpdate {
+                update_id: 11,
+                chat_id: 100,
+                message_id: 5,
+                from_user_id: 7,
+                from_username: Some("alice".into()),
+                text: Some("fix the bug".into()),
+                callback_data: None,
+            };
+            let raw = raw_update_from_net(&net_msg);
+            assert_eq!(raw.update_id, 11);
+            assert_eq!(raw.chat_id, 100);
+            assert_eq!(raw.message_id, 5);
+            assert_eq!(raw.from_user_id, 7);
+            assert_eq!(raw.from_username.as_deref(), Some("alice"));
+            assert_eq!(raw.text.as_deref(), Some("fix the bug"));
+            assert!(raw.callback_data.is_none());
+
+            // A net-side callback maps to a callback RawUpdate (no text, carries data).
+            let net_cb = TgUpdate {
+                update_id: 12,
+                chat_id: 100,
+                message_id: 6,
+                from_user_id: 7,
+                from_username: Some("alice".into()),
+                text: None,
+                callback_data: Some("ap:7:approve:00".into()),
+            };
+            let raw = raw_update_from_net(&net_cb);
+            assert_eq!(raw.update_id, 12);
+            assert_eq!(raw.callback_data.as_deref(), Some("ap:7:approve:00"));
+            assert!(raw.text.is_none());
+
+            // And the mapped RawUpdate flows through the SAME normalize the mock path uses:
+            // an allowlisted text message routes to a queued turn.
+            let allow = ChatAllowlist::of(&[100]);
+            let env = normalize(&raw_update_from_net(&net_msg), &allow, ts(1)).unwrap();
+            assert!(matches!(route(env), RuntimeEvent::QueuedTurn(_)));
+        }
+
+        /// A mock net-side `TelegramBotApi` so the `LiveTelegramApi` adapter (the
+        /// `TgUpdate → RawUpdate` map + the redacted send) is CI-tested without a socket.
+        struct MockBot {
+            updates: Vec<TgUpdate>,
+            sent: std::cell::RefCell<Vec<(i64, String)>>,
+        }
+        impl crustcore_net::telegram::TelegramBotApi for MockBot {
+            fn get_updates(
+                &self,
+                offset: i64,
+            ) -> Result<Vec<TgUpdate>, crustcore_net::telegram::TgError> {
+                Ok(self
+                    .updates
+                    .iter()
+                    .filter(|u| u.update_id >= offset)
+                    .cloned()
+                    .collect())
+            }
+            fn send_message(
+                &self,
+                chat_id: i64,
+                text: &str,
+            ) -> Result<i64, crustcore_net::telegram::TgError> {
+                self.sent.borrow_mut().push((chat_id, text.to_string()));
+                Ok(self.sent.borrow().len() as i64)
+            }
+        }
+
+        #[test]
+        fn live_adapter_drives_the_poller_and_sends_redacted_only() {
+            let bot = MockBot {
+                updates: vec![
+                    TgUpdate {
+                        update_id: 1,
+                        chat_id: 100,
+                        message_id: 1,
+                        from_user_id: 1,
+                        from_username: None,
+                        text: Some("/help".into()),
+                        callback_data: None,
+                    },
+                    TgUpdate {
+                        update_id: 2,
+                        chat_id: 999, // not allowlisted -> rejected by the same core
+                        message_id: 2,
+                        from_user_id: 1,
+                        from_username: Some("admin".into()),
+                        text: Some("spoof".into()),
+                        callback_data: None,
+                    },
+                ],
+                sent: std::cell::RefCell::new(Vec::new()),
+            };
+            let api = LiveTelegramApi::new(bot);
+            let mut poller = TelegramPoller::new(ChatAllowlist::of(&[100]));
+            let events = poller.poll_once(&api, ts(1)).unwrap();
+            assert_eq!(events.len(), 1, "only the allowlisted /help survives");
+            assert!(matches!(events[0], RuntimeEvent::Command(Command::Help)));
+            assert_eq!(poller.rejected_count(), 1);
+
+            // Outbound through the adapter is redacted-only (the ModelVisibleText type).
+            let mut redactor = Redactor::new();
+            redactor.register("tok", b"sk-LIVESENTINEL");
+            let rendered = OutboundRenderer::new(&redactor).logs("leak sk-LIVESENTINEL");
+            assert!(api.send_message(ChatId(100), &rendered).is_ok());
+        }
+
+        // The real getUpdates/sendMessage round-trip against api.telegram.org is `#[ignore]`d
+        // — it needs a real bot token + network and never runs in CI (only the mapping +
+        // redacted send above are CI-tested). This is the reduced TODO(P9-net-live) seam.
+        #[test]
+        #[ignore = "live: real Telegram bot token + network (TODO P9-net-live)"]
+        fn live_telegram_round_trip_smoke() {
+            use crustcore_net::credsource::StaticCredentials;
+            use crustcore_net::telegram::{RestTelegram, TELEGRAM_API};
+            use crustcore_net::transport::UreqClient;
+            use std::rc::Rc;
+
+            let token =
+                std::env::var("CRUSTCORE_TG_BOT_TOKEN").expect("set CRUSTCORE_TG_BOT_TOKEN");
+            let rest = RestTelegram::new(
+                TELEGRAM_API,
+                "tg",
+                Rc::new(UreqClient::new()),
+                Rc::new(StaticCredentials::new().with("tg", &token)),
+            );
+            let api = LiveTelegramApi::new(rest);
+            // A single short long-poll; assert it round-trips through the adapter mapping.
+            let _ = api.get_updates(0).expect("getUpdates round-trip");
+        }
     }
 }

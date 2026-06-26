@@ -225,6 +225,7 @@ fn clippy_features() -> Result<(), String> {
         ("crustcore-mcp", "http"),
         ("crustcore-sandbox", "firecracker"),
         ("crustcore-sandbox", "windows-native"),
+        ("crustcore-daemon", "live"),
         ("crustcore", "chat"),
     ] {
         run(
@@ -262,6 +263,7 @@ fn test_features() -> Result<(), String> {
         ("crustcore-telemetry", "otlp"),
         ("crustcore-mcp", "http"),
         ("crustcore-sandbox", "firecracker"),
+        ("crustcore-daemon", "live"),
     ] {
         run(
             "cargo",

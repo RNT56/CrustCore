@@ -17,12 +17,22 @@
 //! the **self-improvement loop runner** ([`run_cycle`](crate::selfimprove::run_cycle),
 //! B5-autoloop: eval-run → evidence-gate → contract-gate → *draft* self-PR over an
 //! `EvalRunner` seam — no self-merge, no kernel mutation) are implemented and CI-tested.
-//! The Bot API HTTP long-polling/send (`TODO(P9-net)`), the GitHub loop, the live
-//! `WorktreeSubagentExecutor` (`TODO(P11-exec-live)`), the live advisor routing +
-//! advisor-note log append (`TODO(P12-native-live)`), the live webhook HTTP listener +
-//! GitHub App JWT/RS256 auth (`TODO(B2-webhook-live)`/`TODO(B2-gh-app-live)`), the live
-//! autoloop evals/PRs + multi-repo orchestration (`TODO(B5-autoloop-live)`), and
-//! supervision land in later phases.
+//!
+//! **The live transports are now wired behind the `live` cargo feature** (the default
+//! build stays mock-driven and CI-green): the Telegram Bot API HTTP via
+//! [`telegram::LiveTelegramApi`] over `crustcore_net::telegram::RestTelegram`
+//! (`TODO(P9-net-live)`), the GitHub App installation-token mint
+//! ([`github::mint_installation_token`], `TODO(B2-gh-app-live)`) + the git
+//! credential-helper argv parser ([`github::parse_push_argv`]), the live webhook HTTP
+//! listener ([`webhook::serve_webhooks_once`], `TODO(B2-webhook-live)`), the live
+//! [`exec::WorktreeSubagentExecutor`] (`TODO(P11-exec-live)`), the live advisor routing
+//! through the spawned net helper ([`advisor::consult_via_net_helper`],
+//! `TODO(P12-native-live)`), and the live [`selfimprove::LiveEvalRunner`] + gate-preserving
+//! draft-PR seam ([`selfimprove::draft_pr_request`], `TODO(B5-autoloop-live)`). Each
+//! reduced `TODO(*-live)` is now only the irreducible network/sandbox/provider socket
+//! (`#[ignore]`d); the mapping/adapter glue is CI-tested. The GitHub task/PR loop driver,
+//! the admin socket, leases/heartbeats/recovery, and multi-repo orchestration
+//! (`TODO(P10-net)`) land with the daemon runtime entry point.
 #![forbid(unsafe_code)]
 
 pub mod advisor;

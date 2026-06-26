@@ -11,10 +11,22 @@
 //! untrusted PR/issue-comment ingestion.
 //!
 //! The actual REST/GraphQL calls and installation-token minting are the
-//! `crustcore-net` adapter's job (`TODO(P10-net)`), authenticated by the Phase-8
-//! credential proxy; this module is the deterministic, fully-tested policy core.
-//! Opening a PR from a `VerifiedPatch` is the type-13 gate in
-//! `crustcore_backend::integrate::open_pr`.
+//! `crustcore-net` adapter's job, authenticated by the Phase-8 credential proxy; this
+//! module is the deterministic, fully-tested policy core. Opening a PR from a
+//! `VerifiedPatch` is the type-13 gate in `crustcore_backend::integrate::open_pr`.
+//!
+//! **Live wiring (behind the `live` feature).** Two thin adapters connect this core to
+//! the now-existing net transports:
+//! - [`mint_installation_token`] (P10/B2-gh-app) drives
+//!   `crustcore_net::githubapp::AppTokenMinter` for the preferred
+//!   [`AuthMode::GitHubApp`] posture — a short-lived installation token the
+//!   `RestGitHub` client then carries. The RSA key + minted JWT never leave the net
+//!   client; this is a one-call auth-path wrapper. Reduced seam: the real token
+//!   exchange against api.github.com is `TODO(B2-gh-app-live)`, `#[ignore]`d.
+//! - [`parse_push_argv`] (P10-net) parses the in-sandbox git's `push` argv **once**
+//!   into the structured [`PushRequest`] that [`validate_push`] consumes — closing the
+//!   `TODO(P10-net)` credential-helper seam (the parse, fully CI-tested; the
+//!   helper-process exec that calls it is the `#[ignore]`d socket).
 
 use std::collections::BTreeMap;
 
@@ -122,7 +134,7 @@ impl RepoRegistry {
 
 /// A push the in-sandbox git wants to make, presented to the credential proxy as a
 /// **structured descriptor** — never a raw, re-parseable string. The trusted
-/// credential-helper wrapper (`TODO(P10-net)`) parses git's argv once and fills
+/// credential-helper wrapper parses git's argv once (via [`parse_push_argv`]) and fills
 /// this; the validator then checks **every** ref and the explicit force flag, so a
 /// `git push origin a:b c:main` can never smuggle an unvalidated second ref past
 /// the proxy (`docs/github.md` §4.1 "refspec smuggling"). A single string field was
@@ -166,6 +178,62 @@ impl PushRequest {
 #[must_use]
 pub fn is_force_flag(token: &str) -> bool {
     token == "-f" || token.starts_with("--force")
+}
+
+/// Parses the in-sandbox git's `push` argv into the structured [`PushRequest`] that
+/// [`validate_push`] consumes (closing the `TODO(P10-net)` credential-helper seam). The
+/// trusted helper-process wrapper knows the worktree's bound `repo`/`host` (from the
+/// registered capability, **not** from the argv) and passes the argv tokens git would
+/// run; this turns them into the structured descriptor — exactly once, so the validator
+/// sees every ref individually and the force flag explicitly.
+///
+/// Parsing rules (deliberately conservative — when in doubt, mark force / surface the
+/// ref so the validator fails closed):
+/// - **any** `--force…` spelling or `-f` (per [`is_force_flag`]) sets `force = true`;
+/// - the leading `push` verb is skipped; the **first non-flag** token is the remote
+///   (e.g. `origin`) and is consumed as the remote, not a refspec;
+/// - every remaining non-flag token is a **refspec** (each validated individually, so a
+///   `+a:b` per-ref force marker or a protected/out-of-prefix dst is caught);
+/// - unknown `-`/`--` flags are ignored for ref purposes but never silently treated as a
+///   refspec.
+///
+/// The helper never trusts the argv for identity: `repo` and `host` come from the bound
+/// capability, so an argv that names a different remote URL cannot redirect the push
+/// (the validator's repo/host check is the backstop).
+#[must_use]
+pub fn parse_push_argv(
+    repo: impl Into<String>,
+    host: impl Into<String>,
+    argv: &[&str],
+) -> PushRequest {
+    let mut force = false;
+    let mut remote_seen = false;
+    let mut refspecs: Vec<String> = Vec::new();
+
+    for &tok in argv {
+        if tok == "push" && !remote_seen && refspecs.is_empty() {
+            // The leading subcommand verb (the helper may or may not include it).
+            continue;
+        }
+        if is_force_flag(tok) {
+            force = true;
+            continue;
+        }
+        if tok.starts_with('-') {
+            // Any other flag (e.g. `--set-upstream`, `-u`, `--porcelain`): not a ref.
+            // A `--force…`-spelled flag was already caught above.
+            continue;
+        }
+        if !remote_seen {
+            // The first positional is the remote name/URL — consumed, never a refspec.
+            remote_seen = true;
+            continue;
+        }
+        // Every remaining positional is a refspec the validator must check individually.
+        refspecs.push(tok.to_string());
+    }
+
+    PushRequest::new(repo, host, force, refspecs)
 }
 
 /// Why the credential proxy denied a push (`docs/github.md` §4, §4.1). On any of
@@ -307,6 +375,49 @@ pub fn decide_merge(approval: Option<&Approved<GitHubWriteCap>>, now: Timestamp)
         Some(a) if a.is_valid_at(now) => MergeDecision::Authorized,
         _ => MergeDecision::RequiresApproval,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Live GitHub App auth (P10/B2-gh-app) — installation-token minting wrapper
+// ---------------------------------------------------------------------------
+
+/// Mints a short-lived GitHub **App installation token** for the preferred
+/// [`AuthMode::GitHubApp`] posture (behind the `live` feature). A thin auth-path wrapper
+/// over `crustcore_net::githubapp::AppTokenMinter`: it builds the minter from the
+/// operator-resolved RSA private key (PEM, via the credential proxy) + the App id, then
+/// exchanges a freshly minted RS256 JWT for an installation access token the
+/// `RestGitHub` client carries.
+///
+/// **Key handling (invariants 1–3).** The PEM is parsed once into the net `AppRsaKey`
+/// and dropped; the minted JWT rides only the one exchange call; the returned
+/// `InstallationToken` is secret-bearing (non-`Debug`/`Serialize`) and is handed straight
+/// to the REST client. Nothing here is logged or placed into an error — the net layer's
+/// error mapping is status-only.
+///
+/// `now_unix` is the wall-clock time (seconds) the JWT is stamped with — the kernel owns
+/// time, so the daemon supplies it (deterministic + testable). The real token exchange
+/// against api.github.com is the reduced `TODO(B2-gh-app-live)` seam, `#[ignore]`d; the
+/// JWT build/sign + response parse are already CI-tested inside `crustcore-net`.
+///
+/// # Errors
+/// A net `GitHubError` if the PEM is invalid or the exchange returns a non-success
+/// (status-mapped — neither the key nor the JWT appears in the error).
+#[cfg(feature = "live")]
+pub fn mint_installation_token(
+    base_url: &str,
+    app_id: &str,
+    key_pem: &str,
+    installation_id: u64,
+    now_unix: u64,
+    http: std::rc::Rc<dyn crustcore_net::transport::HttpClient>,
+) -> Result<crustcore_net::githubapp::InstallationToken, crustcore_net::github::GitHubError> {
+    use crustcore_net::githubapp::{AppRsaKey, AppTokenMinter};
+    // Parse the PEM once; on failure surface a token-free Unauthorized (the JwtError
+    // never carries key bytes, and we keep the daemon's error surface to GitHubError).
+    let key = AppRsaKey::from_pem(key_pem)
+        .map_err(|_| crustcore_net::github::GitHubError::Unauthorized)?;
+    let minter = AppTokenMinter::new(base_url, app_id, key, http);
+    minter.installation_token(installation_id, now_unix)
 }
 
 // ---------------------------------------------------------------------------
@@ -610,6 +721,98 @@ mod tests {
         .is_ok());
     }
 
+    // --- git push argv → PushRequest parsing (P10-net) ---
+
+    #[test]
+    fn parse_push_argv_consumes_remote_and_collects_every_refspec() {
+        // The leading `push` verb + the remote (`origin`) are consumed; both refspecs are
+        // collected individually so the validator checks each.
+        let req = parse_push_argv(
+            "RNT56/CrustCore",
+            "github.com",
+            &[
+                "push",
+                "origin",
+                "crustcore/a:crustcore/a",
+                "crustcore/b:crustcore/b",
+            ],
+        );
+        assert!(!req.force);
+        assert_eq!(req.repo, "RNT56/CrustCore");
+        assert_eq!(req.refspecs.len(), 2);
+        // The parsed request validates exactly like a hand-built one (all in-scope).
+        assert!(validate_push(&cap(), &req).is_ok());
+    }
+
+    #[test]
+    fn parse_push_argv_flags_force_in_every_spelling() {
+        for force_flag in ["--force", "--force-with-lease", "--force-if-includes", "-f"] {
+            let req = parse_push_argv(
+                "RNT56/CrustCore",
+                "github.com",
+                &["push", force_flag, "origin", "crustcore/x:crustcore/x"],
+            );
+            assert!(req.force, "{force_flag} must set force");
+            // A force push is denied by the validator regardless of the refs.
+            assert_eq!(validate_push(&cap(), &req), Err(PushDenied::ForcePush));
+        }
+        // A benign flag that merely *starts* like force is not a refspec and not force.
+        let req = parse_push_argv(
+            "RNT56/CrustCore",
+            "github.com",
+            &["push", "--foreground", "origin", "crustcore/x:crustcore/x"],
+        );
+        assert!(!req.force);
+        assert_eq!(req.refspecs, vec!["crustcore/x:crustcore/x".to_string()]);
+    }
+
+    #[test]
+    fn parse_push_argv_cannot_smuggle_a_protected_ref_past_the_validator() {
+        // A second refspec targeting a protected branch is parsed as its OWN entry, so the
+        // fail-closed per-ref validation catches it (the refspec-smuggling class).
+        let req = parse_push_argv(
+            "RNT56/CrustCore",
+            "github.com",
+            &[
+                "push",
+                "origin",
+                "crustcore/ok:crustcore/ok",
+                "x:refs/heads/main",
+            ],
+        );
+        assert_eq!(req.refspecs.len(), 2);
+        assert_eq!(
+            validate_push(&cap(), &req),
+            Err(PushDenied::ProtectedBranch("main".to_string()))
+        );
+        // A per-ref `+` force marker on a later ref is likewise its own entry → denied.
+        let req = parse_push_argv(
+            "RNT56/CrustCore",
+            "github.com",
+            &[
+                "push",
+                "origin",
+                "crustcore/ok:crustcore/ok",
+                "+crustcore/y:crustcore/y",
+            ],
+        );
+        assert_eq!(validate_push(&cap(), &req), Err(PushDenied::ForcePush));
+        // repo/host come from the bound capability, never the argv: an argv naming a
+        // different remote URL still validates against the bound repo.
+        let req = parse_push_argv(
+            "RNT56/CrustCore",
+            "github.com",
+            &[
+                "push",
+                "https://github.com/attacker/evil",
+                "crustcore/x:crustcore/x",
+            ],
+        );
+        // The first positional (the remote URL) is consumed, not validated as a ref.
+        assert_eq!(req.repo, "RNT56/CrustCore");
+        assert!(validate_push(&cap(), &req).is_ok());
+    }
+
     #[test]
     fn repo_mismatch_and_unexpected_host_are_denied() {
         assert!(matches!(
@@ -693,5 +896,48 @@ mod tests {
         assert_eq!(decide_merge(None, ts(1)), MergeDecision::RequiresApproval);
         // The tainted content does not leak via Debug either.
         assert!(!format!("{:?}", c.content).contains("SENTINEL"));
+    }
+
+    // --- live GitHub App installation-token minting (B2-gh-app-live) ---
+    #[cfg(feature = "live")]
+    mod live {
+        use super::*;
+
+        // The real token exchange against api.github.com is `#[ignore]`d — it needs a real
+        // App id + RSA key + installation id and never runs in CI. The JWT build/sign +
+        // response parse are already CI-tested inside `crustcore-net::githubapp`; this is
+        // the reduced TODO(B2-gh-app-live) seam (only the live socket remains).
+        #[test]
+        #[ignore = "live: real GitHub App key + installation (TODO B2-gh-app-live)"]
+        fn live_installation_token_smoke() {
+            use crustcore_net::github::GITHUB_API;
+            use crustcore_net::transport::UreqClient;
+            use std::rc::Rc;
+
+            let app_id = std::env::var("CRUSTCORE_GH_APP_ID").expect("set CRUSTCORE_GH_APP_ID");
+            let pem_path =
+                std::env::var("CRUSTCORE_GH_APP_KEY_PEM").expect("set CRUSTCORE_GH_APP_KEY_PEM");
+            let inst: u64 = std::env::var("CRUSTCORE_GH_INSTALLATION_ID")
+                .expect("set CRUSTCORE_GH_INSTALLATION_ID")
+                .parse()
+                .expect("installation id");
+            let pem = std::fs::read_to_string(pem_path).expect("read PEM");
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            // `InstallationToken` is secret-bearing (non-`Debug`), so match rather than unwrap.
+            match mint_installation_token(
+                GITHUB_API,
+                &app_id,
+                &pem,
+                inst,
+                now,
+                Rc::new(UreqClient::new()),
+            ) {
+                Ok(tok) => assert!(tok.token.starts_with("ghs_")),
+                Err(e) => panic!("installation token exchange failed: {e}"),
+            }
+        }
     }
 }

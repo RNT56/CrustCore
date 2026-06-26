@@ -30,6 +30,33 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Daemon live-runtime wiring (`crustcore-daemon`, new `live` feature; default stays
+  mock-driven & CI-green).** Connects the std-only decision cores to the net-side live
+  transports — each `TODO(*-live)` reduced to the irreducible socket (`#[ignore]`d), the
+  adapter glue CI-tested:
+  - **P9-net-live:** `telegram::LiveTelegramApi` wraps `crustcore_net::telegram::RestTelegram`
+    and implements the daemon `TelegramApi` (net `TgUpdate`→`RawUpdate` mapping tested;
+    `send_message` still redacted-`ModelVisibleText`-only).
+  - **P10/B2:** `github::mint_installation_token` (over the net `AppTokenMinter`),
+    `parse_push_argv` (git push argv → the structured `PushRequest` the fail-closed
+    `validate_push` consumes — can't smuggle a protected/force ref), and a std-only
+    (no axum/hyper) `webhook::serve_webhooks_once` HTTP edge that runs a bounded POST
+    through the existing `WebhookVerifier` → `GitHubEnvelope`.
+  - **P11-exec-live:** `exec::WorktreeSubagentExecutor` — disposable worktree →
+    sandboxed `run_external_worker` → `run_verify`, `verified` set **only** from a
+    verifier-minted `VerifiedPatch`; backend bound to the registry role, never a claim.
+  - **P12-native-live:** `advisor::consult_via_net_helper` routes a bounded,
+    untrusted-wrapped `Role::Advisor` consult through the net helper; any failure
+    degrades to "proceed with caution," never an unqualified proceed.
+  - **B5-autoloop-live:** `selfimprove::LiveEvalRunner` (emits an `EvalRef` only for a
+    verifier-passing eval) + `draft_pr_request` (gate preserved: `open_pr` needs a
+    `VerifiedPatch` by value + `Approved<GitHubWriteCap>`, always `draft:true`;
+    `CycleOutcome` still tops out at `DraftReady`/`BlockedForMaintainer` — no
+    Merged/Applied, no live kernel mutation, contract-file gate intact).
+  78 default + 91 `--features live` tests (6 live-socket smokes `#[ignore]`d); xtask
+  gates `crustcore-daemon --features live`. Non-nano; forbidden-deps confirms the
+  default net helper + nano are unaffected.
+
 - **`P9-net-live` Telegram Bot API + GitHub-App auth (`crustcore-net`).** A
   `telegram::RestTelegram` client over the `HttpClient` transport — `getUpdates`
   long-poll + `sendMessage`, the bot token resolved per-call via a new

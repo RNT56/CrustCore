@@ -16,9 +16,15 @@
 //! The live executor that actually runs a worker in a sandboxed throwaway worktree and
 //! reruns the verifier — `crustcore_backend::worker::run_external_worker` followed by
 //! `crustcore_backend::verify::run_verify`, both already tested in `crustcore-backend`
-//! and chained in the `crustcore` harness (`crates/crustcore/src/main.rs`) — is the
-//! `TODO(P11-exec-live)` seam on [`SubagentExecutor`]. It lands with the daemon runtime,
-//! behind the very trait the mock drives here, so the orchestration above never changes.
+//! and chained in the `crustcore` harness (`crates/crustcore/src/main.rs`) — is realized
+//! by [`WorktreeSubagentExecutor`] (behind the `live` feature). It implements the very
+//! [`SubagentExecutor`] trait the mock drives here, so the orchestration above never
+//! changes: it creates a disposable worktree, runs the worker sandboxed, reruns the
+//! verifier, and sets `verified` **only** from a verifier-minted `VerifiedPatch`
+//! (invariants 6, 13) — accepting nothing on the worker's say-so. The only thing it
+//! cannot do in CI is run the sandbox/worktree/worker for real (it needs a sandbox
+//! backend), so that end-to-end run is the reduced `TODO(P11-exec-live)` seam, exercised
+//! by an `#[ignore]`d test; the control-flow over the mock stays fully CI-tested.
 
 use crustcore_types::{BoundedText, TaskId};
 
@@ -69,12 +75,13 @@ pub enum ExecError {
     Backend(String),
 }
 
-/// Runs one subagent task to a [`RawSubagentResult`]. The production impl
-/// (`TODO(P11-exec-live)`) runs the worker in a sandboxed throwaway worktree via
-/// `crustcore_backend::worker::run_external_worker` and then reruns the verifier via
-/// `crustcore_backend::verify::run_verify` — exactly as the `crustcore` harness chains
-/// them — so `verified` is true only when a `VerifiedPatch` was minted (invariant 13). A
-/// mock implementation drives the CI tests here.
+/// Runs one subagent task to a [`RawSubagentResult`]. The production impl is
+/// [`WorktreeSubagentExecutor`] (behind `live`): it runs the worker in a sandboxed
+/// throwaway worktree via `crustcore_backend::worker::run_external_worker` and then reruns
+/// the verifier via `crustcore_backend::verify::run_verify` — exactly as the `crustcore`
+/// harness chains them — so `verified` is true only when a `VerifiedPatch` was minted
+/// (invariant 13). A mock implementation drives the CI tests here; the live executor's
+/// real sandbox/worktree run is the reduced `TODO(P11-exec-live)` seam (`#[ignore]`d).
 ///
 /// An executor **cannot** reach the user: it returns data to the supervisor, which alone
 /// communicates outward (invariant 5).
@@ -223,6 +230,200 @@ fn run_charged(
         .charge(raw.usage, &spec.budget)
         .map_err(RunRefused::Budget)?;
     Ok((raw, next))
+}
+
+// ---------------------------------------------------------------------------
+// Live worktree executor (P11-exec-live) — sandboxed worker → verifier rerun
+// ---------------------------------------------------------------------------
+
+/// The live [`SubagentExecutor`] (behind the `live` feature): runs one subagent in a
+/// **sandboxed throwaway worktree** and reruns the verifier, accepting **only** a
+/// verifier-minted `VerifiedPatch` (invariants 6, 13). It chains exactly what the
+/// `crustcore` harness chains — `crustcore_backend::worker::run_external_worker` then
+/// `crustcore_backend::verify::run_verify` — under the same trait the mock drives, so the
+/// supervisor's control plane ([`run_subagent`]) never changes.
+///
+/// Construction is operator setup (trusted): the repo root, the sandbox cap + profile
+/// (deny-all egress, writes confined to the worktree — invariant 9), and the receipt MAC
+/// key. The coding backend is chosen from the agent's **registry-bound** role
+/// ([`backend_for_role`]) — never a worker's self-claim.
+///
+/// `verified` is set **solely** from [`crustcore_backend::verify::VerifyOutcome::Verified`]
+/// — a worker that wrote outside the worktree, produced an escaping change, or whose
+/// verifier did not pass yields `verified: false` (or an [`ExecError`]); nothing completes
+/// on the worker's say-so. The disposable worktree is **removed on every path** (success,
+/// worker rejection, verify failure, or a refused sandbox).
+///
+/// The one thing this cannot do in CI is run the sandbox/worktree/worker for real (it
+/// needs a sandbox backend), so the end-to-end run is the reduced `TODO(P11-exec-live)`
+/// seam, exercised by an `#[ignore]`d test.
+#[cfg(feature = "live")]
+pub struct WorktreeSubagentExecutor {
+    repo_root: std::path::PathBuf,
+    cap: crustcore_policy::SandboxExecCap,
+    profile: crustcore_sandbox::SandboxProfile,
+    /// The receipt-chain MAC key bytes (a fresh `MacKey` is built per run — `MacKey`
+    /// itself is intentionally non-`Copy`/`Clone` secret material).
+    mac_key: [u8; 32],
+    /// For the generic `ExternalCommand` role: the worker program + literal args.
+    worker_cmd: Option<(String, Vec<String>)>,
+}
+
+#[cfg(feature = "live")]
+impl WorktreeSubagentExecutor {
+    /// Builds the live executor. `worker_cmd` is the program+args for the generic
+    /// `ExternalCommand` role (Codex/Claude roles use their presets and ignore it).
+    #[must_use]
+    pub fn new(
+        repo_root: impl Into<std::path::PathBuf>,
+        cap: crustcore_policy::SandboxExecCap,
+        profile: crustcore_sandbox::SandboxProfile,
+        mac_key: [u8; 32],
+        worker_cmd: Option<(String, Vec<String>)>,
+    ) -> Self {
+        WorktreeSubagentExecutor {
+            repo_root: repo_root.into(),
+            cap,
+            profile,
+            mac_key,
+            worker_cmd,
+        }
+    }
+
+    /// Selects the coding backend for an agent's **registry-bound** role. The two
+    /// external-worker presets map to their CLIs; the generic role uses the configured
+    /// `worker_cmd`. A role with no external-worker meaning (e.g. a planner) has no live
+    /// worker here — those roles are handled by the model path, not this executor.
+    fn backend_for_role(
+        &self,
+        role: Role,
+    ) -> Option<Box<dyn crustcore_backend::worker::CodingBackend>> {
+        use crustcore_backend::worker::{ClaudeCodeBackend, CodexBackend, ExternalCommandBackend};
+        match role {
+            Role::ExternalCodex => Some(Box::new(CodexBackend::default())),
+            Role::ExternalClaudeCode => Some(Box::new(ClaudeCodeBackend::default())),
+            Role::ExternalCommand => {
+                let (p, a) = self.worker_cmd.clone()?;
+                Some(Box::new(ExternalCommandBackend::new(p, a)))
+            }
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "live")]
+impl SubagentExecutor for WorktreeSubagentExecutor {
+    fn execute(
+        &self,
+        spec: &AgentSpec,
+        task: &SubagentTask,
+    ) -> Result<RawSubagentResult, ExecError> {
+        use crustcore_worktree::WorktreeManager;
+
+        // The backend is bound to the agent's REGISTRY role (never a self-claim). A role
+        // with no live-worker meaning is a setup error for this executor.
+        let backend = self.backend_for_role(spec.role).ok_or_else(|| {
+            ExecError::Backend(format!(
+                "no live worker backend for role {:?} (use the model path)",
+                spec.role
+            ))
+        })?;
+
+        // Disposable worktree — removed on EVERY exit path below.
+        let manager = WorktreeManager::new(&self.repo_root);
+        let worktree = manager
+            .create_for(task.task_id)
+            .map_err(|e| ExecError::Backend(format!("worktree: {e}")))?;
+
+        // Run the worker → verifier, capturing the outcome BEFORE teardown so a teardown
+        // failure cannot mask it. The worktree is then removed unconditionally.
+        let outcome = run_worker_then_verify(
+            backend.as_ref(),
+            task,
+            &worktree,
+            &self.cap,
+            &self.profile,
+            self.mac_key,
+        );
+        // Best-effort teardown on every path (success or error) — never leak a worktree.
+        let _ = manager.remove(&worktree);
+        outcome
+    }
+}
+
+/// Runs the worker sandboxed in `worktree`, then reruns the verifier — the live
+/// worker→verify chain (the same one the `crustcore` harness uses). `verified` is set
+/// **only** from a verifier-minted `VerifiedPatch` (invariants 6, 13). Split out so the
+/// caller owns the worktree teardown (which must happen on every path).
+#[cfg(feature = "live")]
+fn run_worker_then_verify(
+    backend: &dyn crustcore_backend::worker::CodingBackend,
+    task: &SubagentTask,
+    worktree: &crustcore_path::WorktreeRoot,
+    cap: &crustcore_policy::SandboxExecCap,
+    profile: &crustcore_sandbox::SandboxProfile,
+    mac_key: [u8; 32],
+) -> Result<RawSubagentResult, ExecError> {
+    use crustcore_backend::verify::{run_verify, VerifyIds, VerifyOutcome, VerifySpec};
+    use crustcore_backend::worker::{run_external_worker, WorkerInput};
+    use crustcore_receipts::{MacKey, ReceiptChain};
+    use crustcore_types::{EventSeq, JobId, ToolCallId};
+
+    let input = WorkerInput::for_task(task.task_id, task.goal.as_str(), worktree);
+    let product = run_external_worker(backend, &input, worktree, cap, profile)
+        .map_err(|e| ExecError::Backend(format!("worker rejected: {e}")))?;
+
+    // Rerun the verifier in a clean sandbox — the SOLE path to a VerifiedPatch.
+    let spec_v = VerifySpec::new(task.verify_program.clone(), task.verify_args.clone());
+    let mut receipts = ReceiptChain::new(MacKey::new(mac_key));
+    let ids = VerifyIds {
+        task_id: task.task_id,
+        job_id: JobId(1),
+        tool_call_id: ToolCallId(1),
+        event_seq: EventSeq(1),
+        now: crustcore_types::Timestamp::from_millis(0),
+    };
+    let outcome = run_verify(
+        cap,
+        profile,
+        worktree,
+        &spec_v,
+        product.patch.0,
+        &mut receipts,
+        &ids,
+    );
+
+    // `verified` comes ONLY from the verifier (invariants 6, 13). The worker's
+    // self_claimed_done is carried for contrast, never as authority.
+    let (verified, evidence) = match outcome {
+        VerifyOutcome::Verified(_) => (true, "verifier passed".to_string()),
+        VerifyOutcome::Failed { status, .. } => (false, format!("verify failed ({status:?})")),
+        // No sandbox backend / non-executing tier: NOT a pass — surface as a run error.
+        VerifyOutcome::Refused(reason) => {
+            return Err(ExecError::Backend(format!("verify refused: {reason}")))
+        }
+    };
+
+    let summary = BoundedText::truncated(
+        format!(
+            "{evidence}; {} file(s) changed; {}",
+            product.changed_files.len(),
+            product.transcript.as_str()
+        ),
+        MAX_SUBAGENT_SUMMARY,
+    );
+    Ok(RawSubagentResult {
+        verified,
+        self_claimed_done: product.result.self_claimed_done,
+        summary,
+        // Charge the produced output bytes; wall/tokens are unknown here and left 0 (the
+        // supervisor bounds against the agent's budget regardless).
+        usage: AgentUsage {
+            wall_ms: 0,
+            output_bytes: product.transcript.as_str().len() as u64,
+            tokens: 0,
+        },
+    })
 }
 
 #[cfg(test)]
@@ -504,5 +705,88 @@ mod tests {
         assert!(out.summary.as_str().len() <= MAX_SUBAGENT_SUMMARY);
         let msgs = bb.messages_for(AgentTarget::Supervisor);
         assert!(msgs[0].payload.as_str().len() <= MAX_SUBAGENT_SUMMARY);
+    }
+
+    // --- live worktree executor (P11-exec-live) ---
+    #[cfg(feature = "live")]
+    mod live {
+        use super::*;
+
+        fn executor(worker_cmd: Option<(String, Vec<String>)>) -> WorktreeSubagentExecutor {
+            use crustcore_policy::SandboxExecCap;
+            use crustcore_sandbox::SandboxProfile;
+            use crustcore_types::ScopeId;
+            WorktreeSubagentExecutor::new(
+                ".",
+                SandboxExecCap {
+                    profile: ScopeId(1),
+                    scope: ScopeId(1),
+                },
+                SandboxProfile::default_sandboxed(),
+                [0x5a; 32],
+                worker_cmd,
+            )
+        }
+
+        #[test]
+        fn role_selects_the_right_coding_backend() {
+            use crustcore_backend::BackendKind;
+            let exec = executor(Some(("true".into(), vec![])));
+            // The two external presets map to their CLIs; the generic role uses worker_cmd.
+            assert_eq!(
+                exec.backend_for_role(Role::ExternalCodex).unwrap().kind(),
+                BackendKind::Codex
+            );
+            assert_eq!(
+                exec.backend_for_role(Role::ExternalClaudeCode)
+                    .unwrap()
+                    .kind(),
+                BackendKind::ClaudeCode
+            );
+            assert_eq!(
+                exec.backend_for_role(Role::ExternalCommand).unwrap().kind(),
+                BackendKind::ExternalCommand
+            );
+            // A non-worker role (e.g. a planner) has no live worker here.
+            assert!(exec.backend_for_role(Role::Planner).is_none());
+            // The generic role with no configured worker_cmd also has no backend.
+            assert!(executor(None)
+                .backend_for_role(Role::ExternalCommand)
+                .is_none());
+        }
+
+        #[test]
+        fn generic_role_without_worker_cmd_is_a_backend_error_not_a_panic() {
+            // execute() for the generic role with no worker_cmd must be a typed ExecError —
+            // and crucially NEVER `verified: true` (nothing completes without a real run).
+            let exec = executor(None);
+            let spec = spec(1, Role::ExternalCommand);
+            let r = exec.execute(&spec, &task());
+            assert!(matches!(r, Err(ExecError::Backend(_))));
+        }
+
+        // The real worker+verify run needs a sandbox backend + a git repo worktree; it is
+        // `#[ignore]`d (the reduced TODO(P11-exec-live) seam). The control-flow over the
+        // MockExecutor above is the CI-tested part; this asserts the live chain end to end.
+        #[test]
+        #[ignore = "live: requires a sandbox backend + repo worktree (TODO P11-exec-live)"]
+        fn live_worktree_executor_accepts_only_verifier_evidence() {
+            // To run on Linux with bubblewrap: a `true` worker (no-op) + a `true` verifier
+            // mints a VerifiedPatch, so the result is accepted; a `false` verifier never is.
+            let exec = executor(Some(("true".into(), vec![])));
+            let spec = spec(1, Role::ExternalCommand);
+            let mut t = task();
+            t.verify_program = "true".into();
+            t.verify_args = vec![];
+            let out = exec.execute(&spec, &t).expect("live run");
+            assert!(out.verified, "a passing verifier accepts the run");
+
+            // A failing verifier never accepts — verifier evidence is the sole authority.
+            let mut t_fail = task();
+            t_fail.verify_program = "false".into();
+            t_fail.verify_args = vec![];
+            let out = exec.execute(&spec, &t_fail).expect("live run");
+            assert!(!out.verified, "a failing verifier must not accept");
+        }
     }
 }
