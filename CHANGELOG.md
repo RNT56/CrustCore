@@ -28,6 +28,10 @@ agent/PR/role/size/invariant audit trail.
 
 ## [Unreleased]
 
+_Nothing yet — the next release accumulates here._
+
+## [0.5.0] - 2026-06-26
+
 ### Added
 
 - **`crustcore-full` — a single-binary, casual-user front door.** The architecture is
