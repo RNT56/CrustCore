@@ -28,6 +28,18 @@ agent/PR/role/size/invariant audit trail.
 
 ## [Unreleased]
 
+### Added
+
+- **Track the all-capability-packs flagship binary size (`cargo xtask full-size`).** A new
+  xtask command + CI step builds `crustcore --features full` — *every* capability pack (net +
+  daemon + mcp + index + chat) linked into **one** binary — under the nano profile and reports
+  its size, with a generous 2 MiB regression tripwire (a heavy live stack leaking into the
+  convenience binary trips it; those belong in spawned sidecars). Measured by CI on every push,
+  surfaced in the README. The headline result: linking **every** pack is **576.7 KiB** (Linux
+  x86_64) — only +98 KiB over nano and *still under the 600 KiB stretch goal*, because the heavy
+  live I/O (HTTP/TLS, DBs, tree-sitter) never links in. README + CLAUDE.md size tables updated.
+  Invariant 19/20 (the same size-discipline thesis, now measured for the full build too).
+
 ### Fixed
 
 - **Docs accuracy — corrected the nano size figures + test count (a final-polish audit

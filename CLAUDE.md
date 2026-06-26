@@ -222,12 +222,13 @@ benchmark; **no** async runtime, network, database, or tool execution inside it.
 
 | Tier | Size target | Purpose |
 | --- | --- | --- |
-| `crustcore` / `crustcore-nano` | **< 800kB** (stretch < 600kB) | trusted local verifier harness |
+| `crustcore` / `crustcore-nano` | **< 800kB** (stretch < 600kB); actual **478.7 KiB** Linux x86_64 | trusted local verifier harness |
+| `crustcore --features full` | actual **576.7 KiB** Linux x86_64 (`cargo xtask full-size`) | every capability pack's *decision core* linked into one binary — only +98 KiB over nano (heavy live stacks stay in sidecars), tracked with a 2 MiB regression tripwire |
 | `crustcore-net` | 3–8MB | network + provider sidecar (Tokio/TLS/providers/Telegram/GitHub) |
 | `crustcore-daemon` | 4–10MB | long-running runtime, Telegram/GitHub loops, supervision |
 | `crustcore-mcp` | 3–10MB | MCP gateway/client/server + code-mode |
 | `crustcore-index` | 2–8MB | repo memory / code intelligence |
-| `crustcore-full` | 8–25MB+ | convenience all-in-one (never the flagship size claim) |
+| `crustcore-full` (`--features all`) | 8–25MB+ | the convenience crate that *also* links every **live** stack (Tokio/TLS/DBs/tree-sitter); never the flagship size claim |
 
 Full architecture: [`docs/architecture.md`](./docs/architecture.md).
 Size discipline: [`docs/nano-size-budget.md`](./docs/nano-size-budget.md).

@@ -10,6 +10,7 @@
 
 [![CI](https://github.com/RNT56/CrustCore/actions/workflows/ci.yml/badge.svg)](https://github.com/RNT56/CrustCore/actions/workflows/ci.yml)
 &nbsp;![nano size](https://img.shields.io/badge/nano-478.7_KiB-2ea44f)
+&nbsp;![full size](https://img.shields.io/badge/full-576.7_KiB-2ea44f)
 &nbsp;![tests](https://img.shields.io/badge/tests-834_passing-2ea44f)
 &nbsp;![invariants](https://img.shields.io/badge/invariants-20_enforced-1f6feb)
 &nbsp;![kernel](https://img.shields.io/badge/kernel-std--only_%C2%B7_no_async%2Fnet%2Fdb-8957e5)
@@ -83,7 +84,9 @@ proof, not a vibe.
 
 The trusted binary is **478.7 KiB stripped** (Linux x86_64) and *refuses* to link Tokio, TLS, a
 database, an MCP SDK, or any provider SDK — a CI size gate keeps it that way.
-Small enough to read end to end in an afternoon.
+Small enough to read end to end in an afternoon. Even with **every capability pack linked**
+(`crustcore --features full`) the binary is just **576.7 KiB** — still under the 600 KiB
+stretch goal — because the heavy live stacks run in spawned sidecars, never linked in.
 
 </td>
 </tr>
@@ -190,14 +193,20 @@ Full design: **[docs/architecture.md](./docs/architecture.md)** &nbsp;·&nbsp; s
 
 ## Product tiers
 
-| Tier | Size | Purpose |
+| Tier | Size (Linux x86_64) | Purpose |
 | --- | --- | --- |
 | **`crustcore` / `crustcore-nano`** | **478.7 KiB** | the trusted local verifier harness — the flagship |
+| **`crustcore --features full`** | **576.7 KiB** | *every* capability pack (net + daemon + mcp + index + chat) linked into **one** binary — only +98 KiB over nano, **still under the 600 KiB stretch goal**, because the heavy stacks stay in sidecars |
 | `crustcore-net` | 3–8 MB | network + provider sidecar (Tokio/TLS/providers) — a *spawned* helper, never linked into nano |
 | `crustcore-daemon` | 4–10 MB | long-running runtime: Telegram/GitHub loops, supervision |
 | `crustcore-mcp` | 3–10 MB | MCP gateway/client/server + code-mode |
 | `crustcore-index` | 2–8 MB | repo memory / code intelligence |
-| `crustcore-full` | 8–25 MB+ | convenience all-in-one (never the size-claim binary) |
+| `crustcore-full` (`--features all`) | 8–25 MB+ | the convenience crate that *also* links every **live** stack (Tokio/TLS/DBs/tree-sitter) — never the size-claim binary |
+
+Both flagship figures are measured by the CI size gate (`cargo xtask size-check` / `cargo xtask
+full-size`); `crustcore --features full` links every capability pack's **decision core** but
+none of the heavy live I/O — that runs in the spawned sidecars above. (macOS: nano 412.0 KiB,
+full 493.1 KiB.)
 
 Higher-level packs build on these — each non-nano and feature-gated, so they
 never touch the flagship binary: `crustcore-flow` (typed workflow graph),

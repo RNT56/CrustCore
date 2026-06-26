@@ -31,6 +31,15 @@ use std::process::{Command, ExitCode};
 /// an explicit, justified change (invariant 19).
 const NANO_BUDGET_BYTES: u64 = 800 * 1024;
 
+/// A **regression tripwire** for the all-capability-packs flagship binary
+/// (`crustcore --features full`: net + daemon + mcp + index + chat linked into one binary).
+/// This is **not** the flagship size claim (that is nano) — it is tracked so a heavy live
+/// stack (Tokio / TLS / a DB / tree-sitter) accidentally leaking into the convenience binary
+/// trips CI. Those stacks belong in *spawned sidecars*, never linked here; the all-packs
+/// binary stays sub-megabyte because only the std-only decision cores are linked. Generous
+/// (~4× current) so it fires only on a genuine architecture regression, not normal growth.
+const FULL_TRIPWIRE_BYTES: u64 = 2 * 1024 * 1024;
+
 /// Crates that must never be linked into the nano build (CLAUDE.md §5.1).
 const FORBIDDEN_IN_NANO: &[&str] = &[
     "tokio",
@@ -63,6 +72,7 @@ fn main() -> ExitCode {
         "test" => test(),
         "nano-build" => nano_build().map(|_| ()),
         "size-check" => size_check(),
+        "full-size" => full_size(),
         "release" => release(),
         "reproduce" => reproduce(),
         "forbidden-deps" => forbidden_deps(),
@@ -97,6 +107,7 @@ fn print_help() {
          \x20 test            cargo test --workspace\n\
          \x20 nano-build      build crustcore-nano (profile nano)\n\
          \x20 size-check      build nano and enforce the size budget\n\
+         \x20 full-size       build crustcore --features full and report its (tracked) size\n\
          \x20 release         build nano, enforce size, emit SHA256SUMS + manifest\n\
          \x20 reproduce       build nano twice and verify the digest reproduces\n\
          \x20 forbidden-deps  fail if a banned crate is linked into nano\n"
@@ -325,6 +336,62 @@ fn nano_build_into(target_dir: Option<&Path>) -> Result<PathBuf, String> {
         &envs,
     )?;
     Ok(out_root.join("nano/crustcore"))
+}
+
+/// Builds `crustcore --features full` — every capability pack (net + daemon + mcp + index +
+/// chat) linked into the **one** flagship binary — under the **nano profile**, so its size is
+/// directly comparable to nano. The output path is the same as nano (`target/nano/crustcore`),
+/// so this is a **standalone** measurement that overwrites the nano binary; never chain it
+/// before [`release`] (which hashes the nano binary).
+fn full_build() -> Result<PathBuf, String> {
+    let root = workspace_root();
+    // Plain build (NOT the reproducible-nano env): this is only a size measurement, and the
+    // `full` feature pulls crates with build scripts (serde_json, …) that the nano
+    // reproducible env's build-script stripping breaks on macOS. Bit-for-bit reproduction is
+    // a nano-only concern (`reproduce`); here we just need the byte size.
+    run(
+        "cargo",
+        &[
+            "build",
+            "--profile",
+            "nano",
+            "--package",
+            "crustcore",
+            "--no-default-features",
+            "--features",
+            "full",
+        ],
+    )?;
+    Ok(root.join("target/nano/crustcore"))
+}
+
+/// Builds the all-capability-packs flagship binary and **reports** its size (tracked, not the
+/// flagship claim — see [`FULL_TRIPWIRE_BYTES`]). Fails only if it exceeds the generous
+/// tripwire, which would mean a heavy live stack leaked into the convenience binary.
+fn full_size() -> Result<(), String> {
+    let bin = full_build()?;
+    let size = std::fs::metadata(&bin)
+        .map_err(|e| format!("cannot stat {}: {e}", bin.display()))?
+        .len();
+    let pct = (size as f64 / FULL_TRIPWIRE_BYTES as f64) * 100.0;
+    println!(
+        "  crustcore-full (crustcore --features full, nano profile): {size} bytes ({:.1} KiB), \
+         tripwire {} bytes ({} MiB), {pct:.1}% of tripwire",
+        size as f64 / 1024.0,
+        FULL_TRIPWIRE_BYTES,
+        FULL_TRIPWIRE_BYTES / (1024 * 1024),
+    );
+    println!(
+        "  (the heavy live I/O — HTTP/TLS, DBs, tree-sitter — runs in spawned sidecars, never \
+         linked here; that is why the all-packs binary stays sub-megabyte.)"
+    );
+    if size > FULL_TRIPWIRE_BYTES {
+        return Err(format!(
+            "full binary {size} bytes exceeds the {FULL_TRIPWIRE_BYTES}-byte tripwire — a heavy \
+             live stack may have leaked into the convenience binary (it belongs in a sidecar)."
+        ));
+    }
+    Ok(())
 }
 
 /// The deterministic build env for reproducible nano builds (B6.2): strip absolute build
