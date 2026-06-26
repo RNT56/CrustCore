@@ -64,6 +64,12 @@ jobs:
       - name: cargo xtask verify
         run: cargo xtask verify
 
+      # Track the all-capability-packs flagship binary size (crustcore --features full).
+      # NOT the flagship claim (nano is); a tripwire catches a heavy live stack (Tokio/TLS/DB)
+      # leaking into the convenience binary — those belong in spawned sidecars.
+      - name: cargo xtask full-size
+        run: cargo xtask full-size
+
       # Reportable size breakdown. Best-effort: needs network to install, and the
       # gate itself already ran in `verify`. Linux only — the flagship size claim
       # is the Linux nano binary.
