@@ -26,6 +26,8 @@
 //! backend), so that end-to-end run is the reduced `TODO(P11-exec-live)` seam, exercised
 //! by an `#[ignore]`d test; the control-flow over the mock stays fully CI-tested.
 
+use std::collections::BTreeMap;
+
 use crustcore_types::{BoundedText, TaskId};
 
 use crate::supervisor::{
@@ -230,6 +232,80 @@ fn run_charged(
         .charge(raw.usage, &spec.budget)
         .map_err(RunRefused::Budget)?;
     Ok((raw, next))
+}
+
+// ---------------------------------------------------------------------------
+// Fan-out coordinator (P11) — race K proposers, the verifier picks the winner
+// ---------------------------------------------------------------------------
+
+/// A bounded fan-out plan: run each `proposer` agent at the **same** goal (`task`); the
+/// supervisor's verifier picks the winner. Proposers are registry-bound ids (an unregistered
+/// agent is refused by [`run_subagent`]); the set is bounded by the caller.
+#[derive(Debug, Clone)]
+pub struct FanoutPlan {
+    /// The shared goal + verify command every proposer attempts. The verify command — not a
+    /// self-claim — gates acceptance (invariant 13).
+    pub task: SubagentTask,
+    /// The proposer agents to race, in priority order (the first verifier-accepted one wins).
+    pub proposers: Vec<AgentId>,
+}
+
+/// The result of a [`run_fanout`]: every attempted proposer's outcome (or typed refusal), and
+/// the verifier-accepted winner — the **first** proposer whose candidate the supervisor's
+/// verifier accepted (invariants 6, 13). `verified` is true iff a winner was found.
+#[derive(Debug, Clone)]
+pub struct FanoutResult {
+    /// Per-proposer results, in the order attempted (bounded by the plan, then early-stopped
+    /// at the first accepted winner).
+    pub results: Vec<(AgentId, Result<SubagentOutcome, RunRefused>)>,
+    /// The first verifier-accepted proposer, if any. Selection is **verifier-owned**.
+    pub winner: Option<AgentId>,
+    /// Whether any proposer's candidate was accepted by the verifier.
+    pub verified: bool,
+}
+
+/// Coordinate a **fan-out of proposers** at one goal under the supervisor's control: run each
+/// proposer via [`run_subagent`] (registry-bound identity, bounded concurrency, per-agent
+/// budget, verifier-owned acceptance, blackboard-posted to the supervisor — **never** the
+/// user, invariant 5) and **stop at the first proposer the verifier accepts**.
+///
+/// This is the multi-proposer extension of [`run_subagent`]: many models may *propose*, but a
+/// candidate is the winner only when the supervisor's verifier accepted it — never a worker's
+/// `self_claimed_done` (invariants 6, 13). Stopping at the first acceptance keeps fan-out
+/// bounded (invariant 11): once a `VerifiedPatch` exists, further proposers are wasted work. A
+/// proposer that is unknown, over budget, at the concurrency cap, or whose executor failed
+/// yields a typed [`RunRefused`] in `results` and the race continues to the next.
+///
+/// Deterministic over the proposer order; synchronous; it performs no I/O itself — the live
+/// [`SubagentExecutor`] runs each candidate sandboxed. `usages` carries each agent's
+/// accumulated usage so budgets persist across calls; a fresh agent starts at zero.
+pub fn run_fanout(
+    plan: &FanoutPlan,
+    registry: &AgentRegistry,
+    executor: &dyn SubagentExecutor,
+    scheduler: &mut Scheduler,
+    usages: &mut BTreeMap<AgentId, AgentUsage>,
+    blackboard: &mut Blackboard,
+) -> FanoutResult {
+    let mut results = Vec::with_capacity(plan.proposers.len());
+    let mut winner = None;
+    for &agent in &plan.proposers {
+        let usage = usages.entry(agent).or_default();
+        let r = run_subagent(
+            agent, registry, &plan.task, executor, scheduler, usage, blackboard,
+        );
+        let accepted = matches!(&r, Ok(o) if o.accepted);
+        results.push((agent, r));
+        if accepted {
+            winner = Some(agent);
+            break; // verifier accepted → stop the race (bounded work, invariant 11)
+        }
+    }
+    FanoutResult {
+        verified: winner.is_some(),
+        winner,
+        results,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -788,5 +864,151 @@ mod tests {
             let out = exec.execute(&spec, &t_fail).expect("live run");
             assert!(!out.verified, "a failing verifier must not accept");
         }
+    }
+
+    // ---- Fan-out coordinator (run_fanout) -------------------------------------------------
+
+    /// A mock executor returning a different `RawSubagentResult` per agent id (keyed on the
+    /// registry-bound `spec.id`), so a fan-out can have some proposers fail and one pass.
+    struct KeyedMock {
+        by_id: BTreeMap<u64, RawSubagentResult>,
+    }
+    impl SubagentExecutor for KeyedMock {
+        fn execute(
+            &self,
+            spec: &AgentSpec,
+            _task: &SubagentTask,
+        ) -> Result<RawSubagentResult, ExecError> {
+            self.by_id
+                .get(&spec.id.0)
+                .cloned()
+                .ok_or_else(|| ExecError::Backend("no canned result".into()))
+        }
+    }
+
+    fn reg3() -> AgentRegistry {
+        let mut r = AgentRegistry::new();
+        r.register(spec(1, Role::ExternalCommand));
+        r.register(spec(2, Role::ExternalCommand));
+        r.register(spec(3, Role::ExternalCommand));
+        r
+    }
+
+    fn u(n: u64) -> AgentUsage {
+        AgentUsage {
+            wall_ms: n,
+            output_bytes: n,
+            tokens: n,
+        }
+    }
+
+    #[test]
+    fn fanout_stops_at_the_first_verifier_accepted_winner() {
+        // Proposer 1 fails the verifier, 2 passes, 3 would pass — the race stops at 2.
+        let exec = KeyedMock {
+            by_id: BTreeMap::from([
+                (1, raw(false, true, u(5))),
+                (2, raw(true, false, u(5))),
+                (3, raw(true, true, u(5))),
+            ]),
+        };
+        let plan = FanoutPlan {
+            task: task(),
+            proposers: vec![AgentId(1), AgentId(2), AgentId(3)],
+        };
+        let mut sched = Scheduler::new(2);
+        let mut usages = BTreeMap::new();
+        let mut bb = Blackboard::new();
+        let res = run_fanout(&plan, &reg3(), &exec, &mut sched, &mut usages, &mut bb);
+
+        assert_eq!(res.winner, Some(AgentId(2)));
+        assert!(res.verified);
+        // Stopped at agent 2 — agent 3 was never run.
+        assert_eq!(res.results.len(), 2);
+        // Blackboard: agent 1 posted a TestResult (rejected), agent 2 a PatchProposal.
+        let proposals = bb.of_kind(MessageKind::PatchProposal);
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].from, AgentId(2));
+        // Slot released after every run.
+        assert_eq!(sched.running(), 0);
+    }
+
+    #[test]
+    fn fanout_with_no_verified_proposer_has_no_winner() {
+        let exec = KeyedMock {
+            by_id: BTreeMap::from([(1, raw(false, true, u(1))), (2, raw(false, true, u(1)))]),
+        };
+        let plan = FanoutPlan {
+            task: task(),
+            proposers: vec![AgentId(1), AgentId(2)],
+        };
+        let mut sched = Scheduler::new(2);
+        let mut usages = BTreeMap::new();
+        let mut bb = Blackboard::new();
+        let res = run_fanout(&plan, &reg3(), &exec, &mut sched, &mut usages, &mut bb);
+
+        assert_eq!(res.winner, None);
+        assert!(!res.verified);
+        // Every proposer ran; none accepted → all TestResults, no PatchProposal.
+        assert_eq!(res.results.len(), 2);
+        assert_eq!(bb.of_kind(MessageKind::PatchProposal).len(), 0);
+    }
+
+    #[test]
+    fn fanout_winner_is_verifier_owned_not_self_claim() {
+        // Agent 1 claims done but the verifier rejected it; agent 2 did NOT self-claim but the
+        // verifier accepted it. The winner is agent 2 — selection is verifier-owned (inv 6,13).
+        let exec = KeyedMock {
+            by_id: BTreeMap::from([(1, raw(false, true, u(1))), (2, raw(true, false, u(1)))]),
+        };
+        let plan = FanoutPlan {
+            task: task(),
+            proposers: vec![AgentId(1), AgentId(2)],
+        };
+        let mut sched = Scheduler::new(2);
+        let mut usages = BTreeMap::new();
+        let mut bb = Blackboard::new();
+        let res = run_fanout(&plan, &reg3(), &exec, &mut sched, &mut usages, &mut bb);
+        assert_eq!(res.winner, Some(AgentId(2)));
+    }
+
+    #[test]
+    fn fanout_skips_an_unknown_agent_and_continues() {
+        // Agent 9 is not registered → RunRefused::UnknownAgent, but the race continues and
+        // agent 2 wins.
+        let exec = KeyedMock {
+            by_id: BTreeMap::from([(2, raw(true, false, u(1)))]),
+        };
+        let plan = FanoutPlan {
+            task: task(),
+            proposers: vec![AgentId(9), AgentId(2)],
+        };
+        let mut sched = Scheduler::new(2);
+        let mut usages = BTreeMap::new();
+        let mut bb = Blackboard::new();
+        let res = run_fanout(&plan, &reg3(), &exec, &mut sched, &mut usages, &mut bb);
+
+        assert_eq!(res.winner, Some(AgentId(2)));
+        assert!(matches!(
+            res.results[0],
+            (AgentId(9), Err(RunRefused::UnknownAgent))
+        ));
+    }
+
+    #[test]
+    fn fanout_charges_each_agent_its_own_budget() {
+        let exec = KeyedMock {
+            by_id: BTreeMap::from([(1, raw(false, false, u(3))), (2, raw(false, false, u(7)))]),
+        };
+        let plan = FanoutPlan {
+            task: task(),
+            proposers: vec![AgentId(1), AgentId(2)],
+        };
+        let mut sched = Scheduler::new(2);
+        let mut usages = BTreeMap::new();
+        let mut bb = Blackboard::new();
+        let _ = run_fanout(&plan, &reg3(), &exec, &mut sched, &mut usages, &mut bb);
+        assert_eq!(usages.get(&AgentId(1)).unwrap().tokens, 3);
+        assert_eq!(usages.get(&AgentId(2)).unwrap().tokens, 7);
     }
 }
