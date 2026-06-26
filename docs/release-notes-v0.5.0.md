@@ -45,6 +45,13 @@ of it touches nano: the trusted kernel is byte-identical to v0.4.** All 20 invar
   is **576.7 KiB** on Linux x86_64, only +98 KiB over nano and **under the 600 KiB stretch
   goal**, because the heavy I/O (HTTP/TLS, DBs, tree-sitter) runs in spawned sidecars. CI
   measures it on every push (`cargo xtask full-size`).
+- **`crustcore-full` — a one-binary casual-user front door.** The trusted core is multi-binary
+  by design; for casual use there is now a convenience all-in-one (`--features all`) that
+  bundles chat + Telegram bot + model helper into **one executable that spawns itself** as the
+  helper — nothing to put on PATH (`crustcore-full setup` / `chat` / `serve --pair`), with a
+  `KEY=VALUE` config file instead of shell-env juggling; offline mock by default, live when a
+  provider config is set. It only *wires* the existing tested components, so the trust boundary
+  is unchanged. Zero nano impact.
 
 ---
 
