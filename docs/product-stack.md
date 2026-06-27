@@ -80,7 +80,7 @@ The product layer starts with four stable contracts in
   `MonitoringCi`, `Repairing`, `Blocked`, `Completed`.
 - `ExecutorCapability`: executor metadata for routing and UX; never authority.
 - `EvidenceBundle`: stable evidence artifact for draft PR bodies, cockpit views,
-  and audit export.
+  and bounded JSON/JSONL audit export.
 
 Example `crustcore.yml`:
 

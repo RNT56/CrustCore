@@ -17,6 +17,13 @@ pub const DEFAULT_BRANCH_PREFIX: &str = "crustcore";
 /// The default base branch for draft PRs.
 pub const DEFAULT_BASE_BRANCH: &str = "main";
 
+/// Stable evidence bundle export schema id.
+pub const EVIDENCE_BUNDLE_SCHEMA: &str = "crustcore.evidence_bundle.v1";
+
+const MAX_EVIDENCE_EXPORT_COMMANDS: usize = 32;
+const MAX_EVIDENCE_EXPORT_RISKS: usize = 32;
+const MAX_EVIDENCE_EXPORT_REFS: usize = 64;
+
 /// Product policy posture selected by trusted setup, never by repo text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PolicyMode {
@@ -1474,6 +1481,21 @@ impl EvidenceBundle {
         }
     }
 
+    /// Creates a planning-stage bundle from a verifier plan.
+    ///
+    /// Planned commands are not command evidence. The bundle stays
+    /// `NoVerifierEvidence` until actual verifier command results are attached.
+    #[must_use]
+    pub fn from_verifier_plan(run_id: impl Into<String>, plan: &VerifierPlan) -> Self {
+        let mut bundle = EvidenceBundle::new(run_id);
+        bundle.lifecycle = TaskLifecycle::Planning;
+        bundle.verifier_plan = plan.label.clone();
+        bundle
+            .risks
+            .extend(plan.warnings.iter().map(|warning| bound(warning, 240)));
+        bundle
+    }
+
     /// Evaluates whether this bundle is strong enough to present as complete.
     #[must_use]
     pub fn verdict(&self) -> EvidenceVerdict {
@@ -1502,6 +1524,105 @@ impl EvidenceBundle {
     #[must_use]
     pub fn is_sufficient(&self) -> bool {
         self.verdict() == EvidenceVerdict::Sufficient
+    }
+
+    /// Whether JSON export had to cap list lengths.
+    #[must_use]
+    pub fn export_is_truncated(&self) -> bool {
+        self.commands.len() > MAX_EVIDENCE_EXPORT_COMMANDS
+            || self.risks.len() > MAX_EVIDENCE_EXPORT_RISKS
+            || self.receipts.len() > MAX_EVIDENCE_EXPORT_REFS
+            || self.event_refs.len() > MAX_EVIDENCE_EXPORT_REFS
+    }
+
+    /// Exports this bundle as stable bounded JSON for audit/cockpit storage.
+    ///
+    /// This avoids adding a serialization dependency to the product contract
+    /// layer. The output is data only; it does not grant completion authority.
+    #[must_use]
+    pub fn export_json(&self) -> String {
+        let mut out = String::new();
+        out.push('{');
+        out.push_str("\"schema\":");
+        out.push_str(&json_string(EVIDENCE_BUNDLE_SCHEMA, 64));
+        out.push_str(",\"run_id\":");
+        out.push_str(&json_string(&self.run_id, 160));
+        out.push_str(",\"lifecycle\":");
+        out.push_str(&json_string(self.lifecycle.label(), 32));
+        out.push_str(",\"verdict\":");
+        out.push_str(&json_string(self.verdict().label(), 64));
+        out.push_str(",\"verifier_plan\":");
+        out.push_str(&json_string(&self.verifier_plan, 240));
+        out.push_str(",\"ci\":");
+        out.push_str(&json_string(self.ci.label(), 32));
+        out.push_str(",\"human_review_required\":true");
+        out.push_str(",\"truncated\":");
+        out.push_str(if self.export_is_truncated() {
+            "true"
+        } else {
+            "false"
+        });
+        out.push_str(",\"patch_hash\":");
+        match &self.patch_hash {
+            Some(hash) => out.push_str(&json_string(hash, 128)),
+            None => out.push_str("null"),
+        }
+
+        out.push_str(",\"commands\":[");
+        for (idx, command) in self
+            .commands
+            .iter()
+            .take(MAX_EVIDENCE_EXPORT_COMMANDS)
+            .enumerate()
+        {
+            if idx > 0 {
+                out.push(',');
+            }
+            out.push('{');
+            out.push_str("\"command\":");
+            out.push_str(&json_string(&command.command, 240));
+            out.push_str(",\"passed\":");
+            out.push_str(if command.passed { "true" } else { "false" });
+            out.push_str(",\"note\":");
+            match &command.note {
+                Some(note) => out.push_str(&json_string(note, 512)),
+                None => out.push_str("null"),
+            }
+            out.push('}');
+        }
+        out.push(']');
+
+        out.push_str(",\"risks\":");
+        push_json_string_array(
+            &mut out,
+            self.risks.iter().map(String::as_str),
+            MAX_EVIDENCE_EXPORT_RISKS,
+            240,
+        );
+        out.push_str(",\"receipts\":");
+        push_json_string_array(
+            &mut out,
+            self.receipts.iter().map(String::as_str),
+            MAX_EVIDENCE_EXPORT_REFS,
+            160,
+        );
+        out.push_str(",\"event_refs\":");
+        push_json_string_array(
+            &mut out,
+            self.event_refs.iter().map(String::as_str),
+            MAX_EVIDENCE_EXPORT_REFS,
+            160,
+        );
+        out.push('}');
+        out
+    }
+
+    /// Exports this bundle as one JSONL line.
+    #[must_use]
+    pub fn export_jsonl_line(&self) -> String {
+        let mut line = self.export_json();
+        line.push('\n');
+        line
     }
 
     /// Renders the evidence block intended for a draft PR body.
@@ -1603,6 +1724,46 @@ fn bound(value: impl AsRef<str>, max: usize) -> String {
     }
     out.push_str("...");
     out
+}
+
+fn json_string(value: impl AsRef<str>, max: usize) -> String {
+    let bounded = bound(value.as_ref(), max);
+    let mut out = String::with_capacity(bounded.len() + 2);
+    out.push('"');
+    for ch in bounded.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            ch if ch.is_control() => {
+                out.push_str("\\u");
+                out.push_str(&format!("{:04x}", ch as u32));
+            }
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn push_json_string_array<'a>(
+    out: &mut String,
+    values: impl Iterator<Item = &'a str>,
+    max_items: usize,
+    max_value_len: usize,
+) {
+    out.push('[');
+    for (idx, value) in values.take(max_items).enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        out.push_str(&json_string(value, max_value_len));
+    }
+    out.push(']');
 }
 
 #[cfg(test)]
@@ -1974,6 +2135,84 @@ ui:
         let mut blocked = ci_failed;
         blocked.lifecycle = TaskLifecycle::Blocked;
         assert_eq!(blocked.verdict(), EvidenceVerdict::Blocked);
+    }
+
+    #[test]
+    fn evidence_bundle_from_verifier_plan_preserves_weak_evidence_without_results() {
+        let profile = RepoProfile {
+            verify: vec!["cargo check --workspace".to_string()],
+            ..RepoProfile::default()
+        };
+        let signals = RepoSignals {
+            cargo_manifest: true,
+            ..RepoSignals::default()
+        };
+        let plan = profile.plan_verification(&signals, TaskShape::BugFix);
+
+        let bundle = EvidenceBundle::from_verifier_plan("run-plan", &plan);
+
+        assert_eq!(bundle.lifecycle, TaskLifecycle::Planning);
+        assert_eq!(bundle.verifier_plan, plan.label);
+        assert!(bundle.commands.is_empty());
+        assert_eq!(bundle.verdict(), EvidenceVerdict::NoVerifierEvidence);
+        assert!(bundle
+            .risks
+            .iter()
+            .any(|risk| risk.contains("regression-test")));
+    }
+
+    #[test]
+    fn evidence_export_json_is_stable_escaped_and_review_gated() {
+        let mut bundle = EvidenceBundle::new("run-\"quoted\"");
+        bundle.lifecycle = TaskLifecycle::Completed;
+        bundle.verifier_plan = "rust full gate".to_string();
+        bundle.commands.push(
+            CommandEvidenceLine::new("cargo test --workspace", true)
+                .with_note("line one\nline \"two\""),
+        );
+        bundle.patch_hash = Some("patch\\hash".to_string());
+        bundle.ci = CiState::Passed;
+        bundle.receipts.push("receipt:verify:1".to_string());
+        bundle.event_refs.push("event:1..3".to_string());
+        bundle.risks.push("review auth-sensitive path".to_string());
+
+        let json = bundle.export_json();
+
+        assert!(json.starts_with("{\"schema\":\"crustcore.evidence_bundle.v1\""));
+        assert!(json.contains("\"human_review_required\":true"));
+        assert!(json.contains("\"verdict\":\"sufficient\""));
+        assert!(json.contains("run-\\\"quoted\\\""));
+        assert!(json.contains("line one\\nline \\\"two\\\""));
+        assert!(json.contains("patch\\\\hash"));
+        assert!(!json.contains("line one\nline"));
+
+        let jsonl = bundle.export_jsonl_line();
+        assert!(jsonl.ends_with('\n'));
+        assert_eq!(&jsonl[..jsonl.len() - 1], json);
+    }
+
+    #[test]
+    fn evidence_export_caps_arrays_and_marks_truncated() {
+        let mut bundle = EvidenceBundle::new("run-large");
+        for idx in 0..40 {
+            bundle
+                .commands
+                .push(CommandEvidenceLine::new(format!("cmd-{idx}"), true));
+            bundle.risks.push(format!("risk-{idx}"));
+            bundle.receipts.push(format!("receipt-{idx}"));
+            bundle.event_refs.push(format!("event-{idx}"));
+        }
+
+        let json = bundle.export_json();
+
+        assert!(bundle.export_is_truncated());
+        assert!(json.contains("\"truncated\":true"));
+        assert!(json.contains("cmd-31"));
+        assert!(!json.contains("cmd-32"));
+        assert!(json.contains("risk-31"));
+        assert!(!json.contains("risk-32"));
+        assert!(json.contains("receipt-39"));
+        assert!(json.contains("event-39"));
     }
 
     #[test]

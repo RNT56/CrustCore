@@ -59,6 +59,13 @@ agent/PR/role/size/invariant audit trail.
   changed-file risk shape without filesystem IO or authority. Sensitive and
   workflow paths fail closed into stronger task shapes; bug fixes are still not
   inferred from filenames alone. No kernel or nano changes; no new dependencies.
+- **Bounded evidence bundle export.** Added
+  `EvidenceBundle::from_verifier_plan`, `export_json`, and `export_jsonl_line`
+  so PR, cockpit, and audit surfaces can share the same stable
+  `crustcore.evidence_bundle.v1` artifact. The export is manually bounded and
+  escaped without adding serialization dependencies; planned verifier commands
+  remain non-evidence until actual command results are attached. No kernel or
+  nano changes; no new dependencies.
 
 ### Agent Log
 
@@ -68,6 +75,7 @@ agent/PR/role/size/invariant audit trail.
 | 2026-06-27 | WCA-1 | Deterministic GitHub issue-to-draft-PR golden over untrusted issue data, `VerifiedPatch`, approved draft PR intent, canned REST create, and bounded CI repair | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (eval/sidecar only) | Preserves 1, 6, 7, 8, 9, 13, 14; no live token or unverified PR path |
 | 2026-06-27 | WCA-2 | Verifier planner for repo/task signals, staged check ordering, task gates, and weak-evidence warnings | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 19, 20; no authority path added |
 | 2026-06-27 | WCA-2 | Path-based repo signal and changed-file task classifier feeding verifier planning without filesystem IO | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 19, 20; no authority path added |
+| 2026-06-27 | WCA-2 | Bounded evidence bundle JSON/JSONL export and verifier-plan initialization for PR/cockpit/audit surfaces | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 19, 20; no authority path added |
 
 ## [0.5.0] - 2026-06-26
 
