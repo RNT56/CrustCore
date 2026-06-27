@@ -39,6 +39,10 @@ pub mod advisor;
 pub mod chat;
 pub mod exec;
 pub mod github;
+/// Product-layer contracts for the GitHub PR Supervisor: repo profile,
+/// lifecycle states, executor metadata, and evidence bundles. Pure data only;
+/// authority still lives in the kernel/backend gates.
+pub mod product;
 /// Multi-task supervised registry (leases/heartbeats/cancellation; invariant 12). A pure
 /// decision core — always compiled + CI-tested; the live loop that drives it is `live`-gated.
 pub mod registry;

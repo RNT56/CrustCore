@@ -28,7 +28,31 @@ agent/PR/role/size/invariant audit trail.
 
 ## [Unreleased]
 
-_Nothing yet — the next release accumulates here._
+### Added
+
+- **World-class GitHub PR Supervisor product foundation.** Added
+  `crustcore_daemon::product`, a pure non-nano product contract module for the
+  first GitHub PR Supervisor wedge: `RepoProfile` / `crustcore.yml` parsing
+  (fail-closed on unknown policy/executor keys), `TaskLifecycle` states for
+  product UX, `ExecutorCapability` metadata for routing without authority, and
+  `EvidenceBundle` / `EvidenceVerdict` for evidence-backed draft PR bodies and
+  cockpit views. Added [`docs/product-stack.md`](./docs/product-stack.md) and
+  [`docs/world-class-agent-roadmap.md`](./docs/world-class-agent-roadmap.md) to
+  make the stack position, phases, smoke gates, and kernel-preservation boundary
+  durable. No kernel or nano changes; no new dependencies.
+- **Deterministic issue-to-draft-PR golden.** Un-deferred
+  `golden_issue_to_pr_flow` so CI now exercises the Phase 1 decision path:
+  untrusted issue ingestion, sandboxed worker patch production, verifier-minted
+  `VerifiedPatch`, approval-gated draft `PrIntent`, sidecar `CreatePrRequest`
+  rendering through canned GitHub REST, and bounded CI repair decisions. This is
+  still socket-free; the real GitHub push/REST smoke remains a live/manual gate.
+
+### Agent Log
+
+| Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-27 | WCA-0/WCA-2 | Product-stack docs + daemon product contracts for `crustcore.yml`, lifecycle states, executor metadata, and evidence bundles | `codex/world-class-agent-foundation` | Codex (Architect/Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 14, 19, 20; no authority path added |
+| 2026-06-27 | WCA-1 | Deterministic GitHub issue-to-draft-PR golden over untrusted issue data, `VerifiedPatch`, approved draft PR intent, canned REST create, and bounded CI repair | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (eval/sidecar only) | Preserves 1, 6, 7, 8, 9, 13, 14; no live token or unverified PR path |
 
 ## [0.5.0] - 2026-06-26
 

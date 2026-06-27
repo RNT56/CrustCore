@@ -174,7 +174,9 @@ Tool result      →  ToolReceipt + Artifact →  Event::ToolCompleted
 ```
 
 Full design: **[docs/architecture.md](./docs/architecture.md)** &nbsp;·&nbsp; size discipline:
-**[docs/nano-size-budget.md](./docs/nano-size-budget.md)**
+**[docs/nano-size-budget.md](./docs/nano-size-budget.md)** &nbsp;·&nbsp; product stack:
+**[docs/product-stack.md](./docs/product-stack.md)** &nbsp;·&nbsp; product roadmap:
+**[docs/world-class-agent-roadmap.md](./docs/world-class-agent-roadmap.md)**
 
 ---
 
