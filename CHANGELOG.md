@@ -71,6 +71,12 @@ agent/PR/role/size/invariant audit trail.
   paths. Rust crate, Python test, and JavaScript/TypeScript test hints run
   before full-suite gates, while unsafe path fragments are rejected and cannot
   become command text. No kernel or nano changes; no new dependencies.
+- **Bounded repo profiler adapter.** Added
+  `crustcore_daemon::repo_profiler::RepoPathSnapshot`, a deterministic
+  filesystem path observer that records marker paths only, skips symlinks and
+  generated directories, caps depth/path count, and feeds `RepoSignals` /
+  `VerifierPlan` without reading repo contents or granting authority. No kernel
+  or nano changes; no new dependencies.
 
 ### Agent Log
 
@@ -82,6 +88,7 @@ agent/PR/role/size/invariant audit trail.
 | 2026-06-27 | WCA-2 | Path-based repo signal and changed-file task classifier feeding verifier planning without filesystem IO | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 19, 20; no authority path added |
 | 2026-06-27 | WCA-2 | Bounded evidence bundle JSON/JSONL export and verifier-plan initialization for PR/cockpit/audit surfaces | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 19, 20; no authority path added |
 | 2026-06-27 | WCA-2 | Sanitized changed-path targeted verifier hints before full-suite gates | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 19, 20; untrusted paths are token-checked before command text |
+| 2026-06-27 | WCA-2 | Bounded repo path profiler adapter feeding verifier planning without reading contents | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 19, 20; filesystem observations are untrusted data |
 
 ## [0.5.0] - 2026-06-26
 

@@ -91,8 +91,11 @@ can now initialize from a verifier plan and export stable bounded JSON/JSONL for
 PR, cockpit, and audit surfaces without adding serialization dependencies.
 `RepoSignals::from_repo_and_changed_paths` now adds sanitized Rust crate,
 Python test, and JavaScript/TypeScript test hints before full-suite gates while
-rejecting unsafe path fragments. The remaining Phase 2 gap is a live filesystem
-adapter that feeds these pure classifiers without granting authority.
+rejecting unsafe path fragments. `crustcore_daemon::repo_profiler` now provides a
+bounded live filesystem path adapter that records marker names only, skips
+symlinks/generated directories, and feeds those pure classifiers without reading
+contents or granting authority. The remaining Phase 2 gap is richer test-graph,
+ownership, and flaky-test metadata layered on top of this safe observation path.
 
 ## Phase 3 — Strongest Execution Layer
 

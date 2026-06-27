@@ -71,9 +71,10 @@ The product layer starts with four stable contracts in
 
 - `RepoProfile`: parsed from `crustcore.yml`, trusted setup only.
 - `RepoSignals` + `TaskShape`: adapter-supplied repo facts and product task
-  classification; `RepoSignals::from_paths` and
-  `TaskShape::from_changed_paths` provide deterministic path-based defaults,
-  never authority.
+  classification; path-based defaults and sanitized changed-path hints are
+  verifier guidance only, never authority.
+- `RepoPathSnapshot`: bounded daemon-side path profiler that observes marker
+  names without reading file contents, following symlinks, or running tools.
 - `VerifierPlan`: deterministic check ordering, task gates, and weak-evidence
   warnings before execution.
 - `TaskLifecycle`: product-facing states such as `Queued`, `Verifying`,
@@ -81,8 +82,6 @@ The product layer starts with four stable contracts in
 - `ExecutorCapability`: executor metadata for routing and UX; never authority.
 - `EvidenceBundle`: stable evidence artifact for draft PR bodies, cockpit views,
   and bounded JSON/JSONL audit export.
-- `RepoSignals`: pure repo-marker and changed-path observations that produce
-  sanitized targeted verifier hints before any full-suite gate.
 
 Example `crustcore.yml`:
 

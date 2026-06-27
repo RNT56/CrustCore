@@ -46,6 +46,9 @@ pub mod product;
 /// Multi-task supervised registry (leases/heartbeats/cancellation; invariant 12). A pure
 /// decision core — always compiled + CI-tested; the live loop that drives it is `live`-gated.
 pub mod registry;
+/// Bounded repo path profiler that observes marker paths for verifier planning
+/// without reading file contents or granting authority.
+pub mod repo_profiler;
 pub mod runtime;
 pub mod selfimprove;
 pub mod supervisor;
