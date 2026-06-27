@@ -53,6 +53,12 @@ agent/PR/role/size/invariant audit trail.
   Rust/Node/Python/Make verifier commands when no profile verifier exists, and
   calls out weak evidence for bug-fix, UI, dependency, docs-only, workflow, and
   security-sensitive tasks. No kernel or nano changes; no new dependencies.
+- **Path-based repo signal detector.** Added deterministic
+  `RepoSignals::from_paths` and `TaskShape::from_changed_paths` defaults so
+  product adapters can classify repo stacks, browser/docs/audit markers, and
+  changed-file risk shape without filesystem IO or authority. Sensitive and
+  workflow paths fail closed into stronger task shapes; bug fixes are still not
+  inferred from filenames alone. No kernel or nano changes; no new dependencies.
 
 ### Agent Log
 
@@ -61,6 +67,7 @@ agent/PR/role/size/invariant audit trail.
 | 2026-06-27 | WCA-0/WCA-2 | Product-stack docs + daemon product contracts for `crustcore.yml`, lifecycle states, executor metadata, and evidence bundles | `codex/world-class-agent-foundation` | Codex (Architect/Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 14, 19, 20; no authority path added |
 | 2026-06-27 | WCA-1 | Deterministic GitHub issue-to-draft-PR golden over untrusted issue data, `VerifiedPatch`, approved draft PR intent, canned REST create, and bounded CI repair | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (eval/sidecar only) | Preserves 1, 6, 7, 8, 9, 13, 14; no live token or unverified PR path |
 | 2026-06-27 | WCA-2 | Verifier planner for repo/task signals, staged check ordering, task gates, and weak-evidence warnings | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 19, 20; no authority path added |
+| 2026-06-27 | WCA-2 | Path-based repo signal and changed-file task classifier feeding verifier planning without filesystem IO | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 19, 20; no authority path added |
 
 ## [0.5.0] - 2026-06-26
 

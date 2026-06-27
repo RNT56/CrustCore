@@ -452,6 +452,59 @@ pub struct RepoSignals {
 }
 
 impl RepoSignals {
+    /// Derives repo signals from adapter-provided path observations.
+    ///
+    /// This does not read the filesystem and does not trust repo content. It is
+    /// a deterministic classifier over bounded path strings so live adapters,
+    /// tests, and GitHub diffs can all feed the same product planner.
+    #[must_use]
+    pub fn from_paths<I, P>(paths: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<str>,
+    {
+        let mut signals = RepoSignals::default();
+
+        for raw_path in paths {
+            let path = normalize_path(raw_path.as_ref());
+            if path.is_empty() {
+                continue;
+            }
+            let file = path.rsplit('/').next().unwrap_or(path.as_str());
+
+            if file == "Cargo.toml" {
+                signals.cargo_manifest = true;
+            }
+            if file == "package.json" {
+                signals.package_json = true;
+            }
+            if is_python_project_marker(file) {
+                signals.python_project = true;
+            }
+            if file == "Makefile" || file == "makefile" {
+                signals.makefile = true;
+            }
+            if is_lockfile(file) {
+                signals.lockfile = true;
+            }
+            if is_playwright_marker(&path, file) {
+                signals.browser_smoke_command = Some("npx playwright test".to_string());
+            } else if is_cypress_marker(&path, file) && signals.browser_smoke_command.is_none() {
+                signals.browser_smoke_command = Some("npx cypress run".to_string());
+            }
+            if is_cargo_deny_marker(&path, file) {
+                signals.dependency_audit_command = Some("cargo deny check".to_string());
+            }
+            if is_mdbook_marker(file) {
+                signals.docs_check_command = Some("mdbook test".to_string());
+            } else if is_markdownlint_marker(file) && signals.docs_check_command.is_none() {
+                signals.docs_check_command = Some("markdownlint .".to_string());
+            }
+        }
+
+        signals
+    }
+
     /// Whether no useful repo signal was observed.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -489,6 +542,60 @@ pub enum TaskShape {
 }
 
 impl TaskShape {
+    /// Classifies a task from changed paths when no stronger issue/intent signal
+    /// is available.
+    ///
+    /// Path classification is intentionally conservative: sensitive and workflow
+    /// paths win over UI/docs heuristics, and bug fixes are not inferred from
+    /// filenames because that requires trusted task intent.
+    #[must_use]
+    pub fn from_changed_paths<I, P>(paths: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<str>,
+    {
+        let mut saw_path = false;
+        let mut all_docs = true;
+        let mut saw_dependency = false;
+        let mut saw_ui = false;
+
+        for raw_path in paths {
+            let path = normalize_path(raw_path.as_ref());
+            if path.is_empty() {
+                continue;
+            }
+            saw_path = true;
+
+            if is_security_sensitive_path(&path) {
+                return TaskShape::SecuritySensitive;
+            }
+            if is_workflow_path(&path) {
+                return TaskShape::WorkflowChange;
+            }
+            if is_dependency_path(&path) {
+                saw_dependency = true;
+            }
+            if is_ui_path(&path) {
+                saw_ui = true;
+            }
+            if !is_docs_path(&path) {
+                all_docs = false;
+            }
+        }
+
+        if !saw_path {
+            TaskShape::Unknown
+        } else if saw_dependency {
+            TaskShape::DependencyChange
+        } else if saw_ui {
+            TaskShape::UiChange
+        } else if all_docs {
+            TaskShape::DocsOnly
+        } else {
+            TaskShape::Feature
+        }
+    }
+
     /// Stable label for evidence and cockpit views.
     #[must_use]
     pub fn label(self) -> &'static str {
@@ -896,6 +1003,115 @@ fn looks_full_command(normalized: &str) -> bool {
 
 fn normalize_command(value: &str) -> String {
     clean_scalar(value).trim().to_ascii_lowercase()
+}
+
+fn normalize_path(value: &str) -> String {
+    let normalized = clean_scalar(value).trim().replace('\\', "/");
+    bound(normalized.trim_start_matches("./"), 512)
+}
+
+fn is_python_project_marker(file: &str) -> bool {
+    matches!(
+        file,
+        "pyproject.toml" | "setup.py" | "setup.cfg" | "requirements.txt" | "pytest.ini" | "tox.ini"
+    )
+}
+
+fn is_lockfile(file: &str) -> bool {
+    matches!(
+        file,
+        "Cargo.lock"
+            | "package-lock.json"
+            | "pnpm-lock.yaml"
+            | "yarn.lock"
+            | "poetry.lock"
+            | "uv.lock"
+            | "Pipfile.lock"
+    )
+}
+
+fn is_playwright_marker(path: &str, file: &str) -> bool {
+    file.starts_with("playwright.config.") || path.starts_with("tests/e2e/")
+}
+
+fn is_cypress_marker(path: &str, file: &str) -> bool {
+    file.starts_with("cypress.config.") || path.starts_with("cypress/")
+}
+
+fn is_cargo_deny_marker(path: &str, file: &str) -> bool {
+    file == "deny.toml" || file == "cargo-deny.toml" || path == ".cargo/deny.toml"
+}
+
+fn is_mdbook_marker(file: &str) -> bool {
+    file == "book.toml"
+}
+
+fn is_markdownlint_marker(file: &str) -> bool {
+    file == ".markdownlint.json" || file == ".markdownlint.yaml" || file == ".markdownlint.yml"
+}
+
+fn is_security_sensitive_path(path: &str) -> bool {
+    path == "CLAUDE.md"
+        || path == "AGENTS.md"
+        || path == "INVARIANTS.md"
+        || path == "SECURITY.md"
+        || path == "THREAT_MODEL.md"
+        || path.starts_with("docs/policy")
+        || path.starts_with("docs/secrets")
+        || path.starts_with("docs/sandbox")
+        || path.starts_with("docs/backend-contract")
+        || path.starts_with("crates/crustcore-kernel/")
+        || path.starts_with("crates/crustcore-policy/")
+        || path.starts_with("crates/crustcore-sandbox/")
+        || path.starts_with("crates/crustcore-secrets/")
+}
+
+fn is_workflow_path(path: &str) -> bool {
+    path.starts_with(".github/workflows/")
+}
+
+fn is_dependency_path(path: &str) -> bool {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    matches!(
+        file,
+        "Cargo.toml"
+            | "Cargo.lock"
+            | "package.json"
+            | "package-lock.json"
+            | "pnpm-lock.yaml"
+            | "yarn.lock"
+            | "pyproject.toml"
+            | "poetry.lock"
+            | "uv.lock"
+            | "requirements.txt"
+            | "Pipfile.lock"
+    )
+}
+
+fn is_ui_path(path: &str) -> bool {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    path.starts_with("crates/crustcore-dev/")
+        || path.starts_with("ui/")
+        || path.starts_with("web/")
+        || path.starts_with("frontend/")
+        || file.ends_with(".tsx")
+        || file.ends_with(".jsx")
+        || file.ends_with(".css")
+        || file.ends_with(".scss")
+        || file.ends_with(".sass")
+}
+
+fn is_docs_path(path: &str) -> bool {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    path.starts_with("docs/")
+        || matches!(
+            file,
+            "README.md" | "CHANGELOG.md" | "CONTRIBUTING.md" | "LICENSE" | "NOTICE"
+        )
+        || file.ends_with(".md")
+        || file.ends_with(".mdx")
+        || file.ends_with(".rst")
+        || file.ends_with(".txt")
 }
 
 /// Parse failure for `crustcore.yml`.
@@ -1503,6 +1719,88 @@ ui:
         assert!(plan.gates.contains(&TaskGate::FullSuite));
         assert_eq!(plan.strength, EvidenceStrength::Standard);
         assert!(plan.warnings.is_empty());
+    }
+
+    #[test]
+    fn repo_signals_are_detected_from_path_observations() {
+        let signals = RepoSignals::from_paths([
+            "./Cargo.toml",
+            "Cargo.lock",
+            "package.json",
+            "playwright.config.ts",
+            "deny.toml",
+            "book.toml",
+        ]);
+
+        assert!(signals.cargo_manifest);
+        assert!(signals.package_json);
+        assert!(signals.lockfile);
+        assert_eq!(
+            signals.browser_smoke_command.as_deref(),
+            Some("npx playwright test")
+        );
+        assert_eq!(
+            signals.dependency_audit_command.as_deref(),
+            Some("cargo deny check")
+        );
+        assert_eq!(signals.docs_check_command.as_deref(), Some("mdbook test"));
+    }
+
+    #[test]
+    fn repo_signals_detect_python_make_and_cypress_markers() {
+        let signals = RepoSignals::from_paths([
+            "pyproject.toml",
+            "Makefile",
+            "poetry.lock",
+            "cypress.config.ts",
+        ]);
+
+        assert!(signals.python_project);
+        assert!(signals.makefile);
+        assert!(signals.lockfile);
+        assert_eq!(
+            signals.browser_smoke_command.as_deref(),
+            Some("npx cypress run")
+        );
+    }
+
+    #[test]
+    fn changed_paths_classify_docs_ui_dependency_and_feature_shapes() {
+        assert_eq!(
+            TaskShape::from_changed_paths(["docs/product-stack.md", "CHANGELOG.md"]),
+            TaskShape::DocsOnly
+        );
+        assert_eq!(
+            TaskShape::from_changed_paths(["crates/crustcore-dev/src/app.tsx"]),
+            TaskShape::UiChange
+        );
+        assert_eq!(
+            TaskShape::from_changed_paths(["Cargo.toml", "Cargo.lock"]),
+            TaskShape::DependencyChange
+        );
+        assert_eq!(
+            TaskShape::from_changed_paths(["crates/crustcore-daemon/src/product.rs"]),
+            TaskShape::Feature
+        );
+        assert_eq!(
+            TaskShape::from_changed_paths(["", "   "]),
+            TaskShape::Unknown
+        );
+    }
+
+    #[test]
+    fn changed_paths_fail_closed_for_sensitive_and_workflow_paths() {
+        assert_eq!(
+            TaskShape::from_changed_paths([
+                "docs/product-stack.md",
+                "crates/crustcore-secrets/src/lib.rs"
+            ]),
+            TaskShape::SecuritySensitive
+        );
+        assert_eq!(
+            TaskShape::from_changed_paths([".github/workflows/ci.yml", "README.md"]),
+            TaskShape::WorkflowChange
+        );
     }
 
     #[test]

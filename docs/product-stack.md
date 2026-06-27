@@ -71,7 +71,9 @@ The product layer starts with four stable contracts in
 
 - `RepoProfile`: parsed from `crustcore.yml`, trusted setup only.
 - `RepoSignals` + `TaskShape`: adapter-supplied repo facts and product task
-  classification; both are untrusted inputs to planning, never authority.
+  classification; `RepoSignals::from_paths` and
+  `TaskShape::from_changed_paths` provide deterministic path-based defaults,
+  never authority.
 - `VerifierPlan`: deterministic check ordering, task gates, and weak-evidence
   warnings before execution.
 - `TaskLifecycle`: product-facing states such as `Queued`, `Verifying`,

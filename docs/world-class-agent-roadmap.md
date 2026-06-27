@@ -84,9 +84,11 @@ smoke with maintainer-owned credentials.
 `TaskShape`. It ranks targeted commands before full gates, infers conservative
 Rust/Node/Python/Make checks when no profile verifier exists, and warns when
 bug-fix, UI, dependency, docs-only, workflow, or security-sensitive tasks lack
-the evidence a reviewer should expect. The remaining Phase 2 gap is a live repo
-profiler/test-graph adapter that feeds richer signals without granting
-authority.
+the evidence a reviewer should expect. `RepoSignals::from_paths` and
+`TaskShape::from_changed_paths` now provide deterministic path-based defaults
+for repo marker detection and changed-file task classification. The remaining
+Phase 2 gap is a live repo profiler/test-graph adapter that feeds richer
+signals without granting authority.
 
 ## Phase 3 — Strongest Execution Layer
 
