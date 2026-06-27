@@ -81,6 +81,8 @@ The product layer starts with four stable contracts in
 - `ExecutorCapability`: executor metadata for routing and UX; never authority.
 - `EvidenceBundle`: stable evidence artifact for draft PR bodies, cockpit views,
   and bounded JSON/JSONL audit export.
+- `RepoSignals`: pure repo-marker and changed-path observations that produce
+  sanitized targeted verifier hints before any full-suite gate.
 
 Example `crustcore.yml`:
 

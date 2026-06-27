@@ -66,6 +66,11 @@ agent/PR/role/size/invariant audit trail.
   escaped without adding serialization dependencies; planned verifier commands
   remain non-evidence until actual command results are attached. No kernel or
   nano changes; no new dependencies.
+- **Changed-path verifier hints.** Extended `RepoSignals` with sanitized
+  targeted verifier hints derived from repo-marker paths plus changed-file
+  paths. Rust crate, Python test, and JavaScript/TypeScript test hints run
+  before full-suite gates, while unsafe path fragments are rejected and cannot
+  become command text. No kernel or nano changes; no new dependencies.
 
 ### Agent Log
 
@@ -76,6 +81,7 @@ agent/PR/role/size/invariant audit trail.
 | 2026-06-27 | WCA-2 | Verifier planner for repo/task signals, staged check ordering, task gates, and weak-evidence warnings | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 19, 20; no authority path added |
 | 2026-06-27 | WCA-2 | Path-based repo signal and changed-file task classifier feeding verifier planning without filesystem IO | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 19, 20; no authority path added |
 | 2026-06-27 | WCA-2 | Bounded evidence bundle JSON/JSONL export and verifier-plan initialization for PR/cockpit/audit surfaces | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 19, 20; no authority path added |
+| 2026-06-27 | WCA-2 | Sanitized changed-path targeted verifier hints before full-suite gates | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 19, 20; untrusted paths are token-checked before command text |
 
 ## [0.5.0] - 2026-06-26
 

@@ -88,9 +88,11 @@ the evidence a reviewer should expect. `RepoSignals::from_paths` and
 `TaskShape::from_changed_paths` now provide deterministic path-based defaults
 for repo marker detection and changed-file task classification. `EvidenceBundle`
 can now initialize from a verifier plan and export stable bounded JSON/JSONL for
-PR, cockpit, and audit surfaces without adding serialization dependencies. The
-remaining Phase 2 gap is a live repo profiler/test-graph adapter that feeds
-richer signals without granting authority.
+PR, cockpit, and audit surfaces without adding serialization dependencies.
+`RepoSignals::from_repo_and_changed_paths` now adds sanitized Rust crate,
+Python test, and JavaScript/TypeScript test hints before full-suite gates while
+rejecting unsafe path fragments. The remaining Phase 2 gap is a live filesystem
+adapter that feeds these pure classifiers without granting authority.
 
 ## Phase 3 — Strongest Execution Layer
 

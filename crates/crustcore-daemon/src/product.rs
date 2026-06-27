@@ -454,6 +454,8 @@ pub struct RepoSignals {
     pub dependency_audit_command: Option<String>,
     /// A concrete docs/lint command was detected.
     pub docs_check_command: Option<String>,
+    /// Sanitized targeted verifier commands inferred from changed paths.
+    pub targeted_commands: Vec<String>,
     /// A lockfile was detected for dependency-sensitive changes.
     pub lockfile: bool,
 }
@@ -512,6 +514,38 @@ impl RepoSignals {
         signals
     }
 
+    /// Derives repo signals from repo-marker paths plus changed-file paths.
+    ///
+    /// Changed paths only contribute sanitized targeted verifier hints. They do
+    /// not replace the full-suite gate and cannot by themselves prove a task.
+    #[must_use]
+    pub fn from_repo_and_changed_paths<RI, RP, CI, CP>(repo_paths: RI, changed_paths: CI) -> Self
+    where
+        RI: IntoIterator<Item = RP>,
+        RP: AsRef<str>,
+        CI: IntoIterator<Item = CP>,
+        CP: AsRef<str>,
+    {
+        RepoSignals::from_paths(repo_paths).with_changed_path_hints(changed_paths)
+    }
+
+    /// Adds sanitized targeted verifier hints inferred from changed paths.
+    #[must_use]
+    pub fn with_changed_path_hints<I, P>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<str>,
+    {
+        let mut commands = Vec::new();
+        for raw_path in paths {
+            add_changed_path_targeted_command(&self, raw_path.as_ref(), &mut commands);
+        }
+        for command in commands {
+            push_unique_string(&mut self.targeted_commands, command);
+        }
+        self
+    }
+
     /// Whether no useful repo signal was observed.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -522,6 +556,7 @@ impl RepoSignals {
             && self.browser_smoke_command.is_none()
             && self.dependency_audit_command.is_none()
             && self.docs_check_command.is_none()
+            && self.targeted_commands.is_empty()
             && !self.lockfile
     }
 }
@@ -885,6 +920,9 @@ fn add_signal_commands(
     task: TaskShape,
     commands: &mut Vec<PlannedVerifierCommand>,
 ) {
+    for command in &signals.targeted_commands {
+        add_unique_command(commands, command, VerifierCommandStage::Targeted);
+    }
     if let Some(command) = &signals.browser_smoke_command {
         if matches!(task, TaskShape::UiChange) {
             add_unique_command(commands, command, VerifierCommandStage::Targeted);
@@ -1015,6 +1053,102 @@ fn normalize_command(value: &str) -> String {
 fn normalize_path(value: &str) -> String {
     let normalized = clean_scalar(value).trim().replace('\\', "/");
     bound(normalized.trim_start_matches("./"), 512)
+}
+
+fn add_changed_path_targeted_command(
+    signals: &RepoSignals,
+    raw_path: &str,
+    commands: &mut Vec<String>,
+) {
+    let path = normalize_path(raw_path);
+    if path.is_empty() {
+        return;
+    }
+    let Some(safe_path) = safe_command_path(&path) else {
+        return;
+    };
+    let file = safe_path.rsplit('/').next().unwrap_or(safe_path.as_str());
+
+    if signals.cargo_manifest && is_rust_changed_path(&safe_path, file) {
+        if let Some(package) = safe_crates_package_name(&safe_path) {
+            push_unique_string(commands, format!("cargo test -p {package}"));
+        } else {
+            push_unique_string(commands, "cargo test".to_string());
+        }
+    }
+
+    if signals.python_project && is_python_test_path(&safe_path, file) {
+        push_unique_string(commands, format!("python -m pytest {safe_path}"));
+    }
+
+    if signals.package_json && is_javascript_test_path(file) {
+        push_unique_string(commands, format!("npm test -- {safe_path}"));
+    }
+}
+
+fn push_unique_string(values: &mut Vec<String>, value: String) {
+    let cleaned = clean_scalar(&value);
+    if cleaned.is_empty() || values.iter().any(|existing| existing == cleaned) {
+        return;
+    }
+    values.push(cleaned.to_string());
+}
+
+fn safe_command_path(path: &str) -> Option<String> {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.starts_with('-')
+        || path.contains("//")
+        || path.split('/').any(|segment| {
+            segment.is_empty()
+                || segment == "."
+                || segment == ".."
+                || segment.starts_with('-')
+                || !segment
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_'))
+        })
+    {
+        return None;
+    }
+    Some(path.to_string())
+}
+
+fn safe_crates_package_name(path: &str) -> Option<&str> {
+    let mut segments = path.split('/');
+    if segments.next()? != "crates" {
+        return None;
+    }
+    let package = segments.next()?;
+    if package.is_empty()
+        || package.starts_with('-')
+        || !package
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return None;
+    }
+    Some(package)
+}
+
+fn is_rust_changed_path(path: &str, file: &str) -> bool {
+    file.ends_with(".rs") || path == "Cargo.toml" || file == "Cargo.toml"
+}
+
+fn is_python_test_path(path: &str, file: &str) -> bool {
+    file.ends_with(".py")
+        && (path.starts_with("tests/") || file.starts_with("test_") || file.ends_with("_test.py"))
+}
+
+fn is_javascript_test_path(file: &str) -> bool {
+    file.ends_with(".test.js")
+        || file.ends_with(".test.jsx")
+        || file.ends_with(".test.ts")
+        || file.ends_with(".test.tsx")
+        || file.ends_with(".spec.js")
+        || file.ends_with(".spec.jsx")
+        || file.ends_with(".spec.ts")
+        || file.ends_with(".spec.tsx")
 }
 
 fn is_python_project_marker(file: &str) -> bool {
@@ -1923,6 +2057,47 @@ ui:
             signals.browser_smoke_command.as_deref(),
             Some("npx cypress run")
         );
+    }
+
+    #[test]
+    fn repo_signals_add_sanitized_targeted_hints_from_changed_paths() {
+        let signals = RepoSignals::from_repo_and_changed_paths(
+            ["Cargo.toml", "package.json", "pyproject.toml"],
+            [
+                "crates/crustcore-daemon/src/product.rs",
+                "tests/test_smoke.py",
+                "web/app.test.tsx",
+            ],
+        );
+
+        assert_eq!(
+            signals.targeted_commands,
+            vec![
+                "cargo test -p crustcore-daemon".to_string(),
+                "python -m pytest tests/test_smoke.py".to_string(),
+                "npm test -- web/app.test.tsx".to_string(),
+            ]
+        );
+
+        let plan = RepoProfile::default().plan_verification(&signals, TaskShape::Feature);
+        assert_eq!(plan.commands[0].stage, VerifierCommandStage::Targeted);
+        assert_eq!(plan.commands[0].command, "cargo test -p crustcore-daemon");
+        assert!(plan.command_lines().contains(&"cargo test --workspace"));
+    }
+
+    #[test]
+    fn changed_path_hints_reject_unsafe_path_fragments() {
+        let signals = RepoSignals::from_repo_and_changed_paths(
+            ["Cargo.toml", "package.json", "pyproject.toml"],
+            [
+                "crates/crustcore-daemon/src/product.rs;rm",
+                "tests/../../secret_test.py",
+                "web/$(touch-pwned).test.ts",
+                "-leading-dash.test.ts",
+            ],
+        );
+
+        assert!(signals.targeted_commands.is_empty());
     }
 
     #[test]
