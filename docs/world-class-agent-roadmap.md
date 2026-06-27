@@ -79,6 +79,15 @@ smoke with maintainer-owned credentials.
   receipts.
 - PR body rendering is evidence-first and review-gated.
 
+**Current foothold:** `crustcore_daemon::product` now includes a pure
+`VerifierPlan` builder over `RepoProfile`, adapter-supplied `RepoSignals`, and
+`TaskShape`. It ranks targeted commands before full gates, infers conservative
+Rust/Node/Python/Make checks when no profile verifier exists, and warns when
+bug-fix, UI, dependency, docs-only, workflow, or security-sensitive tasks lack
+the evidence a reviewer should expect. The remaining Phase 2 gap is a live repo
+profiler/test-graph adapter that feeds richer signals without granting
+authority.
+
 ## Phase 3 — Strongest Execution Layer
 
 **Goal:** use the best executor for the job without trusting any executor.

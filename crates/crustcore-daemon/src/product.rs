@@ -49,7 +49,7 @@ impl PolicyMode {
 }
 
 /// Risk tier for route budgets and review posture.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum RiskTier {
     /// Low-risk docs or small local changes.
     Low,
@@ -414,6 +414,488 @@ impl RepoProfile {
             .map(ExecutorCapability::for_kind)
             .collect()
     }
+
+    /// Builds a deterministic verifier plan from trusted setup and repo signals.
+    ///
+    /// This is product guidance, not proof: executors may use the plan, but only
+    /// the backend verifier can mint a `VerifiedPatch` after actually running
+    /// commands in the sandbox.
+    #[must_use]
+    pub fn plan_verification(&self, signals: &RepoSignals, task: TaskShape) -> VerifierPlan {
+        VerifierPlan::build(self, signals, task)
+    }
+}
+
+/// Adapter-supplied repo facts used by verifier planning.
+///
+/// These facts are observations, not authority. They let the planner choose
+/// conservative default commands and explain weak evidence before any task is
+/// marked complete.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RepoSignals {
+    /// A Cargo manifest was detected.
+    pub cargo_manifest: bool,
+    /// A Node package manifest was detected.
+    pub package_json: bool,
+    /// A Python project manifest or pytest layout was detected.
+    pub python_project: bool,
+    /// A Makefile was detected.
+    pub makefile: bool,
+    /// A concrete browser/UI smoke command was detected.
+    pub browser_smoke_command: Option<String>,
+    /// A concrete dependency audit/security command was detected.
+    pub dependency_audit_command: Option<String>,
+    /// A concrete docs/lint command was detected.
+    pub docs_check_command: Option<String>,
+    /// A lockfile was detected for dependency-sensitive changes.
+    pub lockfile: bool,
+}
+
+impl RepoSignals {
+    /// Whether no useful repo signal was observed.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        !self.cargo_manifest
+            && !self.package_json
+            && !self.python_project
+            && !self.makefile
+            && self.browser_smoke_command.is_none()
+            && self.dependency_audit_command.is_none()
+            && self.docs_check_command.is_none()
+            && !self.lockfile
+    }
+}
+
+/// Product-level task shape used to decide task-specific verification gates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TaskShape {
+    /// The task has not been classified yet.
+    #[default]
+    Unknown,
+    /// A bug fix, expected to include or run a regression test.
+    BugFix,
+    /// A non-UI feature.
+    Feature,
+    /// A UI/browser-visible change.
+    UiChange,
+    /// A dependency or lockfile change.
+    DependencyChange,
+    /// Documentation-only change.
+    DocsOnly,
+    /// CI/workflow/policy automation change.
+    WorkflowChange,
+    /// Auth, secrets, sandbox, policy, or security-sensitive change.
+    SecuritySensitive,
+}
+
+impl TaskShape {
+    /// Stable label for evidence and cockpit views.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            TaskShape::Unknown => "unknown",
+            TaskShape::BugFix => "bug-fix",
+            TaskShape::Feature => "feature",
+            TaskShape::UiChange => "ui-change",
+            TaskShape::DependencyChange => "dependency-change",
+            TaskShape::DocsOnly => "docs-only",
+            TaskShape::WorkflowChange => "workflow-change",
+            TaskShape::SecuritySensitive => "security-sensitive",
+        }
+    }
+}
+
+/// A verifier gate the product expects for a task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TaskGate {
+    /// Bug fixes should prove the regression path.
+    RegressionTest,
+    /// UI changes should have browser-visible smoke coverage when applicable.
+    BrowserSmoke,
+    /// Dependency changes should cover lockfile and security posture.
+    DependencySafety,
+    /// Docs-only changes may use a lighter docs/lint gate.
+    DocsCheck,
+    /// Non-doc changes should include a full-suite gate before completion.
+    FullSuite,
+    /// Workflow changes require typed approval and human review.
+    WorkflowReview,
+    /// Security-sensitive changes require stronger review.
+    SecurityReview,
+}
+
+impl TaskGate {
+    /// Stable label.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            TaskGate::RegressionTest => "regression-test",
+            TaskGate::BrowserSmoke => "browser-smoke",
+            TaskGate::DependencySafety => "dependency-safety",
+            TaskGate::DocsCheck => "docs-check",
+            TaskGate::FullSuite => "full-suite",
+            TaskGate::WorkflowReview => "workflow-review",
+            TaskGate::SecurityReview => "security-review",
+        }
+    }
+}
+
+/// Planned command stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifierCommandStage {
+    /// Narrow command intended to fail fast before the full suite.
+    Targeted,
+    /// Completion gate command.
+    Full,
+    /// Human/operator review step represented in product UX.
+    Review,
+}
+
+impl VerifierCommandStage {
+    /// Stable label.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            VerifierCommandStage::Targeted => "targeted",
+            VerifierCommandStage::Full => "full",
+            VerifierCommandStage::Review => "review",
+        }
+    }
+}
+
+/// One planned verifier command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedVerifierCommand {
+    /// Command line to run later through the sandboxed verifier path.
+    pub command: String,
+    /// Why this command is ordered where it is.
+    pub stage: VerifierCommandStage,
+}
+
+impl PlannedVerifierCommand {
+    fn new(command: impl Into<String>, stage: VerifierCommandStage) -> Self {
+        PlannedVerifierCommand {
+            command: command.into(),
+            stage,
+        }
+    }
+}
+
+/// Product-level evidence strength for a verifier plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EvidenceStrength {
+    /// Missing or shallow evidence; cannot support completion language.
+    Weak,
+    /// Useful evidence, but with caveats or inferred defaults.
+    Standard,
+    /// Configured, task-appropriate evidence with no planner caveats.
+    Strong,
+}
+
+impl EvidenceStrength {
+    /// Stable label.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            EvidenceStrength::Weak => "weak",
+            EvidenceStrength::Standard => "standard",
+            EvidenceStrength::Strong => "strong",
+        }
+    }
+}
+
+/// Deterministic verifier plan for a task attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifierPlan {
+    /// Human-readable plan label.
+    pub label: String,
+    /// Classified task shape.
+    pub task: TaskShape,
+    /// Commands ranked in the order they should be attempted.
+    pub commands: Vec<PlannedVerifierCommand>,
+    /// Gates expected for this task.
+    pub gates: Vec<TaskGate>,
+    /// Weak-evidence or approval warnings.
+    pub warnings: Vec<String>,
+    /// Planner assessment before commands actually run.
+    pub strength: EvidenceStrength,
+}
+
+impl VerifierPlan {
+    fn build(profile: &RepoProfile, signals: &RepoSignals, task: TaskShape) -> Self {
+        let mut commands = Vec::new();
+        let mut gates = Vec::new();
+        let mut warnings = Vec::new();
+        let mut weak_evidence = false;
+
+        add_task_gates(task, &mut gates);
+        if profile.risk_tier >= RiskTier::High {
+            push_gate(&mut gates, TaskGate::SecurityReview);
+        }
+        if !matches!(task, TaskShape::DocsOnly) {
+            push_gate(&mut gates, TaskGate::FullSuite);
+        }
+
+        add_signal_commands(signals, task, &mut commands);
+        for command in &profile.verify {
+            add_unique_command(&mut commands, command, classify_verifier_command(command));
+        }
+        if profile.verify.is_empty() {
+            add_inferred_full_commands(signals, &mut commands);
+        }
+
+        if signals.is_empty() && profile.verify.is_empty() {
+            warnings.push(
+                "No repo stack or verifier command was detected; evidence is weak.".to_string(),
+            );
+            weak_evidence = true;
+        }
+        if commands.is_empty() {
+            warnings.push(
+                "No verifier command is configured or inferred; completion cannot be evidenced."
+                    .to_string(),
+            );
+            weak_evidence = true;
+        }
+        if !matches!(task, TaskShape::DocsOnly) && !has_full_command(&commands) {
+            warnings
+                .push("No full-suite verifier command is planned before completion.".to_string());
+            weak_evidence = true;
+        }
+
+        match task {
+            TaskShape::BugFix => {
+                if !has_test_command(&commands) {
+                    warnings.push(
+                        "Bug fixes need regression-test evidence; no test command is planned."
+                            .to_string(),
+                    );
+                    weak_evidence = true;
+                }
+            }
+            TaskShape::UiChange => {
+                if signals.browser_smoke_command.is_none() && !has_browser_command(&commands) {
+                    warnings.push(
+                        "UI changes need browser smoke evidence; no browser smoke command is planned."
+                            .to_string(),
+                    );
+                    weak_evidence = true;
+                }
+            }
+            TaskShape::DependencyChange => {
+                if !signals.lockfile {
+                    warnings.push(
+                        "Dependency changes need lockfile evidence; no lockfile signal was detected."
+                            .to_string(),
+                    );
+                    weak_evidence = true;
+                }
+                if signals.dependency_audit_command.is_none() && !has_dependency_audit(&commands) {
+                    warnings.push(
+                        "Dependency changes need audit/security evidence; no audit command is planned."
+                            .to_string(),
+                    );
+                    weak_evidence = true;
+                }
+            }
+            TaskShape::DocsOnly => {
+                if signals.docs_check_command.is_none()
+                    && !commands.is_empty()
+                    && !has_docs_command(&commands)
+                {
+                    warnings.push(
+                        "Docs-only changes are using general verifier evidence; docs-specific checks were not detected."
+                            .to_string(),
+                    );
+                }
+            }
+            TaskShape::WorkflowChange => warnings.push(
+                "Workflow changes require typed approval and human review before integration."
+                    .to_string(),
+            ),
+            TaskShape::SecuritySensitive => warnings.push(
+                "Security-sensitive changes require stronger human review before integration."
+                    .to_string(),
+            ),
+            TaskShape::Feature | TaskShape::Unknown => {}
+        }
+
+        let strength = if weak_evidence {
+            EvidenceStrength::Weak
+        } else if profile.verify.is_empty() || !warnings.is_empty() {
+            EvidenceStrength::Standard
+        } else {
+            EvidenceStrength::Strong
+        };
+
+        VerifierPlan {
+            label: format!("{} verifier plan ({})", task.label(), strength.label()),
+            task,
+            commands,
+            gates,
+            warnings,
+            strength,
+        }
+    }
+
+    /// Returns planned command lines for callers that do not need stage data.
+    #[must_use]
+    pub fn command_lines(&self) -> Vec<&str> {
+        self.commands
+            .iter()
+            .map(|command| command.command.as_str())
+            .collect()
+    }
+}
+
+fn add_task_gates(task: TaskShape, gates: &mut Vec<TaskGate>) {
+    match task {
+        TaskShape::BugFix => push_gate(gates, TaskGate::RegressionTest),
+        TaskShape::UiChange => push_gate(gates, TaskGate::BrowserSmoke),
+        TaskShape::DependencyChange => push_gate(gates, TaskGate::DependencySafety),
+        TaskShape::DocsOnly => push_gate(gates, TaskGate::DocsCheck),
+        TaskShape::WorkflowChange => push_gate(gates, TaskGate::WorkflowReview),
+        TaskShape::SecuritySensitive => push_gate(gates, TaskGate::SecurityReview),
+        TaskShape::Feature | TaskShape::Unknown => {}
+    }
+}
+
+fn push_gate(gates: &mut Vec<TaskGate>, gate: TaskGate) {
+    if !gates.contains(&gate) {
+        gates.push(gate);
+    }
+}
+
+fn add_signal_commands(
+    signals: &RepoSignals,
+    task: TaskShape,
+    commands: &mut Vec<PlannedVerifierCommand>,
+) {
+    if let Some(command) = &signals.browser_smoke_command {
+        if matches!(task, TaskShape::UiChange) {
+            add_unique_command(commands, command, VerifierCommandStage::Targeted);
+        }
+    }
+    if let Some(command) = &signals.dependency_audit_command {
+        if matches!(task, TaskShape::DependencyChange) {
+            add_unique_command(commands, command, VerifierCommandStage::Targeted);
+        }
+    }
+    if let Some(command) = &signals.docs_check_command {
+        if matches!(task, TaskShape::DocsOnly) {
+            add_unique_command(commands, command, VerifierCommandStage::Targeted);
+        }
+    }
+}
+
+fn add_inferred_full_commands(signals: &RepoSignals, commands: &mut Vec<PlannedVerifierCommand>) {
+    if signals.cargo_manifest {
+        add_unique_command(
+            commands,
+            "cargo test --workspace",
+            VerifierCommandStage::Full,
+        );
+    }
+    if signals.package_json {
+        add_unique_command(commands, "npm test", VerifierCommandStage::Full);
+    }
+    if signals.python_project {
+        add_unique_command(commands, "python -m pytest", VerifierCommandStage::Full);
+    }
+    if signals.makefile {
+        add_unique_command(commands, "make test", VerifierCommandStage::Full);
+    }
+}
+
+fn add_unique_command(
+    commands: &mut Vec<PlannedVerifierCommand>,
+    command: &str,
+    stage: VerifierCommandStage,
+) {
+    let cleaned = clean_scalar(command);
+    if cleaned.is_empty()
+        || commands
+            .iter()
+            .any(|existing| existing.command.as_str() == cleaned)
+    {
+        return;
+    }
+    commands.push(PlannedVerifierCommand::new(cleaned, stage));
+}
+
+fn classify_verifier_command(command: &str) -> VerifierCommandStage {
+    let normalized = normalize_command(command);
+    if normalized.contains("manual review")
+        || normalized.contains("manual_review")
+        || normalized.contains("human review")
+        || normalized.contains("human_review")
+    {
+        return VerifierCommandStage::Review;
+    }
+    if looks_full_command(&normalized) {
+        VerifierCommandStage::Full
+    } else {
+        VerifierCommandStage::Targeted
+    }
+}
+
+fn has_full_command(commands: &[PlannedVerifierCommand]) -> bool {
+    commands
+        .iter()
+        .any(|command| command.stage == VerifierCommandStage::Full)
+}
+
+fn has_test_command(commands: &[PlannedVerifierCommand]) -> bool {
+    commands
+        .iter()
+        .any(|command| normalize_command(&command.command).contains("test"))
+}
+
+fn has_browser_command(commands: &[PlannedVerifierCommand]) -> bool {
+    commands.iter().any(|command| {
+        let normalized = normalize_command(&command.command);
+        normalized.contains("playwright")
+            || normalized.contains("cypress")
+            || normalized.contains("browser")
+            || normalized.contains("e2e")
+    })
+}
+
+fn has_dependency_audit(commands: &[PlannedVerifierCommand]) -> bool {
+    commands.iter().any(|command| {
+        let normalized = normalize_command(&command.command);
+        normalized.contains("audit")
+            || normalized.contains("cargo_deny")
+            || normalized.contains("cargo-deny")
+            || normalized.contains("cargo deny")
+            || normalized.contains("pip_audit")
+            || normalized.contains("pip-audit")
+            || normalized.contains("safety")
+    })
+}
+
+fn has_docs_command(commands: &[PlannedVerifierCommand]) -> bool {
+    commands.iter().any(|command| {
+        let normalized = normalize_command(&command.command);
+        normalized.contains("docs") || normalized.contains("doc") || normalized.contains("md")
+    })
+}
+
+fn looks_full_command(normalized: &str) -> bool {
+    normalized.contains("xtask verify")
+        || normalized.contains("test --workspace")
+        || normalized.contains("cargo test")
+        || normalized.contains("cargo nextest")
+        || normalized.contains("pytest")
+        || normalized.contains("npm test")
+        || normalized.contains("pnpm test")
+        || normalized.contains("yarn test")
+        || normalized.contains("make test")
+        || normalized.contains("clippy --workspace")
+}
+
+fn normalize_command(value: &str) -> String {
+    clean_scalar(value).trim().to_ascii_lowercase()
 }
 
 /// Parse failure for `crustcore.yml`.
@@ -1004,6 +1486,147 @@ ui:
         assert_eq!(caps[0].trust, TrustPosture::ExternalWorker);
         assert!(caps[0].sandbox_required);
         assert_eq!(caps[1].trust, TrustPosture::ToolGateway);
+    }
+
+    #[test]
+    fn verifier_plan_infers_rust_full_gate_from_repo_signals() {
+        let profile = RepoProfile::default();
+        let signals = RepoSignals {
+            cargo_manifest: true,
+            ..RepoSignals::default()
+        };
+
+        let plan = profile.plan_verification(&signals, TaskShape::Feature);
+
+        assert_eq!(plan.command_lines(), vec!["cargo test --workspace"]);
+        assert_eq!(plan.commands[0].stage, VerifierCommandStage::Full);
+        assert!(plan.gates.contains(&TaskGate::FullSuite));
+        assert_eq!(plan.strength, EvidenceStrength::Standard);
+        assert!(plan.warnings.is_empty());
+    }
+
+    #[test]
+    fn verifier_plan_ranks_targeted_task_checks_before_full_profile_checks() {
+        let profile = RepoProfile {
+            verify: vec!["cargo xtask verify".to_string()],
+            ..RepoProfile::default()
+        };
+        let signals = RepoSignals {
+            package_json: true,
+            browser_smoke_command: Some("npm run test:e2e".to_string()),
+            ..RepoSignals::default()
+        };
+
+        let plan = profile.plan_verification(&signals, TaskShape::UiChange);
+
+        assert_eq!(
+            plan.command_lines(),
+            vec!["npm run test:e2e", "cargo xtask verify"]
+        );
+        assert_eq!(plan.commands[0].stage, VerifierCommandStage::Targeted);
+        assert_eq!(plan.commands[1].stage, VerifierCommandStage::Full);
+        assert!(plan.gates.contains(&TaskGate::BrowserSmoke));
+        assert_eq!(plan.strength, EvidenceStrength::Strong);
+        assert!(plan.warnings.is_empty());
+    }
+
+    #[test]
+    fn bugfix_without_test_or_full_suite_is_weak_evidence() {
+        let profile = RepoProfile {
+            verify: vec!["cargo check --workspace".to_string()],
+            ..RepoProfile::default()
+        };
+        let signals = RepoSignals {
+            cargo_manifest: true,
+            ..RepoSignals::default()
+        };
+
+        let plan = profile.plan_verification(&signals, TaskShape::BugFix);
+
+        assert_eq!(plan.strength, EvidenceStrength::Weak);
+        assert!(plan.gates.contains(&TaskGate::RegressionTest));
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("regression-test")));
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("full-suite")));
+    }
+
+    #[test]
+    fn dependency_change_requires_lockfile_and_audit_evidence() {
+        let profile = RepoProfile {
+            verify: vec!["cargo test --workspace".to_string()],
+            ..RepoProfile::default()
+        };
+        let weak = profile.plan_verification(
+            &RepoSignals {
+                cargo_manifest: true,
+                ..RepoSignals::default()
+            },
+            TaskShape::DependencyChange,
+        );
+
+        assert_eq!(weak.strength, EvidenceStrength::Weak);
+        assert!(weak.gates.contains(&TaskGate::DependencySafety));
+        assert!(weak
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("lockfile")));
+        assert!(weak
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("audit")));
+
+        let strong = profile.plan_verification(
+            &RepoSignals {
+                cargo_manifest: true,
+                dependency_audit_command: Some("cargo audit".to_string()),
+                lockfile: true,
+                ..RepoSignals::default()
+            },
+            TaskShape::DependencyChange,
+        );
+
+        assert_eq!(
+            strong.command_lines(),
+            vec!["cargo audit", "cargo test --workspace"]
+        );
+        assert_eq!(strong.strength, EvidenceStrength::Strong);
+        assert!(strong.warnings.is_empty());
+    }
+
+    #[test]
+    fn docs_only_plan_allows_lighter_docs_gate() {
+        let profile = RepoProfile::default();
+        let signals = RepoSignals {
+            docs_check_command: Some("cargo doc --no-deps".to_string()),
+            ..RepoSignals::default()
+        };
+
+        let plan = profile.plan_verification(&signals, TaskShape::DocsOnly);
+
+        assert_eq!(plan.command_lines(), vec!["cargo doc --no-deps"]);
+        assert!(plan.gates.contains(&TaskGate::DocsCheck));
+        assert!(!plan.gates.contains(&TaskGate::FullSuite));
+        assert_eq!(plan.strength, EvidenceStrength::Standard);
+        assert!(plan.warnings.is_empty());
+    }
+
+    #[test]
+    fn unknown_repo_without_verifier_is_weak_and_blocking() {
+        let profile = RepoProfile::default();
+        let plan = profile.plan_verification(&RepoSignals::default(), TaskShape::Unknown);
+
+        assert!(plan.commands.is_empty());
+        assert_eq!(plan.strength, EvidenceStrength::Weak);
+        assert!(plan.gates.contains(&TaskGate::FullSuite));
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("No verifier command")));
     }
 
     #[test]
