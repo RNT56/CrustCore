@@ -51,7 +51,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -64,32 +64,32 @@ categories = ["development-tools", "command-line-utilities"]
 
 # Internal crates are referenced through the workspace so versions stay in lockstep.
 [workspace.dependencies]
-crustcore-kernel = { path = "crates/crustcore-kernel", version = "0.4.0" }
-crustcore-types = { path = "crates/crustcore-types", version = "0.4.0" }
-crustcore-policy = { path = "crates/crustcore-policy", version = "0.4.0" }
-crustcore-eventlog = { path = "crates/crustcore-eventlog", version = "0.4.0" }
-crustcore-receipts = { path = "crates/crustcore-receipts", version = "0.4.0" }
-crustcore-path = { path = "crates/crustcore-path", version = "0.4.0" }
-crustcore-secrets = { path = "crates/crustcore-secrets", version = "0.4.0" }
-crustcore-runner = { path = "crates/crustcore-runner", version = "0.4.0" }
-crustcore-sandbox = { path = "crates/crustcore-sandbox", version = "0.4.0" }
-crustcore-worktree = { path = "crates/crustcore-worktree", version = "0.4.0" }
-crustcore-backend = { path = "crates/crustcore-backend", version = "0.4.0" }
-crustcore-cli = { path = "crates/crustcore-cli", version = "0.4.0" }
-crustcore-netproto = { path = "crates/crustcore-netproto", version = "0.4.0" }
-crustcore-net = { path = "crates/crustcore-net", version = "0.4.0" }
-crustcore-daemon = { path = "crates/crustcore-daemon", version = "0.4.0" }
-crustcore-flow = { path = "crates/crustcore-flow", version = "0.4.0" }
-crustcore-mcp = { path = "crates/crustcore-mcp", version = "0.4.0" }
-crustcore-index = { path = "crates/crustcore-index", version = "0.4.0" }
-crustcore-index-rag = { path = "crates/crustcore-index-rag", version = "0.4.0" }
-crustcore-telemetry = { path = "crates/crustcore-telemetry", version = "0.4.0" }
-crustcore-session = { path = "crates/crustcore-session", version = "0.4.0" }
-crustcore-dev = { path = "crates/crustcore-dev", version = "0.4.0" }
-crustcore-eval = { path = "crates/crustcore-eval", version = "0.4.0" }
-crustcore-toolkit = { path = "crates/crustcore-toolkit", version = "0.4.0" }
-crustcore-tool-macro = { path = "crates/crustcore-tool-macro", version = "0.4.0" }
-crustcore-chat = { path = "crates/crustcore-chat", version = "0.4.0" }
+crustcore-kernel = { path = "crates/crustcore-kernel", version = "0.5.0" }
+crustcore-types = { path = "crates/crustcore-types", version = "0.5.0" }
+crustcore-policy = { path = "crates/crustcore-policy", version = "0.5.0" }
+crustcore-eventlog = { path = "crates/crustcore-eventlog", version = "0.5.0" }
+crustcore-receipts = { path = "crates/crustcore-receipts", version = "0.5.0" }
+crustcore-path = { path = "crates/crustcore-path", version = "0.5.0" }
+crustcore-secrets = { path = "crates/crustcore-secrets", version = "0.5.0" }
+crustcore-runner = { path = "crates/crustcore-runner", version = "0.5.0" }
+crustcore-sandbox = { path = "crates/crustcore-sandbox", version = "0.5.0" }
+crustcore-worktree = { path = "crates/crustcore-worktree", version = "0.5.0" }
+crustcore-backend = { path = "crates/crustcore-backend", version = "0.5.0" }
+crustcore-cli = { path = "crates/crustcore-cli", version = "0.5.0" }
+crustcore-netproto = { path = "crates/crustcore-netproto", version = "0.5.0" }
+crustcore-net = { path = "crates/crustcore-net", version = "0.5.0" }
+crustcore-daemon = { path = "crates/crustcore-daemon", version = "0.5.0" }
+crustcore-flow = { path = "crates/crustcore-flow", version = "0.5.0" }
+crustcore-mcp = { path = "crates/crustcore-mcp", version = "0.5.0" }
+crustcore-index = { path = "crates/crustcore-index", version = "0.5.0" }
+crustcore-index-rag = { path = "crates/crustcore-index-rag", version = "0.5.0" }
+crustcore-telemetry = { path = "crates/crustcore-telemetry", version = "0.5.0" }
+crustcore-session = { path = "crates/crustcore-session", version = "0.5.0" }
+crustcore-dev = { path = "crates/crustcore-dev", version = "0.5.0" }
+crustcore-eval = { path = "crates/crustcore-eval", version = "0.5.0" }
+crustcore-toolkit = { path = "crates/crustcore-toolkit", version = "0.5.0" }
+crustcore-tool-macro = { path = "crates/crustcore-tool-macro", version = "0.5.0" }
+crustcore-chat = { path = "crates/crustcore-chat", version = "0.5.0" }
 
 # Release profile (general). The flagship size claim uses `nano` below.
 [profile.release]

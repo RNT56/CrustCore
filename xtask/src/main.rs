@@ -76,6 +76,7 @@ fn main() -> ExitCode {
         "release" => release(),
         "reproduce" => reproduce(),
         "forbidden-deps" => forbidden_deps(),
+        "runbook-check" => runbook_check(),
         "help" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -110,7 +111,8 @@ fn print_help() {
          \x20 full-size       build crustcore --features full and report its (tracked) size\n\
          \x20 release         build nano, enforce size, emit SHA256SUMS + manifest\n\
          \x20 reproduce       build nano twice and verify the digest reproduces\n\
-         \x20 forbidden-deps  fail if a banned crate is linked into nano\n"
+         \x20 forbidden-deps  fail if a banned crate is linked into nano\n\
+         \x20 runbook-check   fail if a live seam is missing from docs/live-socket-validation.md\n"
     );
 }
 
@@ -188,8 +190,19 @@ fn verify() -> Result<(), String> {
     step("test-features", test_features)?;
     step("all-features", all_features)?;
     step("forbidden-deps", forbidden_deps)?;
+    step("runbook-check", runbook_check)?;
     step("size-check", size_check)?;
     Ok(())
+}
+
+/// **Live-socket runbook gate:** every `#[ignore = "…"]` live test and every
+/// `TODO(*-live)` seam tag must be catalogued in `docs/live-socket-validation.md`,
+/// so the validation runbook can never silently go stale. Delegates to the
+/// standalone `scripts/validate_live_socket_runbook.sh` (the single source of the
+/// check; a maintainer can run it directly). Pure docs/test hygiene — it does not
+/// touch nano, deps, or the trust boundary.
+fn runbook_check() -> Result<(), String> {
+    run("bash", &["scripts/validate_live_socket_runbook.sh"])
 }
 
 fn step(name: &str, f: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
