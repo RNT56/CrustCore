@@ -30,6 +30,20 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Task-shape executor routing (roadmap-v0.6 C.1).** Added
+  `crustcore_daemon::router`: a pure, total `decide_routing(task, risk,
+  context_budget, configured) → RoutingDecision` that selects how to run a task —
+  `SingleExecutor` (docs/low-risk, preferring Native→ClaudeCode→first configured),
+  `FanOut` (Feature/UiChange at ≤Standard risk with ≥2 executors and enough budget,
+  bounded to `MAX_FANOUT`), `RequiresPlan` (SecuritySensitive or ≥Critical — an
+  advisory role, not autonomous execution), or `Blocked` (WorkflowChange needs human
+  approval; or no executor configured). Routing selects a *worker, never authority*
+  (invariant 6); a `Blocked` decision structures a refusal (invariant 4); the verifier
+  still owns completion (invariant 13). The live spawn reuses the existing
+  `exec::run_fanout`/`run_subagent` seams — no new live seam. 7 tests incl. a full
+  shape×risk×config×budget combination sweep proving totality + that every chosen
+  executor comes from the configured list. Daemon-only; **zero nano impact**.
+
 - **`docs/roadmap-v0.6.md` — post-v0.5.0 execution overlay.** A consolidated, dependency-ordered,
   execution-ready plan for the next wave: Phase A (PR Supervisor go-live), B (verification
   intelligence), C (execution routing & review), D (live executor wiring), E (product UX +
@@ -102,6 +116,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/C.1 | Pure `decide_routing` executor router (single/fan-out/advisory/blocked) over task shape+risk+budget+configured; selection only, verifier still completes | `claude/v06-c1-router` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 6, 13; routing picks a worker, never authority |
 | 2026-06-27 | WCA-0/WCA-2 | Product-stack docs + daemon product contracts for `crustcore.yml`, lifecycle states, executor metadata, and evidence bundles | `codex/world-class-agent-foundation` | Codex (Architect/Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 14, 19, 20; no authority path added |
 | 2026-06-27 | WCA-1 | Deterministic GitHub issue-to-draft-PR golden over untrusted issue data, `VerifiedPatch`, approved draft PR intent, canned REST create, and bounded CI repair | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (eval/sidecar only) | Preserves 1, 6, 7, 8, 9, 13, 14; no live token or unverified PR path |
 | 2026-06-27 | WCA-2 | Verifier planner for repo/task signals, staged check ordering, task gates, and weak-evidence warnings | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 19, 20; no authority path added |

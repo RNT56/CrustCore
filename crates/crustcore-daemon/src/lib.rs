@@ -49,6 +49,10 @@ pub mod registry;
 /// Bounded repo path profiler that observes marker paths for verifier planning
 /// without reading file contents or granting authority.
 pub mod repo_profiler;
+/// Task-shape executor routing (roadmap-v0.6 C.1): a pure `decide_routing` selecting
+/// single / fan-out / advisory-plan / blocked from task shape, risk, budget, and the
+/// configured executors. Selection only — the verifier still owns completion.
+pub mod router;
 pub mod runtime;
 pub mod selfimprove;
 pub mod supervisor;
