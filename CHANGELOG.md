@@ -30,6 +30,19 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Task-shape executor routing (roadmap-v0.6 C.1).** Added
+  `crustcore_daemon::router`: a pure, total `decide_routing(task, risk,
+  context_budget, configured) → RoutingDecision` that selects how to run a task —
+  `SingleExecutor` (docs/low-risk, preferring Native→ClaudeCode→first configured),
+  `FanOut` (Feature/UiChange at ≤Standard risk with ≥2 executors and enough budget,
+  bounded to `MAX_FANOUT`), `RequiresPlan` (SecuritySensitive or ≥Critical — an
+  advisory role, not autonomous execution), or `Blocked` (WorkflowChange needs human
+  approval; or no executor configured). Routing selects a *worker, never authority*
+  (invariant 6); a `Blocked` decision structures a refusal (invariant 4); the verifier
+  still owns completion (invariant 13). The live spawn reuses the existing
+  `exec::run_fanout`/`run_subagent` seams — no new live seam. 7 tests incl. a full
+  shape×risk×config×budget combination sweep proving totality + that every chosen
+  executor comes from the configured list. Daemon-only; **zero nano impact**.
 - **Persistent repo-memory helpers (roadmap-v0.6 B.3).** Added prior-failure /
   verifier / flaky-hint helpers to `crustcore_index::MemoryStore` (whose bounded,
   dependency-free `CCMS` snapshot `save`/`load` already persists across restarts):
@@ -172,6 +185,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/C.1 | Pure `decide_routing` executor router (single/fan-out/advisory/blocked) over task shape+risk+budget+configured; selection only, verifier still completes | `claude/v06-c1-router` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 6, 13; routing picks a worker, never authority |
 | 2026-06-28 | v0.6/B.3 | Persistent repo-memory helpers (`record_failure` redacts via Redactor before persist, `record_successful_verifier`, `get_prior_failure`, `flaky_test_hints`, `changed_paths_key`) on `MemoryStore` | `claude/v06-b3-memory` | Claude (Implementer) | 0 kB (index-only) | Enforces 2, 7, 11; memory is a redacted, bounded hint, never authority |
 | 2026-06-28 | v0.6/B.1 | Verifier test-graph (`TestGraph`/`command_order`) + explained `gate_reasons` on `VerifierPlan`; pure path→test fingerprints, bounded; `parse_test_manifest` pure + `#[ignore]`d live read | `claude/v06-b1-testgraph` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 7, 11, 13; graph is advisory ranking, never authority |
 | 2026-06-28 | v0.6/A.1 | GitHub App onboarding core: `InstallRedirect`→`cap_from_redirect`→`onboard` (register + mint `Approved<GitHubWriteCap>`), `TokenLease` refresh, `load_profile`; live install/mint seam `#[ignore]`d | `claude/v06-a1-onboarding` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 3, 4, 7, 13, 14; redirect is untrusted, only an operator-bound approval authorizes a PR |
