@@ -30,6 +30,20 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Persistent repo-memory helpers (roadmap-v0.6 B.3).** Added prior-failure /
+  verifier / flaky-hint helpers to `crustcore_index::MemoryStore` (whose bounded,
+  dependency-free `CCMS` snapshot `save`/`load` already persists across restarts):
+  `record_failure(key, msg, redactor)` **redacts the message through
+  `crustcore_secrets::Redactor` before persisting** (invariant 2 — no secret text
+  ever lands in memory) and bounds it to `MAX_FAILURE_MSG` (1 KiB);
+  `record_successful_verifier(key, command, wall_ms)`; `get_prior_failure` (latest
+  wins); `flaky_test_hints` (keys with *both* a failure and a success);
+  `changed_paths_key` (an order-independent, content-free digest key derived from
+  changed paths). Memory is an untrusted hint, never authority (invariant 7); all
+  fields stay bounded (invariant 11). A restart roundtrip test proves
+  helper-written memory survives `save`→drop→`load`. 6 new tests; index-only;
+  **zero nano impact**.
+
 - **`docs/roadmap-v0.6.md` — post-v0.5.0 execution overlay.** A consolidated, dependency-ordered,
   execution-ready plan for the next wave: Phase A (PR Supervisor go-live), B (verification
   intelligence), C (execution routing & review), D (live executor wiring), E (product UX +
@@ -102,6 +116,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/B.3 | Persistent repo-memory helpers (`record_failure` redacts via Redactor before persist, `record_successful_verifier`, `get_prior_failure`, `flaky_test_hints`, `changed_paths_key`) on `MemoryStore` | `claude/v06-b3-memory` | Claude (Implementer) | 0 kB (index-only) | Enforces 2, 7, 11; memory is a redacted, bounded hint, never authority |
 | 2026-06-27 | WCA-0/WCA-2 | Product-stack docs + daemon product contracts for `crustcore.yml`, lifecycle states, executor metadata, and evidence bundles | `codex/world-class-agent-foundation` | Codex (Architect/Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 14, 19, 20; no authority path added |
 | 2026-06-27 | WCA-1 | Deterministic GitHub issue-to-draft-PR golden over untrusted issue data, `VerifiedPatch`, approved draft PR intent, canned REST create, and bounded CI repair | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (eval/sidecar only) | Preserves 1, 6, 7, 8, 9, 13, 14; no live token or unverified PR path |
 | 2026-06-27 | WCA-2 | Verifier planner for repo/task signals, staged check ordering, task gates, and weak-evidence warnings | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 19, 20; no authority path added |

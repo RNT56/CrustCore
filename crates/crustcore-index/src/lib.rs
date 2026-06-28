@@ -176,7 +176,99 @@ impl MemoryStore {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    // --- B.3 prior-failure / verifier / flaky-hint helpers --------------------
+
+    /// A stable, bounded, content-free lookup key derived from a set of changed
+    /// paths. The raw paths are untrusted; we persist only their digest, so the
+    /// key cannot smuggle path text into memory and is order-independent.
+    #[must_use]
+    pub fn changed_paths_key<I, P>(paths: I) -> String
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<str>,
+    {
+        let mut v: Vec<String> = paths
+            .into_iter()
+            .map(|p| p.as_ref().to_string())
+            .filter(|p| !p.is_empty())
+            .collect();
+        v.sort();
+        v.dedup();
+        let digest = crustcore_types::hash::sha256(v.join("\n").as_bytes());
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut s = String::with_capacity(32);
+        for b in &digest[..16] {
+            s.push(HEX[(b >> 4) as usize] as char);
+            s.push(HEX[(b & 0x0f) as usize] as char);
+        }
+        s
+    }
+
+    /// Records a prior failure for `key`, **redacting** the message first
+    /// (invariant 2 — no secret-bearing text is ever persisted) and bounding it to
+    /// [`MAX_FAILURE_MSG`]. The result is an untrusted hint, never authority
+    /// (invariant 7).
+    pub fn record_failure(&mut self, key: &str, msg: &str, redactor: &crustcore_secrets::Redactor) {
+        let redacted = redactor.redact(msg);
+        self.put(MemoryEntry {
+            kind: MemoryKind::Failure,
+            key: BoundedText::truncated(key, MAX_MEMORY_FIELD),
+            value: BoundedText::truncated(redacted, MAX_FAILURE_MSG),
+            source: MemorySource::PriorRun,
+        });
+    }
+
+    /// Records a verifier command that **succeeded** for `key`, with its wall time.
+    /// The value encodes `command\twall_ms` (bounded). Commands are not secret.
+    pub fn record_successful_verifier(&mut self, key: &str, command: &str, wall_ms: u64) {
+        self.put(MemoryEntry {
+            kind: MemoryKind::CommandMemory,
+            key: BoundedText::truncated(key, MAX_MEMORY_FIELD),
+            value: BoundedText::truncated(format!("{command}\t{wall_ms}"), MAX_MEMORY_FIELD),
+            source: MemorySource::PriorRun,
+        });
+    }
+
+    /// The most recently recorded prior failure for `key`, if any (later entries
+    /// shadow earlier ones, so a re-run's fresh failure wins).
+    #[must_use]
+    pub fn get_prior_failure(&self, key: &str) -> Option<&MemoryEntry> {
+        self.entries
+            .iter()
+            .rev()
+            .find(|e| e.kind == MemoryKind::Failure && e.key.as_str() == key)
+    }
+
+    /// Keys that look **flaky**: those with *both* a recorded failure and a recorded
+    /// successful verifier (failed sometimes, passed others). Returns the failure
+    /// entry per such key, deduped, in insertion order. A hint, never authority
+    /// (invariant 7) — the verifier still owns completion.
+    #[must_use]
+    pub fn flaky_test_hints(&self) -> Vec<&MemoryEntry> {
+        use std::collections::BTreeSet;
+        let passed: BTreeSet<&str> = self
+            .entries
+            .iter()
+            .filter(|e| e.kind == MemoryKind::CommandMemory)
+            .map(|e| e.key.as_str())
+            .collect();
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        let mut out = Vec::new();
+        for e in &self.entries {
+            if e.kind == MemoryKind::Failure
+                && passed.contains(e.key.as_str())
+                && seen.insert(e.key.as_str())
+            {
+                out.push(e);
+            }
+        }
+        out
+    }
 }
+
+/// Cap on a redacted failure message stored in memory (≤1 KiB; invariant 11).
+pub const MAX_FAILURE_MSG: usize = 1024;
 
 // ---------------------------------------------------------------------------
 // Persistent snapshot (P14-store) — a dependency-free, versioned, bounded file
@@ -837,6 +929,86 @@ mod tests {
         assert_eq!(store.by_kind(MemoryKind::Convention).len(), 1);
         // Empty query matches nothing (no implicit "return everything").
         assert!(store.search("").is_empty());
+    }
+
+    // --- B.3 prior-failure / verifier / flaky helpers ---
+
+    #[test]
+    fn record_failure_redacts_secret_before_storing() {
+        let mut r = crustcore_secrets::Redactor::new();
+        r.register("github-token", b"ghp_SECRETTOKEN");
+        let mut store = MemoryStore::new();
+        store.record_failure("k1", "auth failed with ghp_SECRETTOKEN in header", &r);
+        let stored = store.get_prior_failure("k1").unwrap().value.as_str();
+        assert!(
+            !stored.contains("ghp_SECRETTOKEN"),
+            "secret must be redacted before persisting: {stored}"
+        );
+    }
+
+    #[test]
+    fn record_failure_is_bounded_to_max_failure_msg() {
+        let mut store = MemoryStore::new();
+        let huge = "x".repeat(MAX_FAILURE_MSG * 4);
+        store.record_failure("k", &huge, &crustcore_secrets::Redactor::new());
+        assert!(store.get_prior_failure("k").unwrap().value.as_str().len() <= MAX_FAILURE_MSG);
+    }
+
+    #[test]
+    fn get_prior_failure_returns_the_latest_for_a_key() {
+        let mut store = MemoryStore::new();
+        let r = crustcore_secrets::Redactor::new();
+        store.record_failure("k", "first failure", &r);
+        store.record_failure("k", "second failure", &r);
+        assert_eq!(
+            store.get_prior_failure("k").unwrap().value.as_str(),
+            "second failure"
+        );
+        assert!(store.get_prior_failure("absent").is_none());
+    }
+
+    #[test]
+    fn flaky_hints_require_both_a_failure_and_a_success() {
+        let mut store = MemoryStore::new();
+        let r = crustcore_secrets::Redactor::new();
+        // "flaky": failed once, then passed.
+        store.record_failure("flaky", "timeout", &r);
+        store.record_successful_verifier("flaky", "cargo test", 1200);
+        // "broken": only ever failed.
+        store.record_failure("broken", "compile error", &r);
+        let hints = store.flaky_test_hints();
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].key.as_str(), "flaky");
+    }
+
+    #[test]
+    fn changed_paths_key_is_order_independent_and_distinct() {
+        let a = MemoryStore::changed_paths_key(["src/b.rs", "src/a.rs"]);
+        let b = MemoryStore::changed_paths_key(["src/a.rs", "src/b.rs", "src/a.rs"]);
+        assert_eq!(a, b, "key is order- and duplicate-independent");
+        let c = MemoryStore::changed_paths_key(["src/c.rs"]);
+        assert_ne!(a, c, "different paths yield different keys");
+    }
+
+    #[test]
+    fn helper_written_memory_survives_a_save_load_restart() {
+        let r = crustcore_secrets::Redactor::new();
+        let key = MemoryStore::changed_paths_key(["crates/foo/src/lib.rs"]);
+        let mut store = MemoryStore::new();
+        store.record_failure(&key, "assertion failed", &r);
+        store.record_successful_verifier(&key, "cargo test -p foo", 800);
+        let path = std::env::temp_dir().join("cc_index_mem_b3_restart.ccms");
+        store.save(&path).unwrap();
+
+        // Simulate a daemon restart: drop the store, reload from disk.
+        drop(store);
+        let reloaded = MemoryStore::load(&path).unwrap();
+        assert_eq!(
+            reloaded.get_prior_failure(&key).unwrap().value.as_str(),
+            "assertion failed"
+        );
+        assert_eq!(reloaded.flaky_test_hints().len(), 1);
+        let _ = std::fs::remove_file(&path);
     }
 
     // --- persistent snapshot (P14-store) ---
