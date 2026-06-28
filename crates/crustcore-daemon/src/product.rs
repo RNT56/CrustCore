@@ -445,6 +445,26 @@ impl RepoProfile {
     pub fn plan_verification(&self, signals: &RepoSignals, task: TaskShape) -> VerifierPlan {
         VerifierPlan::build(self, signals, task)
     }
+
+    /// Like [`plan_verification`](Self::plan_verification) but also attaches a
+    /// [`TestGraph`] mapping the `changed_paths` to the verifier ids they affect
+    /// (B.1). The graph is advisory ranking only — it never replaces the
+    /// full-suite gate and cannot by itself prove a task (invariant 13).
+    #[must_use]
+    pub fn plan_verification_with_changed_paths<I, P>(
+        &self,
+        signals: &RepoSignals,
+        task: TaskShape,
+        changed_paths: I,
+    ) -> VerifierPlan
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<str>,
+    {
+        let mut plan = VerifierPlan::build(self, signals, task);
+        plan.test_graph = TestGraph::from_signals_and_changed_paths(signals, changed_paths);
+        plan
+    }
 }
 
 /// Adapter-supplied repo facts used by verifier planning.
@@ -782,6 +802,11 @@ pub struct VerifierPlan {
     pub warnings: Vec<String>,
     /// Planner assessment before commands actually run.
     pub strength: EvidenceStrength,
+    /// Explanation for each expected gate (B.1). Bounded by [`MAX_GATE_REASONS`].
+    pub gate_reasons: Vec<(TaskGate, String)>,
+    /// Changed-path → affected-test fingerprints + command ranking (B.1). Empty
+    /// unless built via [`RepoProfile::plan_verification_with_changed_paths`].
+    pub test_graph: TestGraph,
 }
 
 impl VerifierPlan {
@@ -891,6 +916,12 @@ impl VerifierPlan {
             EvidenceStrength::Strong
         };
 
+        let gate_reasons = gates
+            .iter()
+            .take(MAX_GATE_REASONS)
+            .map(|&gate| (gate, gate_reason(gate, task, profile.risk_tier)))
+            .collect();
+
         VerifierPlan {
             label: format!("{} verifier plan ({})", task.label(), strength.label()),
             task,
@@ -898,6 +929,8 @@ impl VerifierPlan {
             gates,
             warnings,
             strength,
+            gate_reasons,
+            test_graph: TestGraph::default(),
         }
     }
 
@@ -909,6 +942,232 @@ impl VerifierPlan {
             .map(|command| command.command.as_str())
             .collect()
     }
+
+    /// The reason recorded for `gate`, if the planner expects it.
+    #[must_use]
+    pub fn reason_for(&self, gate: TaskGate) -> Option<&str> {
+        self.gate_reasons
+            .iter()
+            .find(|(g, _)| *g == gate)
+            .map(|(_, reason)| reason.as_str())
+    }
+}
+
+/// Max explained gates retained on a plan (invariant 11 — bounded).
+pub const MAX_GATE_REASONS: usize = 16;
+
+/// Max changed-path entries retained in a [`TestGraph`] (invariant 11 — bounded).
+pub const MAX_TEST_GRAPH_ENTRIES: usize = 64;
+
+/// Why a given [`TaskGate`] is expected for a task. Pure: derived from the task
+/// shape and risk tier only, never from file *contents* (invariant 7).
+fn gate_reason(gate: TaskGate, task: TaskShape, risk: RiskTier) -> String {
+    match gate {
+        TaskGate::RegressionTest => "bug-fix tasks must prove the regression path".to_string(),
+        TaskGate::BrowserSmoke => "UI changes need browser-visible smoke coverage".to_string(),
+        TaskGate::DependencySafety => {
+            "dependency changes must cover the lockfile + a security audit".to_string()
+        }
+        TaskGate::DocsCheck => "docs-only changes use a lighter docs/lint gate".to_string(),
+        TaskGate::FullSuite => {
+            "non-docs changes require a full-suite gate before completion".to_string()
+        }
+        TaskGate::WorkflowReview => {
+            "workflow changes require typed approval + human review".to_string()
+        }
+        TaskGate::SecurityReview => {
+            if matches!(task, TaskShape::SecuritySensitive) {
+                "security-sensitive paths require stronger review".to_string()
+            } else if risk >= RiskTier::High {
+                "high risk tier requires a security review".to_string()
+            } else {
+                "security review required".to_string()
+            }
+        }
+    }
+}
+
+/// One changed-path → affected-test fingerprint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TestGraphEntry {
+    /// The (normalized) changed path.
+    pub path: String,
+    /// The test/command ids this path most likely affects, narrowest first.
+    pub affected: Vec<String>,
+}
+
+/// A deterministic, bounded changed-path → affected-test mapping plus a verifier
+/// command ranking (B.1). Built **purely** from path strings + [`RepoSignals`] — no
+/// filesystem read, no policy from file contents (invariant 7). The optional read
+/// of a real test manifest ([`parse_test_manifest`]) is the `TODO(P2-live-graph)`
+/// seam, isolated so the planner core stays pure.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TestGraph {
+    /// Changed-path fingerprints, bounded by [`MAX_TEST_GRAPH_ENTRIES`].
+    pub entries: Vec<TestGraphEntry>,
+}
+
+impl TestGraph {
+    /// Builds a test graph from repo signals + changed paths. Each path maps to the
+    /// verifier ids it most likely affects: a `crates/<crate>/…` Rust path → a
+    /// `cargo test -p <crate>` targeted id (then the full suite); JS/TS, Python, and
+    /// security paths map to their respective gates. Deterministic and bounded.
+    #[must_use]
+    pub fn from_signals_and_changed_paths<I, P>(signals: &RepoSignals, changed_paths: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<str>,
+    {
+        let mut entries: Vec<TestGraphEntry> = Vec::new();
+        for raw in changed_paths {
+            if entries.len() >= MAX_TEST_GRAPH_ENTRIES {
+                break;
+            }
+            let path = normalize_path(raw.as_ref());
+            if path.is_empty() || entries.iter().any(|e| e.path == path) {
+                continue;
+            }
+            let affected = affected_tests_for_path(&path, signals);
+            if affected.is_empty() {
+                continue;
+            }
+            entries.push(TestGraphEntry { path, affected });
+        }
+        TestGraph { entries }
+    }
+
+    /// The unique affected ids across all entries, ranked narrowest-first
+    /// (per-target `cargo test -p …` and other targeted ids before any
+    /// full-suite id), so a caller can fail fast before the full gate.
+    #[must_use]
+    pub fn command_order(&self) -> Vec<String> {
+        let mut targeted: Vec<String> = Vec::new();
+        let mut full: Vec<String> = Vec::new();
+        for entry in &self.entries {
+            for id in &entry.affected {
+                let bucket = if is_full_suite_id(id) {
+                    &mut full
+                } else {
+                    &mut targeted
+                };
+                if !bucket.contains(id) {
+                    bucket.push(id.clone());
+                }
+            }
+        }
+        // A full-suite id that also appeared as targeted stays only in targeted.
+        full.retain(|id| !targeted.contains(id));
+        targeted.extend(full);
+        targeted
+    }
+}
+
+/// Whether a test/command id is a full-suite (whole-workspace) gate rather than a
+/// narrow targeted check.
+fn is_full_suite_id(id: &str) -> bool {
+    let n = id.trim();
+    n == "cargo test --workspace"
+        || n == "npm test"
+        || n == "python -m pytest"
+        || n == "make test"
+        || n == "security-review"
+}
+
+/// The verifier ids a single changed path most likely affects. Pure path
+/// classification — never reads file contents.
+fn affected_tests_for_path(path: &str, signals: &RepoSignals) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let push = |s: String, out: &mut Vec<String>| {
+        if !s.is_empty() && !out.contains(&s) {
+            out.push(s);
+        }
+    };
+
+    // Security-sensitive paths override to a security review regardless of type.
+    if is_security_sensitive_path(path) {
+        push("security-review".to_string(), &mut out);
+    }
+
+    let file = path.rsplit('/').next().unwrap_or(path);
+    if path.ends_with(".rs") {
+        if let Some(krate) = crate_of_path(path) {
+            push(format!("cargo test -p {krate}"), &mut out);
+        }
+        if signals.cargo_manifest {
+            push("cargo test --workspace".to_string(), &mut out);
+        } else {
+            push("cargo test".to_string(), &mut out);
+        }
+    } else if file.ends_with(".ts") || file.ends_with(".tsx") || file.ends_with(".js") {
+        push("npm test".to_string(), &mut out);
+    } else if file.ends_with(".py") {
+        push("python -m pytest".to_string(), &mut out);
+    }
+    out
+}
+
+/// The crate name for a `crates/<crate>/…` path, if any.
+fn crate_of_path(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("crates/")?;
+    let krate = rest.split('/').next()?;
+    if krate.is_empty() {
+        None
+    } else {
+        Some(krate.to_string())
+    }
+}
+
+/// The kind of test manifest the optional live read recognizes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifestKind {
+    /// `pytest.ini` / `pyproject.toml` `[tool.pytest]`.
+    Pytest,
+    /// `jest.config.js` / `jest` field in `package.json`.
+    Jest,
+    /// `.cargo/config.toml`.
+    CargoConfig,
+}
+
+/// Test-group / tier hints parsed from a manifest. Bounded, content-derived
+/// metadata only — never authority (invariant 13: gates inform; only the verifier
+/// completes).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TestManifest {
+    /// Named test groups / markers discovered (bounded).
+    pub groups: Vec<String>,
+}
+
+/// Parses a test manifest's text into bounded group hints. **Pure** — it parses
+/// the provided text and reads no filesystem. The live inch is reading a *real*
+/// manifest off disk, exercised only by the `#[ignore]`d
+/// `live_parse_test_manifest_reads_a_real_manifest` (`TODO(P2-live-graph)`); this
+/// keeps the planner core filesystem-free.
+#[must_use]
+pub fn parse_test_manifest(kind: ManifestKind, text: &str) -> TestManifest {
+    let mut groups: Vec<String> = Vec::new();
+    let key = match kind {
+        // pytest markers: lines like `markers = slow: ...` or `[pytest] markers`.
+        ManifestKind::Pytest => "markers",
+        // jest projects/testMatch groups.
+        ManifestKind::Jest => "projects",
+        // cargo aliases as "groups".
+        ManifestKind::CargoConfig => "alias",
+    };
+    for line in text.lines().take(1024) {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix(key) {
+            let value = rest.trim_start_matches([':', '=', ' ', '[', ']', '"']);
+            let name = value
+                .split([':', ',', '"', ' '])
+                .next()
+                .unwrap_or("")
+                .trim();
+            if !name.is_empty() && groups.len() < MAX_TEST_GRAPH_ENTRIES {
+                push_unique_string(&mut groups, name.to_string());
+            }
+        }
+    }
+    TestManifest { groups }
 }
 
 fn add_task_gates(task: TaskShape, gates: &mut Vec<TaskGate>) {
@@ -1968,6 +2227,139 @@ fn push_json_string_array<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- B.1 verifier test-graph & gate reasons -----------------------------
+
+    #[test]
+    fn test_graph_maps_a_rust_crate_path_to_targeted_then_full() {
+        let signals = RepoSignals::from_paths(["Cargo.toml"]);
+        let graph = TestGraph::from_signals_and_changed_paths(
+            &signals,
+            ["crates/crustcore-daemon/src/product.rs"],
+        );
+        assert_eq!(graph.entries.len(), 1);
+        let affected = &graph.entries[0].affected;
+        assert!(affected.contains(&"cargo test -p crustcore-daemon".to_string()));
+        assert!(affected.contains(&"cargo test --workspace".to_string()));
+        // Targeted before full in the ranking.
+        let order = graph.command_order();
+        let targeted = order
+            .iter()
+            .position(|c| c == "cargo test -p crustcore-daemon")
+            .unwrap();
+        let full = order
+            .iter()
+            .position(|c| c == "cargo test --workspace")
+            .unwrap();
+        assert!(targeted < full, "targeted must rank before full: {order:?}");
+    }
+
+    #[test]
+    fn test_graph_security_path_overrides_to_security_review() {
+        let signals = RepoSignals::from_paths(["Cargo.toml"]);
+        // A secrets-crate path is security-sensitive regardless of being a .rs file.
+        let graph = TestGraph::from_signals_and_changed_paths(
+            &signals,
+            ["crates/crustcore-secrets/src/lib.rs"],
+        );
+        let affected = &graph.entries[0].affected;
+        assert!(
+            affected.contains(&"security-review".to_string()),
+            "security path must surface a security-review id: {affected:?}"
+        );
+        // security-review is a full-suite-class id, so it ranks after targeted ids.
+        assert!(is_full_suite_id("security-review"));
+    }
+
+    #[test]
+    fn test_graph_is_bounded_and_dedups() {
+        let signals = RepoSignals::from_paths(["Cargo.toml"]);
+        let many: Vec<String> = (0..(MAX_TEST_GRAPH_ENTRIES + 50))
+            .map(|i| format!("crates/c{i}/src/lib.rs"))
+            .collect();
+        let graph = TestGraph::from_signals_and_changed_paths(&signals, &many);
+        assert!(graph.entries.len() <= MAX_TEST_GRAPH_ENTRIES);
+        // Duplicate paths collapse to one entry.
+        let dup = TestGraph::from_signals_and_changed_paths(
+            &signals,
+            ["src/a.rs", "src/a.rs", "src/a.rs"],
+        );
+        assert_eq!(dup.entries.len(), 1);
+    }
+
+    #[test]
+    fn gate_reasons_explain_every_expected_gate() {
+        // A bug fix at high risk: RegressionTest + FullSuite + SecurityReview (risk).
+        let profile = RepoProfile::parse("risk_tier: high\nverify:\n  - cargo test --workspace\n")
+            .expect("valid profile");
+        let signals = RepoSignals::from_paths(["Cargo.toml"]);
+        let plan = profile.plan_verification(&signals, TaskShape::BugFix);
+        for gate in &plan.gates {
+            assert!(
+                plan.reason_for(*gate).is_some(),
+                "gate {gate:?} has no reason"
+            );
+        }
+        assert!(plan
+            .reason_for(TaskGate::RegressionTest)
+            .unwrap()
+            .contains("regression"));
+        // SecurityReview here comes from the high risk tier, not a security path.
+        assert!(plan
+            .reason_for(TaskGate::SecurityReview)
+            .unwrap()
+            .contains("risk tier"));
+    }
+
+    #[test]
+    fn security_task_gate_reason_cites_the_sensitive_path() {
+        let profile = RepoProfile::default();
+        let signals = RepoSignals::from_paths(["Cargo.toml"]);
+        let plan = profile.plan_verification(&signals, TaskShape::SecuritySensitive);
+        assert!(plan
+            .reason_for(TaskGate::SecurityReview)
+            .unwrap()
+            .contains("security-sensitive"));
+    }
+
+    #[test]
+    fn plan_with_changed_paths_attaches_a_graph_without_changing_gates() {
+        let profile = RepoProfile::parse("verify:\n  - cargo test --workspace\n").unwrap();
+        let signals = RepoSignals::from_paths(["Cargo.toml"]);
+        let base = profile.plan_verification(&signals, TaskShape::Feature);
+        let with = profile.plan_verification_with_changed_paths(
+            &signals,
+            TaskShape::Feature,
+            ["crates/crustcore-net/src/lib.rs"],
+        );
+        // Same gates/commands; only the test graph is added (graph is advisory).
+        assert_eq!(base.gates, with.gates);
+        assert_eq!(base.commands, with.commands);
+        assert!(base.test_graph.entries.is_empty());
+        assert!(!with.test_graph.entries.is_empty());
+    }
+
+    #[test]
+    fn parse_test_manifest_is_pure_and_extracts_groups() {
+        let m = parse_test_manifest(ManifestKind::Pytest, "markers = slow: marks slow tests\n");
+        assert_eq!(m.groups, vec!["slow".to_string()]);
+        // Unknown lines are ignored; bounded.
+        let empty = parse_test_manifest(ManifestKind::Jest, "unrelated: true\n");
+        assert!(empty.groups.is_empty());
+    }
+
+    // Live seam: read a *real* manifest off disk and parse it (TODO(P2-live-graph)).
+    // The pure parser above is CI-tested; this is the only filesystem inch.
+    #[test]
+    #[ignore = "live: reads a real on-disk test manifest (pytest.ini/jest.config.js/.cargo/config.toml) (TODO(P2-live-graph))"]
+    fn live_parse_test_manifest_reads_a_real_manifest() {
+        let root = std::env::var("CRUSTCORE_TEST_MANIFEST")
+            .expect("set CRUSTCORE_TEST_MANIFEST to a real manifest path");
+        let text = std::fs::read_to_string(&root).expect("read manifest");
+        let manifest = parse_test_manifest(ManifestKind::Pytest, &text);
+        // Just assert the pure parser ran over real bytes; groups may be empty.
+        let _ = manifest.groups.len();
+    }
 
     #[test]
     fn default_profile_is_team_safe() {
