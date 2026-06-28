@@ -58,6 +58,10 @@ pub mod repo_profiler;
 /// verifier result into an integration decision. Verdicts veto; the verifier still
 /// owns completion. Times out into a refusal, never a hang.
 pub mod reviewer;
+/// Task-shape executor routing (roadmap-v0.6 C.1): a pure `decide_routing` selecting
+/// single / fan-out / advisory-plan / blocked from task shape, risk, budget, and the
+/// configured executors. Selection only — the verifier still owns completion.
+pub mod router;
 pub mod runtime;
 pub mod selfimprove;
 pub mod supervisor;
