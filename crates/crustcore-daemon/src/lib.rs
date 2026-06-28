@@ -39,6 +39,10 @@ pub mod advisor;
 pub mod chat;
 pub mod exec;
 pub mod github;
+/// GitHub App onboarding (roadmap-v0.6 A.1): turns an untrusted install redirect
+/// into a registered, write-capable repo + a minted `Approved<GitHubWriteCap>`.
+/// Pure decision core; the install-confirm + token-mint are the live seam.
+pub mod onboarding;
 /// Product-layer contracts for the GitHub PR Supervisor: repo profile,
 /// lifecycle states, executor metadata, and evidence bundles. Pure data only;
 /// authority still lives in the kernel/backend gates.
