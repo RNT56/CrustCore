@@ -30,6 +30,24 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Verifier test-graph & explained gates (roadmap-v0.6 B.1).** Extended
+  `crustcore_daemon::product`'s `VerifierPlan` with `gate_reasons: Vec<(TaskGate,
+  String)>` (every expected gate now carries a deterministic, content-free
+  explanation — bug-fix→regression, high-risk/security→security-review, etc.,
+  bounded by `MAX_GATE_REASONS`) and a `TestGraph` mapping changed paths → the
+  verifier ids they affect (`crates/<crate>/…` → `cargo test -p <crate>` then the
+  full suite; JS/TS→`npm test`; Python→pytest; security paths override to
+  `security-review` regardless of file type), with `TestGraph::command_order`
+  ranking targeted checks before the full gate so callers can fail fast. Built
+  purely from path strings + `RepoSignals` (no filesystem, no policy from file
+  contents — invariant 7), bounded by `MAX_TEST_GRAPH_ENTRIES`, attached via the
+  new `RepoProfile::plan_verification_with_changed_paths`. The graph is advisory
+  ranking only — it never replaces the full-suite gate and cannot prove a task
+  (invariant 13). The one filesystem inch (`parse_test_manifest`, pure over text;
+  the real on-disk read is `#[ignore]`d `live_parse_test_manifest_reads_a_real_manifest`,
+  `TODO(P2-live-graph)`) is catalogued in the runbook. 8 new tests; daemon-only;
+  **zero nano impact**.
+
 - **Live-socket validation runbook + CI lint (roadmap-v0.6 Appendix).** Added
   [`docs/live-socket-validation.md`](./docs/live-socket-validation.md): a
   maintainer-ready catalogue of every `#[ignore]`d live seam (22 named tests +
@@ -116,6 +134,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/B.1 | Verifier test-graph (`TestGraph`/`command_order`) + explained `gate_reasons` on `VerifierPlan`; pure path→test fingerprints, bounded; `parse_test_manifest` pure + `#[ignore]`d live read | `claude/v06-b1-testgraph` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 7, 11, 13; graph is advisory ranking, never authority |
 | 2026-06-28 | v0.6/runbook | Live-socket validation runbook (`docs/live-socket-validation.md`) + `scripts/validate_live_socket_runbook.sh` lint wired as `cargo xtask runbook-check` (fails CI if a live seam is uncatalogued) | `claude/v06-runbook` | Claude (Maintainer) | 0 kB (docs/script/xtask) | Preserves 1, 13, 14; documents but never relaxes the live-seam trust rules |
 | 2026-06-27 | WCA-0/WCA-2 | Product-stack docs + daemon product contracts for `crustcore.yml`, lifecycle states, executor metadata, and evidence bundles | `codex/world-class-agent-foundation` | Codex (Architect/Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 14, 19, 20; no authority path added |
 | 2026-06-27 | WCA-1 | Deterministic GitHub issue-to-draft-PR golden over untrusted issue data, `VerifiedPatch`, approved draft PR intent, canned REST create, and bounded CI repair | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (eval/sidecar only) | Preserves 1, 6, 7, 8, 9, 13, 14; no live token or unverified PR path |

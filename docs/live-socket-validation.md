@@ -66,6 +66,7 @@ cargo test --workspace -- --list --ignored
 | `live_bundle_still_enforces_the_approval_gate` | C | — | [C.3](#c3) | approval-gated bundle core ✓ | medium (sandbox+git) |
 | `live_grep_lines_on_this_repo` | C | — | [C.4](#c4) | arg build + output parse ✓ | easy (git repo) |
 | `live_list_files_on_this_repo` | C | — | [C.4](#c4) | arg build + output parse ✓ | easy (git repo) |
+| `live_parse_test_manifest_reads_a_real_manifest` | C | — | [C.5](#c5) | pure `parse_test_manifest` over text ✓ | easy (a repo file) |
 | `live_insert_query_delete_roundtrip` (lancedb) | D | — | [D.1](#d1) | in-memory store roundtrip ✓ | medium (LanceDB) |
 | `live_upsert_search_delete_roundtrip` (qdrant) | D | — | [D.2](#d2) | in-memory store roundtrip ✓ | easy (docker qdrant) |
 | `live_post_to_loopback_collector` | D | — | [D.3](#d3) | OTLP/GenAI payload assembly ✓ | easy (docker otel) |
@@ -225,6 +226,21 @@ cargo test --workspace -- --list --ignored
 - **Run:** `cargo test -p crustcore-index exec::tests::live_grep_lines_on_this_repo -- --ignored --nocapture`
   (and `live_list_files_on_this_repo`).
 - **Success:** grep/list return real repo lines/paths, bounded. **Difficulty: easy.**
+
+<a id="c5"></a>
+### C.5 — `live_parse_test_manifest_reads_a_real_manifest` (B.1 test-graph)
+- **Test:** `crustcore-daemon/src/product.rs::tests::live_parse_test_manifest_reads_a_real_manifest`. Seam tag `TODO(P2-live-graph)`.
+- **Socket:** a single filesystem read of a real test manifest
+  (`pytest.ini` / `jest.config.js` / `.cargo/config.toml`).
+- **CI core (passing):** `parse_test_manifest(kind, text)` is **pure** — it parses
+  provided text into bounded group hints; the verifier `TestGraph`
+  (`from_signals_and_changed_paths` / `command_order`) is built entirely from path
+  strings + repo signals, no filesystem. This is the only filesystem inch in B.1.
+- **Prereq:** `CRUSTCORE_TEST_MANIFEST=<path>` to a real manifest in a repo.
+- **Run:** `CRUSTCORE_TEST_MANIFEST=pytest.ini cargo test -p crustcore-daemon product::tests::live_parse_test_manifest_reads_a_real_manifest -- --ignored --nocapture`
+- **Success:** the pure parser runs over real bytes (groups may be empty). The
+  graph never grants authority — gates inform, only the verifier completes
+  (invariant 13). **Difficulty: easy.**
 
 ---
 
