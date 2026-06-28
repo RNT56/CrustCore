@@ -57,6 +57,7 @@ cargo test --workspace -- --list --ignored
 | `net_embedder_over_a_spawned_sidecar` | A/D | — | [A.3](#a3) | deterministic hash embedder ✓ | medium (embed provider) |
 | `live_installation_token_smoke` (net) | B | `live` | [B.1](#b1) | JWT assembly + argv parse ✓ | medium (App key) |
 | `live_installation_token_smoke` (daemon) | B | `live` | [B.1](#b1) | `mint_installation_token` glue ✓ | medium (App key) |
+| `app_onboarding_live_smoke` | B | `live` | [B.1](#b1) | redirect→cap→register→approve→config core ✓ | medium (App install) |
 | `gh_live` | B | `live` | [B.2](#b2) | canned-REST request rendering ✓ | easy (PAT) |
 | `live_serve_webhooks_once_round_trip` | B | `live` | [B.3](#b3) | HMAC verify + bound + dedup ✓ | medium (port + POST) |
 | `live_draft_pr_post_smoke` | B/F | `live` | [B.4](#b4) | eval→contract gate→`draft_pr_request` ✓ | hard (patch+approval+token) |
@@ -138,6 +139,16 @@ cargo test --workspace -- --list --ignored
   (and the daemon-side variant analogously).
 - **Success:** a short-lived installation token is minted and is usable for a
   scoped REST call; the PEM never appears in logs. **Difficulty: medium.**
+- **Onboarding (A.1) — `app_onboarding_live_smoke`** (`crustcore-daemon/src/onboarding.rs`,
+  feature `live`, seam tag `TODO(app-onboarding-live)`): the full install path —
+  capture the redirect, confirm `GET /app/installations/{id}`, register the repo,
+  mint the `Approved<GitHubWriteCap>`, then mint the installation token. CI core:
+  `cap_from_redirect` / `onboard` / `TokenLease::needs_refresh` / `load_profile` all
+  pass socket-free. Prereq: a registered test App + `CRUSTCORE_GH_APP_ID`,
+  `CRUSTCORE_GH_APP_KEY_PEM`, `CRUSTCORE_GH_INSTALLATION_ID`, `CRUSTCORE_GH_REPO`.
+  Run: `cargo test -p crustcore-daemon --features live onboarding::tests::app_onboarding_live_smoke -- --ignored --nocapture`.
+  Success: the test repo registers and a `ghs_…` token mints; the PEM never appears
+  in output. **Difficulty: medium.**
 
 <a id="b2"></a>
 ### B.2 — `gh_live` — GitHub REST (branch / PR create)
