@@ -30,6 +30,16 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Release CI workflow (draft) — prebuilt, checksummed binaries on tag.**
+  `.github/workflows/release.yml`: on a `vX.Y.Z` tag, builds the three user-facing artifacts on
+  Linux x86_64 + macOS arm64 — `crustcore` (the trusted verifier; on Linux via
+  `cargo xtask release`, so the reproducible build + `release-manifest.txt` are produced),
+  `crustcore-net` (the model helper), and `crustcore-full` (the single-binary all-in-one) —
+  emits a combined `SHA256SUMS`, and assembles a **draft** GitHub release. It **never signs or
+  publishes** (no signing key/credential in CI; CLAUDE.md §6.3): the maintainer reviews the
+  draft, signs `SHA256SUMS` out-of-band, and publishes manually. `workflow_dispatch` is a
+  build-only dry-run. First-party actions only. This is the last step toward a zero-Rust casual
+  install: download a prebuilt `crustcore-full` → `setup` → `chat`. n/a to nano.
 - **World-class GitHub PR Supervisor product foundation.** Added
   `crustcore_daemon::product`, a pure non-nano product contract module for the
   first GitHub PR Supervisor wedge: `RepoProfile` / `crustcore.yml` parsing
