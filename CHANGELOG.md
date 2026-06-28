@@ -30,6 +30,16 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **`docs/roadmap-v0.6.md` — post-v0.5.0 execution overlay.** A consolidated, dependency-ordered,
+  execution-ready plan for the next wave: Phase A (PR Supervisor go-live), B (verification
+  intelligence), C (execution routing & review), D (live executor wiring), E (product UX +
+  channels: cockpit, GitHub `/crustcore` commands, Slack, CoT analysis), F (daemon hardening:
+  cross-process recovery, admin socket, multi-repo). Each task carries goal · design with real
+  file refs · CI-testable core vs live seam · tests · invariants · acceptance · effort · deps ·
+  risk. Includes a live-socket validation runbook (grouped by infra) + the irreversible
+  maintainer steps, and a sequencing recommendation. Complements `docs/world-class-agent-roadmap.md`
+  (the product-vision overlay from #66) with concrete, ready-to-build specs. Docs only.
+
 - **Release CI workflow (draft) — prebuilt, checksummed binaries on tag.**
   `.github/workflows/release.yml`: on a `vX.Y.Z` tag, builds the three user-facing artifacts on
   Linux x86_64 + macOS arm64 — `crustcore` (the trusted verifier; on Linux via
