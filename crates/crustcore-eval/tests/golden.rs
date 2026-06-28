@@ -338,12 +338,14 @@ fn golden_add_small_feature() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// Golden (P10/WCA-1): a GitHub issue becomes an evidence-backed draft PR without
-/// trusting GitHub text or any worker self-claim. The GitHub issue body is ingested as
-/// untrusted data, a worker proposes a patch in a sandboxed disposable worktree, the
-/// verifier mints the only `VerifiedPatch`, a human approval opens a draft PR intent,
-/// and the sidecar GitHub REST adapter is exercised through a canned `ReplayClient`.
-/// No network or real token is used.
+/// Golden (P10/WCA-1): the **decision path** by which a GitHub issue becomes an
+/// evidence-backed draft PR, exercising the **backend primitives directly** (not the
+/// `crustcore-flow` orchestration engine — that integration is tested separately, live-gated
+/// in `live_flow.rs`). The GitHub issue body is ingested as untrusted data, a worker proposes
+/// a patch in a sandboxed disposable worktree, the verifier mints the only `VerifiedPatch`, a
+/// human approval opens a draft PR intent, and the sidecar GitHub REST adapter is exercised
+/// through a canned `ReplayClient`. **Socket-free and deterministic** — no network, no real
+/// token; the real GitHub push/REST round-trip remains the `#[ignore]`d live seam.
 #[test]
 fn golden_issue_to_pr_flow() {
     use std::rc::Rc;

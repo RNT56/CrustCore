@@ -24,6 +24,13 @@ const MAX_EVIDENCE_EXPORT_COMMANDS: usize = 32;
 const MAX_EVIDENCE_EXPORT_RISKS: usize = 32;
 const MAX_EVIDENCE_EXPORT_REFS: usize = 64;
 
+// `crustcore.yml` is repo-controlled, **untrusted** input (invariant 7); its lists are
+// bounded so a hostile profile cannot exhaust memory (invariant 11). A profile that exceeds
+// any cap is *rejected*, never allocated past it.
+const MAX_VERIFY_COMMANDS: usize = 32;
+const MAX_EXECUTORS: usize = 8;
+const MAX_LABELS: usize = 32;
+
 /// Product policy posture selected by trusted setup, never by repo text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PolicyMode {
@@ -374,9 +381,16 @@ impl RepoProfile {
 
             if let Some(item) = line.strip_prefix("- ") {
                 match section {
-                    Section::Verify => push_nonempty(&mut out.verify, item, line_no)?,
-                    Section::Executors => out.executors.push(parse_executor(item, line_no)?),
-                    Section::Labels => push_nonempty(&mut out.github.labels, item, line_no)?,
+                    Section::Verify => {
+                        push_nonempty(&mut out.verify, item, line_no, MAX_VERIFY_COMMANDS)?
+                    }
+                    Section::Executors => {
+                        ensure_capacity(&out.executors, line_no, MAX_EXECUTORS)?;
+                        out.executors.push(parse_executor(item, line_no)?);
+                    }
+                    Section::Labels => {
+                        push_nonempty(&mut out.github.labels, item, line_no, MAX_LABELS)?
+                    }
                     _ => {
                         return Err(ProfileError::new(
                             line_no,
@@ -1330,19 +1344,20 @@ fn apply_top_scalar(
         "verify" => {
             out.verify.clear();
             for item in split_csv(value) {
-                push_nonempty(&mut out.verify, item, line)?;
+                push_nonempty(&mut out.verify, item, line, MAX_VERIFY_COMMANDS)?;
             }
         }
         "executors" => {
             out.executors.clear();
             for item in split_csv(value) {
+                ensure_capacity(&out.executors, line, MAX_EXECUTORS)?;
                 out.executors.push(parse_executor(item, line)?);
             }
         }
         "labels" => {
             out.github.labels.clear();
             for item in split_csv(value) {
-                push_nonempty(&mut out.github.labels, item, line)?;
+                push_nonempty(&mut out.github.labels, item, line, MAX_LABELS)?;
             }
         }
         "repo" => out.github.repo = Some(clean_scalar(value).to_string()),
@@ -1383,7 +1398,7 @@ fn apply_section_scalar(
             "labels" => {
                 out.github.labels.clear();
                 for item in split_csv(value) {
-                    push_nonempty(&mut out.github.labels, item, line)?;
+                    push_nonempty(&mut out.github.labels, item, line, MAX_LABELS)?;
                 }
             }
             other => {
@@ -1398,9 +1413,12 @@ fn apply_section_scalar(
             "telegram" => out.ui.telegram = parse_bool(value, line, key)?,
             other => return Err(ProfileError::new(line, format!("unknown ui key '{other}'"))),
         },
-        Section::Verify => push_nonempty(&mut out.verify, value, line)?,
-        Section::Executors => out.executors.push(parse_executor(value, line)?),
-        Section::Labels => push_nonempty(&mut out.github.labels, value, line)?,
+        Section::Verify => push_nonempty(&mut out.verify, value, line, MAX_VERIFY_COMMANDS)?,
+        Section::Executors => {
+            ensure_capacity(&out.executors, line, MAX_EXECUTORS)?;
+            out.executors.push(parse_executor(value, line)?);
+        }
+        Section::Labels => push_nonempty(&mut out.github.labels, value, line, MAX_LABELS)?,
         Section::Top => apply_top_scalar(out, key, value, line)?,
     }
     Ok(())
@@ -1440,13 +1458,36 @@ fn parse_bool(value: &str, line: usize, key: &str) -> Result<bool, ProfileError>
     }
 }
 
-fn push_nonempty(vec: &mut Vec<String>, value: &str, line: usize) -> Result<(), ProfileError> {
+fn push_nonempty(
+    vec: &mut Vec<String>,
+    value: &str,
+    line: usize,
+    max: usize,
+) -> Result<(), ProfileError> {
+    if vec.len() >= max {
+        return Err(ProfileError::new(
+            line,
+            format!("too many list entries (max {max})"),
+        ));
+    }
     let cleaned = clean_scalar(value);
     if cleaned.is_empty() {
         return Err(ProfileError::new(line, "list value cannot be empty"));
     }
     vec.push(cleaned.to_string());
     Ok(())
+}
+
+/// Bound an untrusted list before a `push` of a non-string element (e.g. an executor).
+fn ensure_capacity<T>(vec: &[T], line: usize, max: usize) -> Result<(), ProfileError> {
+    if vec.len() >= max {
+        Err(ProfileError::new(
+            line,
+            format!("too many list entries (max {max})"),
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn clean_scalar(value: &str) -> &str {
@@ -1860,11 +1901,31 @@ fn bound(value: impl AsRef<str>, max: usize) -> String {
     out
 }
 
+/// JSON-escaped byte length of `ch` — so the **escaped** output can be bounded (a control
+/// char escapes to `\u00xx` = 6 bytes; bounding the *input* would let escaping blow the size
+/// up ~6×, breaking the "bounded JSON" contract).
+fn escaped_len(ch: char) -> usize {
+    match ch {
+        '"' | '\\' | '\n' | '\r' | '\t' | '\u{08}' | '\u{0c}' => 2,
+        c if c.is_control() => 6, // \u00xx
+        c => c.len_utf8(),
+    }
+}
+
+/// A JSON string literal whose **escaped** body is bounded to `max` bytes (so a hostile,
+/// all-control-character value cannot 6×-explode the export — invariant 11). Truncation is
+/// marked with a trailing `...` inside the quotes.
 fn json_string(value: impl AsRef<str>, max: usize) -> String {
-    let bounded = bound(value.as_ref(), max);
-    let mut out = String::with_capacity(bounded.len() + 2);
+    let s = value.as_ref();
+    let mut out = String::with_capacity(max + 8);
     out.push('"');
-    for ch in bounded.chars() {
+    let mut body = 0usize;
+    let mut truncated = false;
+    for ch in s.chars() {
+        if body + escaped_len(ch) > max {
+            truncated = true;
+            break;
+        }
         match ch {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
@@ -1879,6 +1940,10 @@ fn json_string(value: impl AsRef<str>, max: usize) -> String {
             }
             ch => out.push(ch),
         }
+        body += escaped_len(ch);
+    }
+    if truncated {
+        out.push_str("...");
     }
     out.push('"');
     out
@@ -1983,6 +2048,44 @@ ui:
         let err = RepoProfile::parse("executors:\n  - unknown-agent\n").unwrap_err();
         assert_eq!(err.line, 2);
         assert!(err.reason.contains("unknown executor"));
+    }
+
+    #[test]
+    fn profile_parser_rejects_oversized_untrusted_lists() {
+        // crustcore.yml is untrusted repo input (invariant 7); a hostile list is rejected,
+        // never allocated past the cap (invariant 11) — whether inline-CSV or block style.
+        let many = (0..MAX_VERIFY_COMMANDS + 5)
+            .map(|i| format!("cmd{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let err = RepoProfile::parse(&format!("verify: {many}")).unwrap_err();
+        assert!(err.reason.contains("too many"), "got: {}", err.reason);
+
+        let block = std::iter::once("labels:".to_string())
+            .chain((0..MAX_LABELS + 5).map(|i| format!("  - l{i}")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let err = RepoProfile::parse(&block).unwrap_err();
+        assert!(err.reason.contains("too many"), "got: {}", err.reason);
+
+        // A within-cap profile still parses.
+        assert!(RepoProfile::parse("verify: a,b,c").is_ok());
+    }
+
+    #[test]
+    fn json_string_bounds_the_escaped_output_not_the_input() {
+        // A value of all control characters escapes ~6x; the *escaped* output must stay within
+        // the byte bound (the bug was bounding the input, letting escaping explode it).
+        let hostile = "\u{1}".repeat(1000);
+        let out = json_string(&hostile, 64);
+        assert!(
+            out.len() <= 64 + 5, // 64-byte escaped body + `...` marker + two quotes
+            "escaped json must be bounded, got {} bytes",
+            out.len()
+        );
+        // Still valid: opens/closes with a quote, contains only \u escapes + the marker.
+        assert!(out.starts_with('"') && out.ends_with('"'));
+        assert!(out.contains("\\u0001"));
     }
 
     #[test]
