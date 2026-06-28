@@ -43,6 +43,24 @@ agent/PR/role/size/invariant audit trail.
   `exec::run_fanout`/`run_subagent` seams — no new live seam. 7 tests incl. a full
   shape×risk×config×budget combination sweep proving totality + that every chosen
   executor comes from the configured list. Daemon-only; **zero nano impact**.
+- **GitHub App onboarding core (roadmap-v0.6 A.1).** Added
+  `crustcore_daemon::onboarding`: turns an untrusted GitHub App **install
+  redirect** into a registered, write-capable repo through the existing typed
+  primitives — `cap_from_redirect` validates the redirect (non-zero
+  `installation_id`; a strict `owner/repo` slug that rejects whitespace, control
+  chars, and `.`/`..` path-confusion segments) and builds a `GitHubWriteCap`
+  scoped to the repo + `crustcore/` prefix; `onboard` registers it in the
+  `RepoRegistry` and mints an `Approved<GitHubWriteCap>` bound to the onboarding
+  operator (`AuthorizedUser`, never model/comment data — invariant 4);
+  `TokenLease::needs_refresh` refreshes the 1-hour installation token early so a
+  late task is never handed an expired token (invariant 3); `load_profile` runs
+  `crustcore.yml` through the bounded `RepoProfile::parse` and *guides* the user on
+  a missing/invalid file instead of silently defaulting. Pure decision core (no
+  network, clock, or secret material), 9 unit tests. The real install-confirm
+  (`GET /app/installations/{id}`) + token mint is the `#[ignore]`d
+  `app_onboarding_live_smoke` (`TODO(app-onboarding-live)`), catalogued in the
+  live-socket runbook. Daemon-only; **zero nano impact**.
+
 - **Live-socket validation runbook + CI lint (roadmap-v0.6 Appendix).** Added
   [`docs/live-socket-validation.md`](./docs/live-socket-validation.md): a
   maintainer-ready catalogue of every `#[ignore]`d live seam (22 named tests +
@@ -139,6 +157,7 @@ agent/PR/role/size/invariant audit trail.
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
 | 2026-06-28 | v0.6/C.1 | Pure `decide_routing` executor router (single/fan-out/advisory/blocked) over task shape+risk+budget+configured; selection only, verifier still completes | `claude/v06-c1-router` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 6, 13; routing picks a worker, never authority |
+| 2026-06-28 | v0.6/A.1 | GitHub App onboarding core: `InstallRedirect`→`cap_from_redirect`→`onboard` (register + mint `Approved<GitHubWriteCap>`), `TokenLease` refresh, `load_profile`; live install/mint seam `#[ignore]`d | `claude/v06-a1-onboarding` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 3, 4, 7, 13, 14; redirect is untrusted, only an operator-bound approval authorizes a PR |
 | 2026-06-28 | v0.6/runbook | Live-socket validation runbook (`docs/live-socket-validation.md`) + `scripts/validate_live_socket_runbook.sh` lint wired as `cargo xtask runbook-check` (fails CI if a live seam is uncatalogued) | `claude/v06-runbook` | Claude (Maintainer) | 0 kB (docs/script/xtask) | Preserves 1, 13, 14; documents but never relaxes the live-seam trust rules |
 | 2026-06-28 | release-prep | Workspace version `0.4.0`→`0.5.0` (workspace.package + 26 internal dep pins) to match the rolled `[0.5.0]` changelog | `claude/version-0.5.0` | Claude (Maintainer) | 0 kB (metadata) | Preserves 19, 20; no code/dep change |
 | 2026-06-27 | WCA-0/WCA-2 | Product-stack docs + daemon product contracts for `crustcore.yml`, lifecycle states, executor metadata, and evidence bundles | `codex/world-class-agent-foundation` | Codex (Architect/Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 14, 19, 20; no authority path added |
