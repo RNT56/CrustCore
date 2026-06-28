@@ -42,6 +42,22 @@ agent/PR/role/size/invariant audit trail.
   changed paths). Memory is an untrusted hint, never authority (invariant 7); all
   fields stay bounded (invariant 11). A restart roundtrip test proves
   helper-written memory survives `save`→drop→`load`. 6 new tests; index-only;
+- **Verifier test-graph & explained gates (roadmap-v0.6 B.1).** Extended
+  `crustcore_daemon::product`'s `VerifierPlan` with `gate_reasons: Vec<(TaskGate,
+  String)>` (every expected gate now carries a deterministic, content-free
+  explanation — bug-fix→regression, high-risk/security→security-review, etc.,
+  bounded by `MAX_GATE_REASONS`) and a `TestGraph` mapping changed paths → the
+  verifier ids they affect (`crates/<crate>/…` → `cargo test -p <crate>` then the
+  full suite; JS/TS→`npm test`; Python→pytest; security paths override to
+  `security-review` regardless of file type), with `TestGraph::command_order`
+  ranking targeted checks before the full gate so callers can fail fast. Built
+  purely from path strings + `RepoSignals` (no filesystem, no policy from file
+  contents — invariant 7), bounded by `MAX_TEST_GRAPH_ENTRIES`, attached via the
+  new `RepoProfile::plan_verification_with_changed_paths`. The graph is advisory
+  ranking only — it never replaces the full-suite gate and cannot prove a task
+  (invariant 13). The one filesystem inch (`parse_test_manifest`, pure over text;
+  the real on-disk read is `#[ignore]`d `live_parse_test_manifest_reads_a_real_manifest`,
+  `TODO(P2-live-graph)`) is catalogued in the runbook. 8 new tests; daemon-only;
   **zero nano impact**.
 - **GitHub App onboarding core (roadmap-v0.6 A.1).** Added
   `crustcore_daemon::onboarding`: turns an untrusted GitHub App **install
@@ -157,6 +173,7 @@ agent/PR/role/size/invariant audit trail.
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
 | 2026-06-28 | v0.6/B.3 | Persistent repo-memory helpers (`record_failure` redacts via Redactor before persist, `record_successful_verifier`, `get_prior_failure`, `flaky_test_hints`, `changed_paths_key`) on `MemoryStore` | `claude/v06-b3-memory` | Claude (Implementer) | 0 kB (index-only) | Enforces 2, 7, 11; memory is a redacted, bounded hint, never authority |
+| 2026-06-28 | v0.6/B.1 | Verifier test-graph (`TestGraph`/`command_order`) + explained `gate_reasons` on `VerifierPlan`; pure path→test fingerprints, bounded; `parse_test_manifest` pure + `#[ignore]`d live read | `claude/v06-b1-testgraph` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 7, 11, 13; graph is advisory ranking, never authority |
 | 2026-06-28 | v0.6/A.1 | GitHub App onboarding core: `InstallRedirect`→`cap_from_redirect`→`onboard` (register + mint `Approved<GitHubWriteCap>`), `TokenLease` refresh, `load_profile`; live install/mint seam `#[ignore]`d | `claude/v06-a1-onboarding` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 3, 4, 7, 13, 14; redirect is untrusted, only an operator-bound approval authorizes a PR |
 | 2026-06-28 | v0.6/runbook | Live-socket validation runbook (`docs/live-socket-validation.md`) + `scripts/validate_live_socket_runbook.sh` lint wired as `cargo xtask runbook-check` (fails CI if a live seam is uncatalogued) | `claude/v06-runbook` | Claude (Maintainer) | 0 kB (docs/script/xtask) | Preserves 1, 13, 14; documents but never relaxes the live-seam trust rules |
 | 2026-06-28 | release-prep | Workspace version `0.4.0`→`0.5.0` (workspace.package + 26 internal dep pins) to match the rolled `[0.5.0]` changelog | `claude/version-0.5.0` | Claude (Maintainer) | 0 kB (metadata) | Preserves 19, 20; no code/dep change |
