@@ -30,6 +30,19 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Multi-verifier advisory path (roadmap-v0.6 C.2).** Added
+  `crustcore_daemon::reviewer`: `required_reviewers(task, risk)` decides which
+  blocking review roles a change needs (SecuritySensitive/WorkflowChange/
+  DependencyChange → Reviewer + SecurityAuditor; any other ≥High-risk → Reviewer;
+  low-risk docs skip the panel), and `orchestrate_review(...)` folds the collected
+  verdicts + the verifier result through the existing `decide_integration`. Verdicts
+  are **vetoes, not model self-approval** (invariant 4 — a Reviewer `Block` stops
+  integration even if SecurityAuditor approves); integration needs **both** verifier
+  evidence *and* the blocking-role approvals (invariant 13 — an approved-but-unverified
+  patch still returns `NotVerified`); verdicts arrive via the blackboard and the
+  supervisor acts (invariant 5). A stalled panel **times out into a refusal, never a
+  hang** (`AdvisoryOutcome::TimedOut`). 7 tests; daemon-only; **zero nano impact**.
+
 - **`docs/roadmap-v0.6.md` — post-v0.5.0 execution overlay.** A consolidated, dependency-ordered,
   execution-ready plan for the next wave: Phase A (PR Supervisor go-live), B (verification
   intelligence), C (execution routing & review), D (live executor wiring), E (product UX +
@@ -102,6 +115,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/C.2 | Multi-verifier advisory gate: `required_reviewers` + `orchestrate_review` folding Reviewer/SecurityAuditor verdicts + verifier result via `decide_integration`; veto-not-approval, times out into refusal | `claude/v06-c2-reviewer` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 5, 13; verdicts veto, verifier still completes |
 | 2026-06-27 | WCA-0/WCA-2 | Product-stack docs + daemon product contracts for `crustcore.yml`, lifecycle states, executor metadata, and evidence bundles | `codex/world-class-agent-foundation` | Codex (Architect/Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 14, 19, 20; no authority path added |
 | 2026-06-27 | WCA-1 | Deterministic GitHub issue-to-draft-PR golden over untrusted issue data, `VerifiedPatch`, approved draft PR intent, canned REST create, and bounded CI repair | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (eval/sidecar only) | Preserves 1, 6, 7, 8, 9, 13, 14; no live token or unverified PR path |
 | 2026-06-27 | WCA-2 | Verifier planner for repo/task signals, staged check ordering, task gates, and weak-evidence warnings | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 19, 20; no authority path added |

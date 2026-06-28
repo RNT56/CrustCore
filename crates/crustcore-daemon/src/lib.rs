@@ -49,6 +49,11 @@ pub mod registry;
 /// Bounded repo path profiler that observes marker paths for verifier planning
 /// without reading file contents or granting authority.
 pub mod repo_profiler;
+/// Multi-verifier advisory path (roadmap-v0.6 C.2): decides which blocking review
+/// roles (Reviewer/SecurityAuditor) a task needs and folds their verdicts + the
+/// verifier result into an integration decision. Verdicts veto; the verifier still
+/// owns completion. Times out into a refusal, never a hang.
+pub mod reviewer;
 pub mod runtime;
 pub mod selfimprove;
 pub mod supervisor;
