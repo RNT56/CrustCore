@@ -30,6 +30,18 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Multi-verifier advisory path (roadmap-v0.6 C.2).** Added
+  `crustcore_daemon::reviewer`: `required_reviewers(task, risk)` decides which
+  blocking review roles a change needs (SecuritySensitive/WorkflowChange/
+  DependencyChange → Reviewer + SecurityAuditor; any other ≥High-risk → Reviewer;
+  low-risk docs skip the panel), and `orchestrate_review(...)` folds the collected
+  verdicts + the verifier result through the existing `decide_integration`. Verdicts
+  are **vetoes, not model self-approval** (invariant 4 — a Reviewer `Block` stops
+  integration even if SecurityAuditor approves); integration needs **both** verifier
+  evidence *and* the blocking-role approvals (invariant 13 — an approved-but-unverified
+  patch still returns `NotVerified`); verdicts arrive via the blackboard and the
+  supervisor acts (invariant 5). A stalled panel **times out into a refusal, never a
+  hang** (`AdvisoryOutcome::TimedOut`). 7 tests; daemon-only; **zero nano impact**.
 - **Task-shape executor routing (roadmap-v0.6 C.1).** Added
   `crustcore_daemon::router`: a pure, total `decide_routing(task, risk,
   context_budget, configured) → RoutingDecision` that selects how to run a task —
@@ -185,6 +197,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/C.2 | Multi-verifier advisory gate: `required_reviewers` + `orchestrate_review` folding Reviewer/SecurityAuditor verdicts + verifier result via `decide_integration`; veto-not-approval, times out into refusal | `claude/v06-c2-reviewer` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 5, 13; verdicts veto, verifier still completes |
 | 2026-06-28 | v0.6/C.1 | Pure `decide_routing` executor router (single/fan-out/advisory/blocked) over task shape+risk+budget+configured; selection only, verifier still completes | `claude/v06-c1-router` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 6, 13; routing picks a worker, never authority |
 | 2026-06-28 | v0.6/B.3 | Persistent repo-memory helpers (`record_failure` redacts via Redactor before persist, `record_successful_verifier`, `get_prior_failure`, `flaky_test_hints`, `changed_paths_key`) on `MemoryStore` | `claude/v06-b3-memory` | Claude (Implementer) | 0 kB (index-only) | Enforces 2, 7, 11; memory is a redacted, bounded hint, never authority |
 | 2026-06-28 | v0.6/B.1 | Verifier test-graph (`TestGraph`/`command_order`) + explained `gate_reasons` on `VerifierPlan`; pure path→test fingerprints, bounded; `parse_test_manifest` pure + `#[ignore]`d live read | `claude/v06-b1-testgraph` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 7, 11, 13; graph is advisory ranking, never authority |
