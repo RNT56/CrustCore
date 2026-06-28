@@ -51,6 +51,7 @@
 //! forbidden deps in its default build; the live drivers are `live-flow`-gated.
 #![forbid(unsafe_code)]
 
+pub mod agentic_flows;
 pub mod budget;
 pub mod builder;
 pub mod drivers;

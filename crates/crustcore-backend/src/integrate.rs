@@ -129,7 +129,12 @@ pub fn branch_under_prefix(branch: &str, prefix: &str) -> bool {
 #[must_use]
 pub fn format_pr_body(patch: &VerifiedPatch) -> String {
     let mut s = String::new();
-    s.push_str("## Machine-produced patch — DRAFT, awaiting human review\n\n");
+    s.push_str("## CrustCore evidence-backed draft PR\n\n");
+    s.push_str(
+        "**Human review required before merge.** CrustCore verified this patch; it did not \
+         approve deployment, release, or merge.\n\n",
+    );
+    s.push_str("### Verification\n\n");
     s.push_str(&format!(
         "**Verifier:** `{}`\n\n",
         patch.verifier().as_str()
@@ -146,12 +151,41 @@ pub fn format_pr_body(patch: &VerifiedPatch) -> String {
             ));
         }
     }
+    s.push_str("\n### Patch and receipt references\n\n");
+    s.push_str(&format!(
+        "- Patch hash: `{}`\n",
+        hex32(&patch.patch().diff_hash)
+    ));
+    s.push_str(&format!(
+        "- Receipt event seq: `{}` (task `{}`, job `{}`, tool call `{}`)\n",
+        patch.receipt().event_seq.0,
+        patch.receipt().task_id.0,
+        patch.receipt().job_id.0,
+        patch.receipt().tool_call_id.0
+    ));
+    s.push_str(&format!(
+        "- Receipt result hash: `{}`\n",
+        hex32(&patch.receipt().result_hash)
+    ));
+    s.push_str("\n### Risk notes\n\n");
+    s.push_str("- No unresolved risk was attached to this verified integration gate.\n");
+    s.push_str("- Review changed files, tests, and CI before merging.\n");
     s.push_str(&format!(
         "\nVerification passed at t={} ms (receipt-backed). \
          A model's self-claim is **not** evidence; only the verifier's run is.\n",
         patch.passed_at().as_millis()
     ));
     s
+}
+
+fn hex32(bytes: &[u8; 32]) -> String {
+    use core::fmt::Write as _;
+
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
 }
 
 #[cfg(test)]
@@ -220,6 +254,11 @@ mod tests {
         // The body is verifier evidence, not a self-claim.
         assert!(intent.body.contains("Verifier:"));
         assert!(intent.body.contains("cargo test"));
+        assert!(intent.body.contains("Human review required before merge"));
+        assert!(intent.body.contains("Patch hash:"));
+        assert!(intent.body.contains("Receipt event seq: `1`"));
+        assert!(intent.body.contains("Receipt result hash:"));
+        assert!(intent.body.contains("Risk notes"));
         assert!(intent.body.contains("self-claim is **not** evidence"));
         assert!(!intent
             .body

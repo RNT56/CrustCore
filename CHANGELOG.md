@@ -40,6 +40,65 @@ agent/PR/role/size/invariant audit trail.
   draft, signs `SHA256SUMS` out-of-band, and publishes manually. `workflow_dispatch` is a
   build-only dry-run. First-party actions only. This is the last step toward a zero-Rust casual
   install: download a prebuilt `crustcore-full` → `setup` → `chat`. n/a to nano.
+- **World-class GitHub PR Supervisor product foundation.** Added
+  `crustcore_daemon::product`, a pure non-nano product contract module for the
+  first GitHub PR Supervisor wedge: `RepoProfile` / `crustcore.yml` parsing
+  (fail-closed on unknown policy/executor keys), `TaskLifecycle` states for
+  product UX, `ExecutorCapability` metadata for routing without authority, and
+  `EvidenceBundle` / `EvidenceVerdict` for evidence-backed draft PR bodies and
+  cockpit views. Added [`docs/product-stack.md`](./docs/product-stack.md) and
+  [`docs/world-class-agent-roadmap.md`](./docs/world-class-agent-roadmap.md) to
+  make the stack position, phases, smoke gates, and kernel-preservation boundary
+  durable. No kernel or nano changes; no new dependencies.
+- **Deterministic issue-to-draft-PR golden.** Un-deferred
+  `golden_issue_to_pr_flow` so CI now exercises the Phase 1 decision path:
+  untrusted issue ingestion, sandboxed worker patch production, verifier-minted
+  `VerifiedPatch`, approval-gated draft `PrIntent`, sidecar `CreatePrRequest`
+  rendering through canned GitHub REST, and bounded CI repair decisions. This is
+  still socket-free; the real GitHub push/REST smoke remains a live/manual gate.
+- **Verifier-intelligence planner.** Added pure product-layer verifier planning
+  in `crustcore_daemon::product`: `RepoSignals`, `TaskShape`, task gates,
+  staged verifier commands, and `VerifierPlan` strength/warning output. The
+  planner ranks targeted checks before full-suite gates, infers conservative
+  Rust/Node/Python/Make verifier commands when no profile verifier exists, and
+  calls out weak evidence for bug-fix, UI, dependency, docs-only, workflow, and
+  security-sensitive tasks. No kernel or nano changes; no new dependencies.
+- **Path-based repo signal detector.** Added deterministic
+  `RepoSignals::from_paths` and `TaskShape::from_changed_paths` defaults so
+  product adapters can classify repo stacks, browser/docs/audit markers, and
+  changed-file risk shape without filesystem IO or authority. Sensitive and
+  workflow paths fail closed into stronger task shapes; bug fixes are still not
+  inferred from filenames alone. No kernel or nano changes; no new dependencies.
+- **Bounded evidence bundle export.** Added
+  `EvidenceBundle::from_verifier_plan`, `export_json`, and `export_jsonl_line`
+  so PR, cockpit, and audit surfaces can share the same stable
+  `crustcore.evidence_bundle.v1` artifact. The export is manually bounded and
+  escaped without adding serialization dependencies; planned verifier commands
+  remain non-evidence until actual command results are attached. No kernel or
+  nano changes; no new dependencies.
+- **Changed-path verifier hints.** Extended `RepoSignals` with sanitized
+  targeted verifier hints derived from repo-marker paths plus changed-file
+  paths. Rust crate, Python test, and JavaScript/TypeScript test hints run
+  before full-suite gates, while unsafe path fragments are rejected and cannot
+  become command text. No kernel or nano changes; no new dependencies.
+- **Bounded repo profiler adapter.** Added
+  `crustcore_daemon::repo_profiler::RepoPathSnapshot`, a deterministic
+  filesystem path observer that records marker paths only, skips symlinks and
+  generated directories, caps depth/path count, and feeds `RepoSignals` /
+  `VerifierPlan` without reading repo contents or granting authority. No kernel
+  or nano changes; no new dependencies.
+
+### Agent Log
+
+| Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-27 | WCA-0/WCA-2 | Product-stack docs + daemon product contracts for `crustcore.yml`, lifecycle states, executor metadata, and evidence bundles | `codex/world-class-agent-foundation` | Codex (Architect/Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 14, 19, 20; no authority path added |
+| 2026-06-27 | WCA-1 | Deterministic GitHub issue-to-draft-PR golden over untrusted issue data, `VerifiedPatch`, approved draft PR intent, canned REST create, and bounded CI repair | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (eval/sidecar only) | Preserves 1, 6, 7, 8, 9, 13, 14; no live token or unverified PR path |
+| 2026-06-27 | WCA-2 | Verifier planner for repo/task signals, staged check ordering, task gates, and weak-evidence warnings | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 19, 20; no authority path added |
+| 2026-06-27 | WCA-2 | Path-based repo signal and changed-file task classifier feeding verifier planning without filesystem IO | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 19, 20; no authority path added |
+| 2026-06-27 | WCA-2 | Bounded evidence bundle JSON/JSONL export and verifier-plan initialization for PR/cockpit/audit surfaces | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 19, 20; no authority path added |
+| 2026-06-27 | WCA-2 | Sanitized changed-path targeted verifier hints before full-suite gates | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 19, 20; untrusted paths are token-checked before command text |
+| 2026-06-27 | WCA-2 | Bounded repo path profiler adapter feeding verifier planning without reading contents | `codex/world-class-agent-foundation` | Codex (Implementer) | n/a (daemon/docs only) | Preserves 6, 7, 8, 13, 19, 20; filesystem observations are untrusted data |
 
 ## [0.5.0] - 2026-06-26
 

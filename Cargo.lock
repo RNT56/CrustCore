@@ -303,6 +303,7 @@ dependencies = [
  "crustcore-index",
  "crustcore-kernel",
  "crustcore-mcp",
+ "crustcore-net",
  "crustcore-path",
  "crustcore-policy",
  "crustcore-receipts",
