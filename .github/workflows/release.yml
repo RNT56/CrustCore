@@ -1,0 +1,118 @@
+# Release — build prebuilt, checksummed binaries on a version tag and assemble a DRAFT
+# GitHub release. The maintainer reviews the draft, signs `SHA256SUMS` out-of-band
+# (minisign/cosign — see docs/releasing.md), and *publishes manually*. The signing keys and
+# the publish step are never in CI (CLAUDE.md §6.3): this workflow only builds + checksums +
+# drafts. It ships three artifacts per platform — the tiny trusted verifier, the model
+# helper, and the single-binary all-in-one for casual users.
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"] # semver tags only, e.g. v0.5.0
+  workflow_dispatch: {} # manual dry-run: builds + uploads artifacts, drafts NO release
+
+permissions:
+  contents: write # create the draft release + upload its assets (no other scope)
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-linux } # the flagship size target
+          - { os: macos-latest, target: aarch64-macos }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          T="${{ matrix.target }}"
+          mkdir -p dist
+          # 1. crustcore — the tiny TRUSTED verifier (nano profile; already stripped). On the
+          #    flagship Linux target, build it via `cargo xtask release` so the reproducible
+          #    build + audit manifest (docs/releasing.md §1) are produced; ship the manifest.
+          if [ "$T" = "x86_64-linux" ]; then
+            cargo xtask release
+            install -m 0644 target/nano/release-manifest.txt "dist/release-manifest-$T.txt"
+          else
+            cargo build --profile nano -p crustcore --no-default-features --features nano
+          fi
+          install -m 0755 target/nano/crustcore "dist/crustcore-$T"
+          # 2. crustcore-net — the spawned model-transport helper (live).
+          cargo build --release -p crustcore-net --features live
+          install -m 0755 target/release/crustcore-net "dist/crustcore-net-$T"
+          # 3. crustcore-full — the single-binary, casual-user all-in-one.
+          cargo build --release -p crustcore-full --features all
+          install -m 0755 target/release/crustcore-full "dist/crustcore-full-$T"
+          # The nano profile strips; strip the two release binaries too (best-effort).
+          strip "dist/crustcore-net-$T" "dist/crustcore-full-$T" 2>/dev/null || true
+          echo "--- artifact sizes ($T) ---"
+          ls -lh dist
+
+      - name: Checksums (per target)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          if command -v sha256sum >/dev/null; then
+            sha256sum crustcore-* > "SHA256SUMS-${{ matrix.target }}.txt"
+          else
+            shasum -a 256 crustcore-* > "SHA256SUMS-${{ matrix.target }}.txt"
+          fi
+          cat "SHA256SUMS-${{ matrix.target }}.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  draft-release:
+    name: assemble DRAFT release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/') # only on a tag, never on a manual dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4 # for the release-notes file
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Combined SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          cat SHA256SUMS-*.txt > SHA256SUMS
+          rm -f SHA256SUMS-*.txt # keep only the combined sums as a release asset
+          echo "--- SHA256SUMS ---"
+          cat SHA256SUMS
+
+      - name: Create / refresh the DRAFT release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          notes="docs/release-notes-${tag}.md"
+          notes_flag="--generate-notes"
+          [ -f "$notes" ] && notes_flag="--notes-file $notes"
+          # Idempotent: re-running on the same tag refreshes the draft's assets.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            # shellcheck disable=SC2086
+            gh release create "$tag" --draft --title "$tag" $notes_flag dist/*
+          fi
+          echo "::notice::DRAFT release $tag assembled (3 binaries × 2 platforms + SHA256SUMS). Review it, sign dist/SHA256SUMS out-of-band (minisign/cosign — docs/releasing.md), then PUBLISH manually."

@@ -77,11 +77,17 @@ The deterministic-build pieces (`--remap-path-prefix` + `SOURCE_DATE_EPOCH` + a 
 toolchain) are now implemented and **same-machine verified** — see §9; the checksum +
 manifest + lockfile remain the audit floor.
 
-> The **GitHub Actions release workflow** that runs `cargo xtask release` and uploads
-> signed artifacts is an *irreversible, CI-credentialed* change (`CLAUDE.md` §6.3) and
-> is added by a maintainer through a serialized, approved PR — not by the build agent.
-> When added, it must reuse the same `cargo xtask release` + out-of-band signing flow
-> described here.
+> The **GitHub Actions release workflow** ([`.github/workflows/release.yml`](../.github/workflows/release.yml))
+> is an *irreversible, CI-credentialed* change (`CLAUDE.md` §6.3), so it is added by a
+> maintainer through a serialized, approved PR — not self-merged by the build agent. On a
+> `vX.Y.Z` tag it builds the three user-facing artifacts on **Linux x86_64 + macOS arm64** —
+> `crustcore` (the trusted verifier; on Linux via `cargo xtask release`, so the reproducible
+> build + `release-manifest.txt` are produced), `crustcore-net` (the model helper), and
+> `crustcore-full` (the single-binary all-in-one) — emits a combined `SHA256SUMS`, and
+> assembles a **draft** GitHub release. It **never signs or publishes**: the maintainer
+> reviews the draft, signs `SHA256SUMS` out-of-band (the flow below), and publishes manually.
+> No signing key or publish credential ever touches CI. A `workflow_dispatch` run is a
+> build-only dry-run (artifacts, no release).
 
 ---
 
