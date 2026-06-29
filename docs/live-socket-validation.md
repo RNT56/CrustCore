@@ -63,6 +63,8 @@ cargo test --workspace -- --list --ignored
 | `live_draft_pr_post_smoke` | B/F | `live` | [B.4](#b4) | eval→contract gate→`draft_pr_request` ✓ | hard (patch+approval+token) |
 | `cred_proxy_live_push_smoke` | B | — | [B.5](#b5) | argv-parse + validate_push + cred-request authorize ✓ | hard (token+repo+worktree) |
 | `draft_pr_live_post_smoke` | B | `live` | [B.6](#b6) | `pr_intent_to_create_request` mapping + non-2xx typed errors ✓ | medium (token+repo) |
+| `live_issue_to_pr_smoke` | B | — | [B.9](#b9) | `golden_issue_to_pr_flow` decision path ✓ | hard (App+sandbox+repo) |
+| `ci_monitor_live_poll_smoke` | B | — | [B.8](#b8) | `aggregate_check_runs`/`monitor_decision`/`repair_task_goal` ✓ | medium (PR with checks) |
 | `live_evidence_render_append_smoke` | B | — | [B.7](#b7) | `to_markdown`/`to_json` bounded evidence render ✓ | medium (draft PR + token) |
 | `live_worktree_executor_accepts_only_verifier_evidence` | C | `live` | [C.1](#c1) | scheduler/budget/verifier-owned accept ✓ | medium (sandbox+git) |
 | `run_one_task_completes_only_on_verifier_evidence` | C | `live` | [C.2](#c2) | task lifecycle decision core ✓ | medium (sandbox+git) |
@@ -82,6 +84,7 @@ cargo test --workspace -- --list --ignored
 | `live_telegram_round_trip_smoke` | F | `live` | [F.2](#f2) | runtime-channel decision logic ✓ | easy (bot token) |
 | `live_ws_sse_emits_a_snapshot` | F | — | [F.3](#f3) | snapshot serialize + `ws_stream` ✓ | easy (loopback port) |
 | `multi_repo_live_smoke` | F | — | [F.5](#f5) | `classify_repo` routing core ✓ | medium (multiple repos) |
+| `daemon_admin_live_socket_smoke` | F | — | [F.4](#f4) | admin parse/frame/auth/dispatch cores ✓ | medium (bound socket) |
 
 ---
 
@@ -226,6 +229,35 @@ cargo test --workspace -- --list --ignored
   required" notice and no secrets/self-claims; an existing head → 422 surfaces, never
   a fake success. **Difficulty: medium.**
 
+<a id="b9"></a>
+### B.9 — `live_issue_to_pr_smoke` — end-to-end issue → draft PR (A.5)
+- **Test:** `crustcore-eval/tests/golden.rs::live_issue_to_pr_smoke`. Seam tag `TODO(issue-to-pr-live)`.
+- **Socket:** the full PR-Supervisor wedge against real infra — App + sandbox backend + repo.
+- **CI core (passing):** `golden_issue_to_pr_flow` exercises the whole **decision path**
+  socket-free: untrusted issue ingestion → sandboxed worker → verifier-minted
+  `VerifiedPatch` → approval-gated draft `PrIntent` → canned REST create → bounded CI
+  repair. This is the irreducible live composition of A.1–A.4 + D.1.
+- **Prereq:** a registered GitHub App + a sandbox backend (`bubblewrap`/`sandbox-exec`)
+  + a throwaway test repo.
+- **Run:** `cargo test -p crustcore-eval --test golden live_issue_to_pr_smoke -- --ignored --nocapture`
+- **Success:** an issue becomes a routed, sandbox-verified change pushed over the
+  credential proxy and opened as an evidence-backed **draft** PR, with CI repair within
+  budget — completion only on verifier evidence (invariant 13); body is evidence, not a
+  model claim (invariant 6). **Difficulty: hard.**
+<a id="b8"></a>
+### B.8 — `ci_monitor_live_poll_smoke` — CI monitor → bounded repair (A.4)
+- **Test:** `crustcore-daemon/src/github.rs::tests::ci_monitor_live_poll_smoke`. Seam tag `TODO(ci-monitor-live)`.
+- **Socket:** the real check-runs polling loop (`RestGitHub::check_state`) with backoff.
+- **CI core (passing):** `aggregate_check_runs` (failure-dominates, empty/any-pending →
+  Pending), `monitor_decision` (Pending→Wait / Passed→Green / Failed→budget-bounded
+  `repair_decision`), and `repair_task_goal` (bounded, untrusted-check-name failure
+  context). The decision uses *aggregated state*, never untrusted CI log text (invariant
+  7); repair is bounded by the budget (invariant 11); CrustCore decides repair, not a
+  model/comment (invariant 4).
+- **Prereq:** a real PR with check-runs + a GitHub token.
+- **Run:** `cargo test -p crustcore-daemon github::tests::ci_monitor_live_poll_smoke -- --ignored --nocapture`
+- **Success:** failing checks under budget → a repair task spawns; at the cap →
+  `StopExhausted`; no unbounded looping. **Difficulty: medium.**
 <a id="b7"></a>
 ### B.7 — `live_evidence_render_append_smoke` — evidence body append (C.3)
 - **Test:** `crustcore-daemon/src/product.rs::tests::live_evidence_render_append_smoke`. Seam tag `TODO(P3-live-evidence-render)`.
@@ -431,6 +463,19 @@ cargo test --workspace -- --list --ignored
 - **Run:** `cargo test -p crustcore-daemon multirepo::tests::multi_repo_live_smoke -- --ignored --nocapture`
 - **Success:** a launch routes to the right repo profile; two repos run tasks
   simultaneously under the shared global concurrency cap. **Difficulty: medium.**
+<a id="f4"></a>
+### F.4 — `daemon_admin_live_socket_smoke` — admin socket (F.2)
+- **Test:** `crustcore-daemon/src/admin.rs::tests::daemon_admin_live_socket_smoke`. Seam tag `TODO(daemon-admin-live)`.
+- **Socket:** the real admin `UnixListener` (mode 0600) / TCP-loopback fallback + a
+  length-prefixed framed query/cancel round-trip.
+- **CI core (passing):** `parse_admin_command`, `frame`/`try_deframe` (bounded, hostile
+  length rejected), `authenticate` (constant-length nonce compare), and `dispatch_admin`
+  (owner-scoped cancel/kill — the same gate as Telegram, invariant 12; status snapshot).
+- **Prereq:** a bound socket + the startup nonce file (`~/.crustcore/admin.nonce`, 0600).
+- **Run:** `cargo test -p crustcore-daemon admin::tests::daemon_admin_live_socket_smoke -- --ignored --nocapture`
+- **Success:** an authenticated client gets the status snapshot and can cancel an owned
+  task; a wrong nonce is dropped; operator-only, never model-facing (invariant 5).
+  **Difficulty: medium.**
 
 ---
 

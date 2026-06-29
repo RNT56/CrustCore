@@ -1047,6 +1047,46 @@ mod live {
     }
 }
 
+/// Maps a parsed GitHub `/crustcore` command (E.2) onto a [`LoopAction`] — the **same**
+/// actions Telegram produces (invariants 8, 16), so a GitHub command routes through the
+/// identical dispatch + policy gates, **not a parallel ungoverned surface**. The command
+/// was parsed by the daemon from an untrusted comment (never model output — invariant 4);
+/// the goal/dir are bounded literals (invariant 7).
+///
+/// `route` is the execution route the caller classified the goal into (`Run`/`Retry`).
+/// `Cancel` becomes an owner-scoped [`LoopAction::CancelTask`] (the runtime re-checks the
+/// task owner against the registry, exactly as for Telegram `/cancel` — invariant 12).
+/// `Explain` / `RiskDetected` produce no action (the caller answers with status / a
+/// surfaced warning).
+#[must_use]
+pub fn github_command_to_action(
+    cmd: &crate::github_commands::GithubCommand,
+    chat: ChatId,
+    route: ChatRoute,
+) -> Option<LoopAction> {
+    use crate::github_commands::GithubCommand;
+    match cmd {
+        GithubCommand::Run { goal, dir } => Some(LoopAction::LaunchTask {
+            route,
+            prompt: match dir {
+                Some(d) => format!("{goal} (in {d})"),
+                None => goal.clone(),
+            },
+            chat,
+        }),
+        GithubCommand::Retry { id } => Some(LoopAction::LaunchTask {
+            route,
+            prompt: format!("retry task {id}"),
+            chat,
+        }),
+        GithubCommand::Cancel { id } => Some(LoopAction::CancelTask {
+            chat,
+            id: TaskId(*id),
+        }),
+        GithubCommand::Explain { .. } | GithubCommand::RiskDetected(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1057,6 +1097,59 @@ mod tests {
 
     use crate::telegram::{CallbackData, ChatAllowlist, ChatId};
     use crustcore_types::ApprovalResolution;
+
+    // ----- E.2: GitHub command -> LoopAction wiring -----
+
+    #[test]
+    fn github_run_maps_to_a_launch_task_with_the_goal() {
+        use crate::github_commands::GithubCommand;
+        let act = github_command_to_action(
+            &GithubCommand::Run {
+                goal: "fix the bug".to_string(),
+                dir: Some("crates/foo".to_string()),
+            },
+            ChatId(7),
+            ChatRoute::Feature,
+        );
+        assert_eq!(
+            act,
+            Some(LoopAction::LaunchTask {
+                route: ChatRoute::Feature,
+                prompt: "fix the bug (in crates/foo)".to_string(),
+                chat: ChatId(7),
+            })
+        );
+    }
+
+    #[test]
+    fn github_cancel_is_owner_scoped_and_explain_or_risk_are_no_ops() {
+        use crate::github_commands::GithubCommand;
+        // Cancel routes to the SAME owner-scoped CancelTask as Telegram /cancel.
+        assert_eq!(
+            github_command_to_action(
+                &GithubCommand::Cancel { id: 5 },
+                ChatId(7),
+                ChatRoute::Feature
+            ),
+            Some(LoopAction::CancelTask {
+                chat: ChatId(7),
+                id: TaskId(5),
+            })
+        );
+        // Explain + a RiskDetected (malformed) command never produce an action.
+        assert!(github_command_to_action(
+            &GithubCommand::Explain { id: 1 },
+            ChatId(7),
+            ChatRoute::Feature
+        )
+        .is_none());
+        assert!(github_command_to_action(
+            &GithubCommand::RiskDetected("bad".to_string()),
+            ChatId(7),
+            ChatRoute::Feature
+        )
+        .is_none());
+    }
 
     fn bt(s: &str) -> BoundedText {
         BoundedText::truncated(s, MAX_TEXT_BYTES)
