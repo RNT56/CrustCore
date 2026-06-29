@@ -43,6 +43,18 @@ agent/PR/role/size/invariant audit trail.
   the `#[ignore]`d `ci_monitor_live_poll_smoke` (`TODO(ci-monitor-live)`), catalogued in
   runbook §B.8. 4 new tests; daemon-only; **zero nano impact**.
 
+- **Scored verified candidates (roadmap-v0.6 B.2).** Added `crustcore_daemon::score`:
+  `score_candidate(PatchMetadata, RiskTier) → PatchScore` and `pick_best` select the
+  **best verifier-accepted** fan-out candidate instead of merely the first accepted.
+  Correctness dominates by construction — the `VERIFIED_BONUS` (100) exceeds the sum of
+  every other term (diff penalty ≤50, gates ≤20, security ≤8), so a verified candidate
+  *always* outranks an unverified one: **scoring reorders accepted candidates but can
+  never promote an unverified patch** (invariants 6, 13). Among verified candidates a
+  smaller diff and more gates passed rank higher, with a small security-review boost;
+  ties keep the first proposer (deterministic). Pure + total — missing metadata defaults
+  to zero and never fails (the live executor fills it from the real `VerifiedPatch`, the
+  existing P11-exec-live seam). 7 new tests incl. the golden fail/pass-large/pass-small
+  ranking; daemon-only; **zero nano impact**.
 - **Evidence bundle rendering (roadmap-v0.6 C.3).** Added
   `EvidenceBundle::to_markdown()` and `to_json()` to `crustcore_daemon::product`.
   `to_markdown` is the **bounded** canonical PR-body/cockpit renderer: it opens with
@@ -263,6 +275,7 @@ agent/PR/role/size/invariant audit trail.
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
 | 2026-06-28 | v0.6/A.4 | CI monitor: `aggregate_check_runs` (failure-dominates) + `monitor_decision` (Wait/Green/SpawnRepair/StopExhausted over the budget) + bounded `repair_task_goal`; live poll `#[ignore]`d | `claude/v06-a4-cimonitor` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 7, 11; repair bounded, decided by CrustCore from aggregated state |
+| 2026-06-28 | v0.6/B.2 | `score_candidate`/`pick_best` scored fan-out selection; correctness dominates so verified always > unverified (scoring never bypasses the verifier); smaller-diff/more-gates rank higher, ties→first | `claude/v06-b2-scoring` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 6, 11, 13; scoring is a tie-break among accepted, never a bypass |
 | 2026-06-28 | v0.6/C.3 | `EvidenceBundle::to_markdown` (bounded PR-body/cockpit render, 🔴 review notice, per-list overflow) + `to_json` (schema v1); `draft_pr_body` delegates | `claude/v06-c3-evidence` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 2, 10, 11; bounded redacted evidence, every receipt included |
 | 2026-06-28 | v0.6/D.1 | Task-loop wiring `plan_task`/`finalize_task` composing routing (C.1) + advisory gate (C.2) into a terminal `TaskOutcome`; sandboxed run `#[ignore]`d | `claude/v06-d1-executor-wire` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 5, 6, 13; verifier-owned completion, advisory only gates |
 | 2026-06-28 | v0.6/A.3 | `pr_intent_to_create_request`: PrIntent→CreatePrRequest for the live draft-PR POST; evidence body verbatim, draft=true; real POST `#[ignore]`d | `claude/v06-a3-draftpr` | Claude (Implementer) | 0 kB (daemon/live-only) | Enforces 6, 13, 14; body is evidence not a model claim |
