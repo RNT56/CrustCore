@@ -98,6 +98,38 @@ impl<'r> TokenRedactor<'r> {
     }
 }
 
+/// Drives a [`TokenRedactor`] over a provider token stream end-to-end: pulls each token
+/// from `tokens` (the deframed provider chunks — an SSE `data:` delta, a websocket frame,
+/// or a test vector) and hands every redacted chunk to `emit` in arrival order, flushing
+/// the buffered tail at end-of-stream.
+///
+/// This is the **real streaming pipeline** the live loop runs; it is transport-agnostic,
+/// so the *only* remaining live inch is the SSE/websocket socket that produces `tokens`,
+/// which lives in the daemon/net layer (this crate stays std-only). The redaction itself
+/// is fully CI-tested here.
+///
+/// Trust boundary: streamed tokens are model output — untrusted (invariant 7) — so every
+/// chunk passes through the redactor before `emit` (invariants 1–3). This driver never
+/// *decides* to stream (the caller opens a stream only when `reveal_reasoning` is set —
+/// `docs/cot-streaming.md`); it only redacts what it is handed. A secret split across any
+/// number of tokens is still caught: [`TokenRedactor`] buffers to a safe boundary and
+/// only ever emits a leak-free prefix.
+pub fn redact_stream<I, E>(redactor: &Redactor, max_buffer: usize, tokens: I, mut emit: E)
+where
+    I: IntoIterator<Item = String>,
+    E: FnMut(String),
+{
+    let mut tr = TokenRedactor::new(redactor, max_buffer);
+    for token in tokens {
+        if let Some(chunk) = tr.accept_token(&token) {
+            emit(chunk);
+        }
+    }
+    if let Some(chunk) = tr.flush() {
+        emit(chunk);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +162,32 @@ mod tests {
         let out = stream(&mut tr, &["thinking ghp_", "SECRET", "TOKEN done\n"]);
         assert!(!out.contains("ghp_SECRETTOKEN"), "secret leaked: {out}");
         assert!(out.contains("thinking"));
+    }
+
+    #[test]
+    fn redact_stream_driver_redacts_a_split_secret_end_to_end() {
+        // The public driver IS the streaming pipeline: feed the deframed provider tokens,
+        // collect everything `emit` yields, assert the split secret never reaches the sink.
+        let r = redactor_with(b"ghp_SECRETTOKEN");
+        let tokens = vec![
+            "reasoning: ghp_".to_string(),
+            "SECRET".to_string(),
+            "TOKEN looks right\n".to_string(),
+            "continuing\n".to_string(),
+        ];
+        let mut sink = String::new();
+        redact_stream(&r, 4096, tokens, |chunk| sink.push_str(&chunk));
+        assert!(!sink.contains("ghp_SECRETTOKEN"), "secret leaked: {sink}");
+        assert!(sink.contains("reasoning:"));
+        assert!(sink.contains("continuing"));
+    }
+
+    #[test]
+    fn redact_stream_over_an_empty_stream_emits_nothing() {
+        let r = redactor_with(b"ghp_SECRETTOKEN");
+        let mut emitted = 0usize;
+        redact_stream(&r, 4096, Vec::<String>::new(), |_| emitted += 1);
+        assert_eq!(emitted, 0);
     }
 
     #[test]
