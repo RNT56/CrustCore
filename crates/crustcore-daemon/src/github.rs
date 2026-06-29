@@ -626,6 +626,102 @@ pub fn repair_decision(
 }
 
 // ---------------------------------------------------------------------------
+// CI monitor → bounded repair loop (roadmap-v0.6 A.4)
+// ---------------------------------------------------------------------------
+
+/// Max failed-check names folded into a repair task's failure context (bounded —
+/// invariant 11; a hostile/huge check list cannot blow up the goal text).
+pub const MAX_REPAIR_CONTEXT_CHECKS: usize = 16;
+
+/// Aggregates per-check states into one overall `CheckState` for the ref. **Failed
+/// dominates** (any failed → Failed); else any pending (or *no checks at all*, since
+/// nothing has concluded) → Pending; otherwise Passed. Reuses the net layer's
+/// [`CheckState`](crustcore_net::github::CheckState) so the daemon and the REST client
+/// speak one vocabulary.
+#[must_use]
+pub fn aggregate_check_runs(
+    runs: &[crustcore_net::github::CheckState],
+) -> crustcore_net::github::CheckState {
+    use crustcore_net::github::CheckState;
+    if runs.iter().any(|s| matches!(s, CheckState::Failed)) {
+        CheckState::Failed
+    } else if runs.is_empty() || runs.iter().any(|s| matches!(s, CheckState::Pending)) {
+        CheckState::Pending
+    } else {
+        CheckState::Passed
+    }
+}
+
+/// What the CI monitor should do this poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonitorDecision {
+    /// Checks are still running — keep polling (with backoff).
+    Wait,
+    /// All checks passed — surface for human merge approval.
+    Green,
+    /// A check failed and the budget allows it — spawn a bounded repair task.
+    SpawnRepair,
+    /// A check failed and the retry budget is exhausted — stop and surface.
+    StopExhausted,
+}
+
+/// Routes an aggregated [`CheckState`](crustcore_net::github::CheckState) through the
+/// bounded repair policy. Pending → [`MonitorDecision::Wait`]; Passed →
+/// [`MonitorDecision::Green`]; Failed → the existing [`repair_decision`] (budget-bounded,
+/// invariant 11). **CrustCore decides repair, not a model or a PR comment** (invariant
+/// 4), and the decision uses the *aggregated state*, never untrusted CI log text
+/// (invariant 7).
+#[must_use]
+pub fn monitor_decision(
+    state: crustcore_net::github::CheckState,
+    attempts_so_far: u32,
+    budget: RepairBudget,
+) -> MonitorDecision {
+    use crustcore_net::github::CheckState;
+    match state {
+        CheckState::Pending => MonitorDecision::Wait,
+        CheckState::Passed => MonitorDecision::Green,
+        CheckState::Failed => {
+            match repair_decision(CheckOutcome::Failed, attempts_so_far, budget) {
+                RepairDecision::SpawnRepair => MonitorDecision::SpawnRepair,
+                RepairDecision::StopExhausted => MonitorDecision::StopExhausted,
+                // repair_decision never returns Green for Failed; stay total.
+                RepairDecision::Green => MonitorDecision::Green,
+            }
+        }
+    }
+}
+
+/// Builds a bounded failure-context line for a repair sub-task from the **untrusted**
+/// failed-check names (invariant 7 — names are data, not commands). The list is capped
+/// to [`MAX_REPAIR_CONTEXT_CHECKS`] and each name bounded, so a hostile check set cannot
+/// inflate the goal. The repair task itself still runs its own verifier + approval gate.
+#[must_use]
+pub fn repair_task_goal(failed_checks: &[&str]) -> String {
+    if failed_checks.is_empty() {
+        return "Repair the failing CI checks on this branch.".to_string();
+    }
+    let names: Vec<String> = failed_checks
+        .iter()
+        .take(MAX_REPAIR_CONTEXT_CHECKS)
+        .map(|n| BoundedText::truncated(*n, 120).as_str().to_string())
+        .collect();
+    let more = failed_checks
+        .len()
+        .saturating_sub(MAX_REPAIR_CONTEXT_CHECKS);
+    let suffix = if more > 0 {
+        format!(" (+{more} more)")
+    } else {
+        String::new()
+    };
+    format!(
+        "Repair the failing CI checks: {}{}.",
+        names.join(", "),
+        suffix
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Untrusted PR/issue comment + CI-log ingestion (P10.8)
 // ---------------------------------------------------------------------------
 
@@ -1115,6 +1211,70 @@ mod tests {
         // Requires a VerifiedPatch -> open_pr -> Approved<GitHubWriteCap> + a GitHub
         // token + a test repo. See docs/live-socket-validation.md §B.6.
         panic!("live seam: run manually with a real token + test repo (see runbook §B.6)");
+    }
+
+    // --- CI monitor → repair loop (A.4) ---
+
+    #[test]
+    fn aggregate_check_runs_lets_failure_dominate() {
+        use crustcore_net::github::CheckState;
+        // Empty / any-pending → Pending; any-failed → Failed; all-passed → Passed.
+        assert_eq!(aggregate_check_runs(&[]), CheckState::Pending);
+        assert_eq!(
+            aggregate_check_runs(&[CheckState::Passed, CheckState::Pending]),
+            CheckState::Pending
+        );
+        assert_eq!(
+            aggregate_check_runs(&[CheckState::Passed, CheckState::Failed, CheckState::Pending]),
+            CheckState::Failed
+        );
+        assert_eq!(
+            aggregate_check_runs(&[CheckState::Passed, CheckState::Passed]),
+            CheckState::Passed
+        );
+    }
+
+    #[test]
+    fn monitor_decision_routes_pending_passed_and_failed() {
+        use crustcore_net::github::CheckState;
+        let budget = RepairBudget { max_attempts: 2 };
+        assert_eq!(
+            monitor_decision(CheckState::Pending, 0, budget),
+            MonitorDecision::Wait
+        );
+        assert_eq!(
+            monitor_decision(CheckState::Passed, 0, budget),
+            MonitorDecision::Green
+        );
+        // Failed under budget → repair; at the cap → stop (invariant 11).
+        assert_eq!(
+            monitor_decision(CheckState::Failed, 0, budget),
+            MonitorDecision::SpawnRepair
+        );
+        assert_eq!(
+            monitor_decision(CheckState::Failed, 2, budget),
+            MonitorDecision::StopExhausted
+        );
+    }
+
+    #[test]
+    fn repair_task_goal_injects_bounded_failure_context() {
+        assert!(repair_task_goal(&[]).contains("failing CI checks"));
+        let goal = repair_task_goal(&["clippy", "test (ubuntu)"]);
+        assert!(goal.contains("clippy"));
+        assert!(goal.contains("test (ubuntu)"));
+        // Bounded: a huge list is capped with a "+N more" note.
+        let many: Vec<&str> = (0..40).map(|_| "check").collect();
+        let big = repair_task_goal(&many);
+        assert!(big.contains("more"), "should cap + note overflow: {big}");
+    }
+
+    // Live seam: the real check-runs polling loop with backoff.
+    #[test]
+    #[ignore = "live: poll RestGitHub::check_state for a real PR with backoff (TODO(ci-monitor-live))"]
+    fn ci_monitor_live_poll_smoke() {
+        // See docs/live-socket-validation.md §B.8. Requires a real PR with checks.
+        panic!("live seam: run manually against a real PR (see runbook §B.8)");
     }
 
     // --- merge gate (§3.1) ---

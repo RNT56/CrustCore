@@ -64,6 +64,7 @@ cargo test --workspace -- --list --ignored
 | `cred_proxy_live_push_smoke` | B | — | [B.5](#b5) | argv-parse + validate_push + cred-request authorize ✓ | hard (token+repo+worktree) |
 | `draft_pr_live_post_smoke` | B | `live` | [B.6](#b6) | `pr_intent_to_create_request` mapping + non-2xx typed errors ✓ | medium (token+repo) |
 | `live_issue_to_pr_smoke` | B | — | [B.9](#b9) | `golden_issue_to_pr_flow` decision path ✓ | hard (App+sandbox+repo) |
+| `ci_monitor_live_poll_smoke` | B | — | [B.8](#b8) | `aggregate_check_runs`/`monitor_decision`/`repair_task_goal` ✓ | medium (PR with checks) |
 | `live_evidence_render_append_smoke` | B | — | [B.7](#b7) | `to_markdown`/`to_json` bounded evidence render ✓ | medium (draft PR + token) |
 | `live_worktree_executor_accepts_only_verifier_evidence` | C | `live` | [C.1](#c1) | scheduler/budget/verifier-owned accept ✓ | medium (sandbox+git) |
 | `run_one_task_completes_only_on_verifier_evidence` | C | `live` | [C.2](#c2) | task lifecycle decision core ✓ | medium (sandbox+git) |
@@ -241,6 +242,20 @@ cargo test --workspace -- --list --ignored
   credential proxy and opened as an evidence-backed **draft** PR, with CI repair within
   budget — completion only on verifier evidence (invariant 13); body is evidence, not a
   model claim (invariant 6). **Difficulty: hard.**
+<a id="b8"></a>
+### B.8 — `ci_monitor_live_poll_smoke` — CI monitor → bounded repair (A.4)
+- **Test:** `crustcore-daemon/src/github.rs::tests::ci_monitor_live_poll_smoke`. Seam tag `TODO(ci-monitor-live)`.
+- **Socket:** the real check-runs polling loop (`RestGitHub::check_state`) with backoff.
+- **CI core (passing):** `aggregate_check_runs` (failure-dominates, empty/any-pending →
+  Pending), `monitor_decision` (Pending→Wait / Passed→Green / Failed→budget-bounded
+  `repair_decision`), and `repair_task_goal` (bounded, untrusted-check-name failure
+  context). The decision uses *aggregated state*, never untrusted CI log text (invariant
+  7); repair is bounded by the budget (invariant 11); CrustCore decides repair, not a
+  model/comment (invariant 4).
+- **Prereq:** a real PR with check-runs + a GitHub token.
+- **Run:** `cargo test -p crustcore-daemon github::tests::ci_monitor_live_poll_smoke -- --ignored --nocapture`
+- **Success:** failing checks under budget → a repair task spawns; at the cap →
+  `StopExhausted`; no unbounded looping. **Difficulty: medium.**
 <a id="b7"></a>
 ### B.7 — `live_evidence_render_append_smoke` — evidence body append (C.3)
 - **Test:** `crustcore-daemon/src/product.rs::tests::live_evidence_render_append_smoke`. Seam tag `TODO(P3-live-evidence-render)`.
