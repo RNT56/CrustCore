@@ -30,6 +30,24 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Cross-process task lease recovery (roadmap-v0.6 F.1).** Added
+  `TaskRegistry::snapshot_all` + `adopt_from_snapshot` (with `TaskSnapshot` / `AdoptError`)
+  — the recovery half of invariant 12. A restarting daemon re-adopts its running tasks
+  with **stable ids**, re-leasing under the new `LeaseOwner` and marking each **`Pending`**
+  so a fresh worker resumes from the log (an `mpsc` channel can't survive a restart).
+  Carried `usage` is preserved so budgets **re-charge, not reset** (invariant 11); an
+  already-over-budget task is adopted **terminal** (`Done(BudgetExhausted)`); an absent
+  worktree → `WorktreeGone`; a duplicate id → `Duplicate`. A re-adopted task still
+  completes only on a `VerifiedPatch` (invariant 13 — adoption restores supervision, never
+  completion). **Persistence is real:** `encode_snapshots`/`decode_snapshots` (a dependency-free,
+  versioned, bounded `CCTS` frame — panic-free, fail-closed), `TaskRegistry::dump_snapshots`,
+  and `load_snapshots` actually write + reload the dump (CI-tested incl. a dump→load→re-adopt
+  simulated restart). Only the SIGTERM hook + a real OS process restart remain the `#[ignore]`d
+  `daemon_recover_xproc_live_smoke`
+  (`TODO(daemon-recover-xproc-live)`), in runbook §F.6. Also derives `PartialEq`/`Eq` on
+  `AgentBudget`. **This completes Phase F (daemon hardening).** 4 new tests; daemon-only;
+  **zero nano impact**.
+
 - **Multi-repo orchestration skeleton (roadmap-v0.6 F.3).** Added
   `crustcore_daemon::multirepo`: `RepoId`, `RepoBinding` (id/path/verify/base/keywords,
   from config/CLI), and a pure `classify_repo(intent, repos) → Option<RepoId>` that routes
@@ -342,6 +360,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/F.1 | `snapshot_all`/`adopt_from_snapshot` cross-process recovery: stable ids, re-leased under new owner, Pending-resume-from-log, carried-usage re-charge, over-budget→terminal. Completes Phase F | `claude/v06-f1-recovery` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 11, 12, 13; recovery restores supervision, never completion |
 | 2026-06-28 | v0.6/F.3 | `multirepo::classify_repo` (explicit-hint → sole-repo default → ambiguous asks) + `RepoBinding`; intent matches operator keywords only, never supplies a path | `claude/v06-f3-multirepo` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 7, 11; repo paths from config/CLI, shared global cap |
 | 2026-06-28 | v0.6/F.2 | Admin socket protocol: parse/frame(bounded)/nonce-auth + `dispatch_admin` (status/detail/cancel/kill) feeding the same owner-scoped path as Telegram; live listener `#[ignore]`d | `claude/v06-f2-adminsock` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 5, 11, 12; operator-only, owner-scoped cancel/kill |
 | 2026-06-28 | v0.6/E.4 | `TokenRedactor` streaming-redaction prototype (buffer-to-boundary + dangling-prefix retention) + `docs/cot-streaming.md` feasibility (feasible, behind `reveal_reasoning`) | `claude/v06-e4-cotstream` | Claude (Implementer) | 0 kB (secrets/docs) | Enforces 2, 3, 11; no unredacted secret reaches the user mid-stream |

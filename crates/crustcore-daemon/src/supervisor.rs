@@ -147,7 +147,7 @@ impl AgentRegistry {
 
 /// A subagent's resource budget (invariant 11; `docs/maintainer-agent.md` §4.3).
 /// Runaway fan-out / unbounded work is a threat, so every axis is capped.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgentBudget {
     /// Wall-clock cap in milliseconds.
     pub max_wall_ms: u64,
