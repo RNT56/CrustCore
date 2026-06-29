@@ -82,6 +82,7 @@ fn router<B: DevBackend + Send + 'static>(state: Arc<DevState<B>>) -> Router {
         .route("/flow", get(dispatch::<B>))
         .route("/sessions", get(dispatch::<B>))
         .route("/approvals", get(dispatch::<B>))
+        .route("/cockpit", get(dispatch::<B>))
         .route("/approvals/resolve", post(dispatch::<B>))
         .with_state(state)
 }

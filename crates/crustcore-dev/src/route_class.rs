@@ -81,6 +81,8 @@ pub const ROUTES: &[RouteSpec] = &[
     RouteSpec::read("/flow"),
     RouteSpec::read("/sessions"),
     RouteSpec::read("/approvals"),
+    // The cockpit frame (roadmap-v0.6 E.1): task grid + evidence + approval forms.
+    RouteSpec::read("/cockpit"),
     // The single mutating route: dispatch an approval resolution into the approval
     // engine. Off unless the launch flag enables it AND a valid op-bound token arrives.
     RouteSpec::mutating("/approvals/resolve"),

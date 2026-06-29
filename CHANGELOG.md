@@ -39,8 +39,10 @@ agent/PR/role/size/invariant audit trail.
   approve the exact operation shown (invariant 14 — the binding is checked by the existing
   `dispatch_resolution`). Every list is bounded (`MAX_COCKPIT_TASKS`/`MAX_COCKPIT_APPROVALS`,
   invariant 11); the cockpit **renders evidence but mints nothing** (invariant 13) and is
-  supervisor-only (invariant 5). Pure view core over `MockDevBackend`; the axum bind + `/ws`
-  tick loop + HTML/JS assets remain the existing `C7-serve-live` seam. **This completes
+  supervisor-only (invariant 5). **The serve route is wired**: a read-only `GET /cockpit`
+  route (route table + `handle_read` render via the pure `mutation::route` core, CI-tested
+  over `MockDevBackend` + a POST-rejected red-team check) renders the frame; only the axum
+  bind + `/ws` tick loop remain the existing `C7-serve-live` seam. **This completes
   Phase E and the entire roadmap-v0.6 buildable scope.** 4 new tests; non-nano; **zero nano
   impact**.
 
