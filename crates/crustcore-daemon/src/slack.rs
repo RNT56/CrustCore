@@ -8,14 +8,17 @@
 //! operator binds a workspace/channel via the CLI (not via DM); an empty allowlist denies
 //! everything (invariants 5, 15).
 //!
-//! This module is the **pure core**: the allowlist, the inbound `normalize_message`, and
-//! the redacted outbound render. The live Slack Bot API HTTP client + the Events-API /
-//! Socket-Mode listener are the `live` seam (the Telegram pattern), `#[ignore]`d.
+//! This module is the **pure core**: the [`SlackSignature`] request verifier (the "is
+//! this really from Slack" gate — HMAC-SHA256 over `v0:{ts}:{body}` + a timestamp-freshness
+//! replay defense, mirroring the GitHub webhook hardening), the allowlist, the inbound
+//! `normalize_message`, and the redacted outbound render. The live Slack Bot API HTTP
+//! client + the Events-API / Socket-Mode listener that *delivers* a verified request are
+//! the `live` seam (the Telegram pattern), `#[ignore]`d.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crustcore_secrets::Redactor;
-use crustcore_types::BoundedText;
+use crustcore_types::{hmac_sha256, BoundedText};
 
 use crate::telegram::{CallbackData, Command, RuntimeEvent};
 
@@ -124,6 +127,99 @@ pub fn render_to_slack(text: &str, redactor: &Redactor) -> String {
     redacted.chars().take(MAX_SLACK_OUTBOUND).collect()
 }
 
+/// Max accepted clock skew (seconds) for a Slack request timestamp — Slack's own
+/// recommendation. A request older (or more forward-dated) than this is rejected as a
+/// possible replay even if its signature is valid.
+pub const SLACK_MAX_SKEW_SECS: u64 = 300;
+
+/// Verifies a Slack request's signature **and** timestamp freshness — the "is this really
+/// from Slack" gate that runs *before* [`normalize_message`] ever sees the body.
+///
+/// Slack signs every request as `X-Slack-Signature: v0=HMAC_SHA256(signing_secret,
+/// "v0:{timestamp}:{body}")`, with `X-Slack-Request-Timestamp: {timestamp}`. This mirrors
+/// the GitHub webhook hardening: a forged or stale request **never forms a
+/// [`SlackMessage`]**, so it can never reach the dispatch path (invariants 7, 8, 16). The
+/// compare is constant-time (no timing oracle) and the signing secret is never logged or
+/// returned. Std-only + CI-tested with signed fixtures; the only live inch is the HTTP
+/// listener that *delivers* the request (the `live` Events-API/Socket-Mode seam).
+pub struct SlackSignature {
+    secret: Vec<u8>,
+}
+
+impl SlackSignature {
+    /// Bind the verifier to a workspace's signing secret. The secret is held only to
+    /// compute the HMAC; it is never serialized, logged, or returned.
+    #[must_use]
+    pub fn new(signing_secret: &[u8]) -> Self {
+        SlackSignature {
+            secret: signing_secret.to_vec(),
+        }
+    }
+
+    /// Returns `true` iff `signature` (the `X-Slack-Signature` header, `v0=<hex>`) is a
+    /// valid HMAC over `v0:{timestamp}:{body}` **and** the request is fresh
+    /// (`|now_unix_secs - timestamp| <= `[`SLACK_MAX_SKEW_SECS`]). `timestamp` is the raw
+    /// `X-Slack-Request-Timestamp` header value (used verbatim in the basestring, exactly
+    /// as Slack signs it; parsed separately only for the freshness window). Untrusted
+    /// input — any malformed field returns `false` (fail-closed).
+    #[must_use]
+    pub fn verify(
+        &self,
+        signature: &str,
+        timestamp: &str,
+        body: &[u8],
+        now_unix_secs: u64,
+    ) -> bool {
+        // 1. Freshness: a captured-and-replayed (or forward-dated) request is rejected even
+        //    with a valid signature.
+        let Ok(ts) = timestamp.parse::<u64>() else {
+            return false;
+        };
+        if now_unix_secs.abs_diff(ts) > SLACK_MAX_SKEW_SECS {
+            return false;
+        }
+        // 2. Signature: HMAC over the RAW basestring `v0:{timestamp}:{body}` (timestamp used
+        //    verbatim, matching how Slack signs it).
+        let Some(hex) = signature.strip_prefix("v0=") else {
+            return false;
+        };
+        let Some(provided) = slack_hex32(hex) else {
+            return false;
+        };
+        let mut base = Vec::with_capacity(3 + timestamp.len() + 1 + body.len());
+        base.extend_from_slice(b"v0:");
+        base.extend_from_slice(timestamp.as_bytes());
+        base.push(b':');
+        base.extend_from_slice(body);
+        let expected = hmac_sha256(&self.secret, &base);
+        slack_ct_eq(&provided, &expected)
+    }
+}
+
+/// Constant-time 32-byte compare: visits every byte (no early return), so a near-miss
+/// signature cannot be distinguished from a far-miss by timing.
+fn slack_ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
+}
+
+/// Decodes exactly 64 hex chars into the 32-byte HMAC-SHA256 digest, or `None`.
+fn slack_hex32(s: &str) -> Option<[u8; 32]> {
+    let bytes = s.as_bytes();
+    if bytes.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (slot, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
+        let hi = (pair[0] as char).to_digit(16)?;
+        let lo = (pair[1] as char).to_digit(16)?;
+        *slot = (hi * 16 + lo) as u8;
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,6 +293,88 @@ mod tests {
             "secret leaked to Slack: {out}"
         );
         assert!(out.len() <= MAX_SLACK_OUTBOUND);
+    }
+
+    // ----- E.3: Slack request signature + freshness gate -----
+
+    /// Lowercase-hex encode (test-only — builds a signature the way Slack would).
+    fn hex(bytes: &[u8]) -> String {
+        let mut s = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            s.push_str(&format!("{b:02x}"));
+        }
+        s
+    }
+
+    const SIGNING_SECRET: &[u8] = b"8f742231b10e8888abcd99yyyzzz85a5";
+
+    fn valid_sig(ts: &str, body: &[u8]) -> String {
+        let mut base = Vec::new();
+        base.extend_from_slice(b"v0:");
+        base.extend_from_slice(ts.as_bytes());
+        base.push(b':');
+        base.extend_from_slice(body);
+        format!("v0={}", hex(&hmac_sha256(SIGNING_SECRET, &base)))
+    }
+
+    #[test]
+    fn a_genuine_slack_signature_with_a_fresh_timestamp_verifies() {
+        let v = SlackSignature::new(SIGNING_SECRET);
+        let body = br#"{"type":"event_callback"}"#;
+        let ts = "1700000000";
+        // now within the skew window.
+        assert!(v.verify(&valid_sig(ts, body), ts, body, 1700000010));
+    }
+
+    #[test]
+    fn a_forged_signature_is_rejected() {
+        let v = SlackSignature::new(SIGNING_SECRET);
+        let body = br#"{"type":"event_callback"}"#;
+        let ts = "1700000000";
+        // Signed with the WRONG secret → no match.
+        let mut base = Vec::new();
+        base.extend_from_slice(b"v0:");
+        base.extend_from_slice(ts.as_bytes());
+        base.push(b':');
+        base.extend_from_slice(body);
+        let forged = format!("v0={}", hex(&hmac_sha256(b"not-the-secret", &base)));
+        assert!(!v.verify(&forged, ts, body, 1700000010));
+    }
+
+    #[test]
+    fn a_stale_or_forward_dated_request_is_rejected_even_if_signed() {
+        let v = SlackSignature::new(SIGNING_SECRET);
+        let body = br#"{"type":"event_callback"}"#;
+        let ts = "1700000000";
+        let sig = valid_sig(ts, body); // a genuinely valid signature...
+                                       // ...but the request is 10 minutes old (> SLACK_MAX_SKEW_SECS) → replay-rejected.
+        assert!(!v.verify(&sig, ts, body, 1700000000 + 600));
+        // ...and a forward-dated request is likewise rejected.
+        assert!(!v.verify(&sig, ts, body, 1700000000 - 600));
+    }
+
+    #[test]
+    fn malformed_signature_or_timestamp_fails_closed() {
+        let v = SlackSignature::new(SIGNING_SECRET);
+        let body = b"{}";
+        // Missing `v0=` prefix, bad hex length, non-numeric timestamp — all reject.
+        assert!(!v.verify("deadbeef", "1700000000", body, 1700000000));
+        assert!(!v.verify("v0=zz", "1700000000", body, 1700000000));
+        assert!(!v.verify(
+            &valid_sig("1700000000", body),
+            "not-a-number",
+            body,
+            1700000000
+        ));
+    }
+
+    #[test]
+    fn a_tampered_body_does_not_match_the_signature() {
+        let v = SlackSignature::new(SIGNING_SECRET);
+        let ts = "1700000000";
+        let sig = valid_sig(ts, b"original body");
+        // The signature was for a different body → reject (integrity, not just authenticity).
+        assert!(!v.verify(&sig, ts, b"tampered body", 1700000005));
     }
 
     // Live seam: the Slack Bot API HTTP client + Events-API/Socket-Mode listener.
