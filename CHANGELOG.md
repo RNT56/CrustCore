@@ -30,6 +30,21 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Streaming CoT-redaction prototype + feasibility (roadmap-v0.6 E.4).** Added
+  `crustcore_secrets::token_stream::TokenRedactor` and the supporting
+  `Redactor::longest_dangling_prefix` / `max_needle_len`. `TokenRedactor` buffers
+  streamed model tokens to a **redaction boundary** (newline), scans with the existing
+  `Redactor`, and emits only fully redacted chunks — so a secret split across tokens or
+  lines is caught before any byte reaches the user (invariants 2, 3). A forced
+  (no-boundary) emit retains only the **longest dangling needle-prefix** suffix (the
+  start of a not-yet-finished secret), keeping the buffer bounded without ever emitting a
+  partial secret. 6 red-team tests (split-across-tokens, straddling forced-emit,
+  full-secret-present, no-false-positives, flush-tail, bounded-worst-case). Added
+  [`docs/cot-streaming.md`](./docs/cot-streaming.md) concluding token-level CoT streaming
+  is **feasible** behind the existing `reveal_reasoning` opt-in, with the latency bound
+  (<500 ms) and the one constraint (the boundary char must not appear inside a secret).
+  Analysis + a pure core; **zero nano impact**.
+
 - **GitHub `/crustcore` slash commands (roadmap-v0.6 E.2).** Added the pure parser
   `crustcore_daemon::github_commands`: `parse_command(text) → Option<GithubCommand>`
   turns an **untrusted** PR/issue comment into a typed, bounded command —
@@ -298,6 +313,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/E.4 | `TokenRedactor` streaming-redaction prototype (buffer-to-boundary + dangling-prefix retention) + `docs/cot-streaming.md` feasibility (feasible, behind `reveal_reasoning`) | `claude/v06-e4-cotstream` | Claude (Implementer) | 0 kB (secrets/docs) | Enforces 2, 3, 11; no unredacted secret reaches the user mid-stream |
 | 2026-06-28 | v0.6/E.2 | `github_commands::parse_command`: untrusted PR comment → typed bounded `/crustcore` command (Run/Retry/Cancel/Explain/RiskDetected); injection stays literal; routes through the Telegram dispatch | `claude/v06-e2-ghcommands` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 7, 8, 11, 16; parsed by the daemon, never model output |
 | 2026-06-28 | v0.6/A.5 | `#[ignore]`d `live_issue_to_pr_smoke` composing A.1–A.4 + D.1 end-to-end; CI decision path already covered by `golden_issue_to_pr_flow`. Completes Phase A | `claude/v06-a5-issuetopr` | Claude (Implementer) | 0 kB (eval/docs only) | Composes 6, 11, 13; verifier-owned end-to-end |
 | 2026-06-28 | v0.6/A.4 | CI monitor: `aggregate_check_runs` (failure-dominates) + `monitor_decision` (Wait/Green/SpawnRepair/StopExhausted over the budget) + bounded `repair_task_goal`; live poll `#[ignore]`d | `claude/v06-a4-cimonitor` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 7, 11; repair bounded, decided by CrustCore from aggregated state |
