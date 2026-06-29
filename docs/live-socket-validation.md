@@ -81,6 +81,7 @@ cargo test --workspace -- --list --ignored
 | `live_get_updates_smoke` | F | `live` | [F.1](#f1) | `RestTelegram` shaping + redaction ✓ | easy (bot token) |
 | `live_telegram_round_trip_smoke` | F | `live` | [F.2](#f2) | runtime-channel decision logic ✓ | easy (bot token) |
 | `live_ws_sse_emits_a_snapshot` | F | — | [F.3](#f3) | snapshot serialize + `ws_stream` ✓ | easy (loopback port) |
+| `daemon_recover_xproc_live_smoke` | F | — | [F.6](#f6) | `snapshot_all`/`adopt_from_snapshot` cores ✓ | medium (restart) |
 
 ---
 
@@ -417,6 +418,21 @@ cargo test --workspace -- --list --ignored
 > The **chat front door** and the **self-improvement loop** are runtime loops too;
 > their live inches are covered by [F.2](#f2)/[A.2](#a2) (model + channel) and
 > [B.4](#b4) (the draft-PR POST) respectively.
+
+<a id="f6"></a>
+### F.6 — `daemon_recover_xproc_live_smoke` — cross-process recovery (F.1)
+- **Test:** `crustcore-daemon/src/registry.rs::tests::daemon_recover_xproc_live_smoke`. Seam tag `TODO(daemon-recover-xproc-live)`.
+- **Socket:** the real dump/load file I/O, the SIGTERM hook, and a kill-and-restart cycle.
+- **CI core (passing):** `snapshot_all` (non-terminal tasks only) + `adopt_from_snapshot`
+  — re-leases under the new instance's owner, marks **Pending** (a fresh worker resumes
+  from the log; the `mpsc` channel cannot survive a restart), carries usage so budgets
+  **re-charge not reset** (invariant 11), adopts an over-budget task **terminal**, rejects
+  an absent worktree + a duplicate id. A re-adopted task still completes only on a
+  `VerifiedPatch` (invariant 13); recovery restores supervision (invariant 12).
+- **Prereq:** a cache dir for the dump + a kill-and-restart of the daemon.
+- **Run:** `cargo test -p crustcore-daemon registry::tests::daemon_recover_xproc_live_smoke -- --ignored --nocapture`
+- **Success:** after a restart the daemon reloads the dump and re-adopts the running
+  tasks (stable ids), resuming supervision. **Difficulty: medium.**
 
 ---
 

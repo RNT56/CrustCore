@@ -36,11 +36,14 @@
 //! talk to the user: the registry emits [`RegistryAction::SendLine`] as **data**, and only
 //! the runtime loop renders it through the redactor and sends it (invariants 2, 5).
 //!
-//! `TODO(daemon-recover-xproc)`: cross-process / persistent lease recovery (surviving a
-//! daemon restart) is out of scope here — the registry is in-process; the [`LeaseOwner`]
-//! field is carried precisely so a future snapshot/steal protocol slots in without changing
-//! this state machine. `TODO(daemon-admin)`: a remote admin socket; control stays via the
-//! existing chat verbs.
+//! **Cross-process recovery (roadmap-v0.6 F.1):** [`TaskRegistry::snapshot_all`] +
+//! [`TaskRegistry::adopt_from_snapshot`] now realize the recovery half of invariant 12 —
+//! a restarting daemon re-adopts its running tasks (stable ids), re-leasing under the new
+//! [`LeaseOwner`] and marking each **`Pending`** so a fresh worker resumes from the log
+//! (an `mpsc` channel cannot survive a restart). These are **pure** state-machine steps;
+//! the actual dump/load file I/O + the SIGTERM hook + a kill-and-restart cycle are the
+//! `TODO(daemon-recover-xproc-live)` seam. A remote operator [`admin`](crate::admin) socket
+//! (`TODO(daemon-admin)`) lands the control plane beyond the chat verbs.
 //!
 //! The module is **pure** (no `TaskHandle`/socket/thread), so it is always compiled and
 //! CI-tested in every build; only the live loop that drives it is `live`-gated.
@@ -527,6 +530,114 @@ impl TaskRegistry {
         }
         found
     }
+
+    // --- cross-process recovery (roadmap-v0.6 F.1) ---------------------------
+
+    /// Snapshots every **non-terminal** task for a cross-process dump (F.1). Pure — no
+    /// I/O; the caller persists the returned `Vec` (the live dump/load is the seam). A
+    /// terminal task has nothing to recover and is skipped. The live channel is **not**
+    /// captured: an `mpsc` pair cannot survive a restart, so a re-adopted task resumes
+    /// from its log, not by reconnecting a channel.
+    #[must_use]
+    pub fn snapshot_all(&self, now: Timestamp) -> Vec<TaskSnapshot> {
+        self.slots
+            .values()
+            .filter(|s| !s.phase.is_terminal())
+            .map(|s| TaskSnapshot {
+                id: s.id,
+                chat: s.chat,
+                phase: s.phase,
+                lease_remaining_ms: s
+                    .lease
+                    .expires_at
+                    .as_millis()
+                    .saturating_sub(now.as_millis()),
+                budget: s.budget,
+                usage: s.usage,
+                worktree_path: None,
+            })
+            .collect()
+    }
+
+    /// Re-adopts a task from a [`TaskSnapshot`] after a daemon restart (F.1; closes the
+    /// recovery half of invariant 12). Re-leases under **this** instance's `LeaseOwner`
+    /// and marks the task **`Pending`** so the loop spawns a *fresh* worker that resumes
+    /// from the log. Carried `usage` is preserved so budgets are re-charged, not reset
+    /// (invariant 11); a re-adopted task still completes only on a `VerifiedPatch`
+    /// (invariant 13 — adoption restores supervision, never completion).
+    ///
+    /// - **Absent worktree** (`worktree_present == false`) → [`AdoptError::WorktreeGone`].
+    /// - **Already over budget** (carried usage breaches the budget) → adopted **terminal**
+    ///   `Done(BudgetExhausted)` so `tick` finalizes it (never resumed).
+    /// - **Duplicate id** already live → [`AdoptError::Duplicate`].
+    ///
+    /// # Errors
+    /// [`AdoptError`] for a gone worktree or a duplicate id.
+    pub fn adopt_from_snapshot(
+        &mut self,
+        snap: &TaskSnapshot,
+        worktree_present: bool,
+        now: Timestamp,
+    ) -> Result<TaskId, AdoptError> {
+        if self.slots.contains_key(&snap.id) {
+            return Err(AdoptError::Duplicate);
+        }
+        if !worktree_present {
+            return Err(AdoptError::WorktreeGone);
+        }
+        // A task whose carried usage already breaches its budget is adopted terminal.
+        let phase = match snap.usage.charge(AgentUsage::default(), &snap.budget) {
+            Err(axis) => TaskPhase::Done(TaskDone::BudgetExhausted(axis)),
+            Ok(_) => TaskPhase::Pending,
+        };
+        self.slots.insert(
+            snap.id,
+            TaskSlot {
+                id: snap.id,
+                chat: snap.chat,
+                phase,
+                lease: Lease::granted(self.owner, now), // re-leased under THIS instance
+                budget: snap.budget,
+                usage: snap.usage, // carried — budgets re-charge, not reset
+                started_at: now,
+                last_charge_at: now,
+            },
+        );
+        if self.next_id <= snap.id.0 {
+            self.next_id = snap.id.0.wrapping_add(1); // never re-issue an adopted id
+        }
+        Ok(snap.id)
+    }
+}
+
+/// A serializable snapshot of one task for cross-process recovery (F.1). Carries what is
+/// needed to re-adopt the task after a restart — **not** the live channel (an `mpsc`
+/// pair cannot survive a restart; a re-adopted task resumes from its log).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskSnapshot {
+    /// The task id (stable across the restart).
+    pub id: TaskId,
+    /// The chat that launched it.
+    pub chat: ChatId,
+    /// The phase at dump time.
+    pub phase: TaskPhase,
+    /// Lease time remaining at dump (informational; adoption re-leases fresh).
+    pub lease_remaining_ms: u64,
+    /// The per-task budget.
+    pub budget: AgentBudget,
+    /// Carried usage (so budgets re-charge, not reset).
+    pub usage: AgentUsage,
+    /// The worktree path (set by the dumper; checked for existence on adopt).
+    pub worktree_path: Option<String>,
+}
+
+/// Why a task could not be re-adopted from a snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdoptError {
+    /// The task's worktree no longer exists — the work is unrecoverable.
+    WorktreeGone,
+    /// A task with that id is already live in this instance.
+    Duplicate,
 }
 
 #[cfg(test)]
@@ -539,6 +650,92 @@ mod tests {
 
     fn at(ms: u64) -> Timestamp {
         Timestamp::from_millis(ms)
+    }
+
+    // --- cross-process recovery (F.1) ---
+
+    #[test]
+    fn snapshot_and_adopt_round_trip_preserves_id_and_usage() {
+        let mut old = reg();
+        let id = old
+            .admit(ChatId(7), default_task_budget(), at(1000))
+            .unwrap();
+        let snaps = old.snapshot_all(at(1000));
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0].id, id);
+
+        // A fresh instance (new owner) adopts the snapshot.
+        let mut fresh = TaskRegistry::new(2, LeaseOwner(99));
+        let adopted = fresh
+            .adopt_from_snapshot(&snaps[0], true, at(5000))
+            .unwrap();
+        assert_eq!(adopted, id, "id is stable across the restart");
+        let snap2 = fresh.snapshot(at(5000));
+        let row = snap2.get(id).unwrap();
+        // Re-adopted as Pending (a fresh worker resumes from the log), re-leased fresh.
+        assert_eq!(row.phase, TaskPhase::Pending);
+        assert_eq!(row.lease_ttl_ms, LEASE_TTL_MS);
+        // A re-issued id can never collide with the adopted one.
+        let next = fresh
+            .admit(ChatId(7), default_task_budget(), at(5000))
+            .unwrap();
+        assert_ne!(next, id);
+    }
+
+    #[test]
+    fn an_absent_worktree_cannot_be_adopted() {
+        let mut old = reg();
+        old.admit(ChatId(7), default_task_budget(), at(0)).unwrap();
+        let snap = old.snapshot_all(at(0)).remove(0);
+        let mut fresh = TaskRegistry::new(2, LeaseOwner(2));
+        assert_eq!(
+            fresh.adopt_from_snapshot(&snap, false, at(1)),
+            Err(AdoptError::WorktreeGone)
+        );
+    }
+
+    #[test]
+    fn an_over_budget_task_is_adopted_terminal() {
+        let mut old = reg();
+        let id = old.admit(ChatId(7), default_task_budget(), at(0)).unwrap();
+        let mut snap = old.snapshot_all(at(0)).remove(0);
+        // Carry usage past the wall budget.
+        snap.usage.wall_ms = snap.budget.max_wall_ms + 1;
+
+        let mut fresh = TaskRegistry::new(2, LeaseOwner(2));
+        fresh.adopt_from_snapshot(&snap, true, at(1)).unwrap();
+        let row = fresh.snapshot(at(1)).get(id).unwrap().phase;
+        assert!(
+            matches!(row, TaskPhase::Done(TaskDone::BudgetExhausted(_))),
+            "an over-budget task must adopt terminal, got {row:?}"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_id_is_rejected() {
+        let mut r = reg();
+        let id = r.admit(ChatId(7), default_task_budget(), at(0)).unwrap();
+        let snap = TaskSnapshot {
+            id,
+            chat: ChatId(7),
+            phase: TaskPhase::Pending,
+            lease_remaining_ms: LEASE_TTL_MS,
+            budget: default_task_budget(),
+            usage: AgentUsage::default(),
+            worktree_path: None,
+        };
+        assert_eq!(
+            r.adopt_from_snapshot(&snap, true, at(1)),
+            Err(AdoptError::Duplicate)
+        );
+    }
+
+    // Live seam: the real dump/load file I/O, the SIGTERM hook, and a kill-and-restart smoke.
+    #[test]
+    #[ignore = "live: dump on SIGTERM, reload + re-adopt after a process restart (TODO(daemon-recover-xproc-live))"]
+    fn daemon_recover_xproc_live_smoke() {
+        // See docs/live-socket-validation.md §F.6. Needs file I/O + a process restart.
+        panic!("live seam: run manually with a kill-and-restart cycle (see runbook §F.6)");
     }
 
     #[test]

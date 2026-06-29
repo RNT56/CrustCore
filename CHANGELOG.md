@@ -30,6 +30,21 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Cross-process task lease recovery (roadmap-v0.6 F.1).** Added
+  `TaskRegistry::snapshot_all` + `adopt_from_snapshot` (with `TaskSnapshot` / `AdoptError`)
+  — the recovery half of invariant 12. A restarting daemon re-adopts its running tasks
+  with **stable ids**, re-leasing under the new `LeaseOwner` and marking each **`Pending`**
+  so a fresh worker resumes from the log (an `mpsc` channel can't survive a restart).
+  Carried `usage` is preserved so budgets **re-charge, not reset** (invariant 11); an
+  already-over-budget task is adopted **terminal** (`Done(BudgetExhausted)`); an absent
+  worktree → `WorktreeGone`; a duplicate id → `Duplicate`. A re-adopted task still
+  completes only on a `VerifiedPatch` (invariant 13 — adoption restores supervision, never
+  completion). Pure state-machine steps; the dump/load file I/O + SIGTERM hook +
+  kill-and-restart cycle are the `#[ignore]`d `daemon_recover_xproc_live_smoke`
+  (`TODO(daemon-recover-xproc-live)`), in runbook §F.6. Also derives `PartialEq`/`Eq` on
+  `AgentBudget`. **This completes Phase F (daemon hardening).** 4 new tests; daemon-only;
+  **zero nano impact**.
+
 - **Evidence bundle rendering (roadmap-v0.6 C.3).** Added
   `EvidenceBundle::to_markdown()` and `to_json()` to `crustcore_daemon::product`.
   `to_markdown` is the **bounded** canonical PR-body/cockpit renderer: it opens with
@@ -249,6 +264,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/F.1 | `snapshot_all`/`adopt_from_snapshot` cross-process recovery: stable ids, re-leased under new owner, Pending-resume-from-log, carried-usage re-charge, over-budget→terminal. Completes Phase F | `claude/v06-f1-recovery` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 11, 12, 13; recovery restores supervision, never completion |
 | 2026-06-28 | v0.6/C.3 | `EvidenceBundle::to_markdown` (bounded PR-body/cockpit render, 🔴 review notice, per-list overflow) + `to_json` (schema v1); `draft_pr_body` delegates | `claude/v06-c3-evidence` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 2, 10, 11; bounded redacted evidence, every receipt included |
 | 2026-06-28 | v0.6/D.1 | Task-loop wiring `plan_task`/`finalize_task` composing routing (C.1) + advisory gate (C.2) into a terminal `TaskOutcome`; sandboxed run `#[ignore]`d | `claude/v06-d1-executor-wire` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 5, 6, 13; verifier-owned completion, advisory only gates |
 | 2026-06-28 | v0.6/A.3 | `pr_intent_to_create_request`: PrIntent→CreatePrRequest for the live draft-PR POST; evidence body verbatim, draft=true; real POST `#[ignore]`d | `claude/v06-a3-draftpr` | Claude (Implementer) | 0 kB (daemon/live-only) | Enforces 6, 13, 14; body is evidence not a model claim |
