@@ -453,20 +453,33 @@ cargo test --workspace -- --list --ignored
 > their live inches are covered by [F.2](#f2)/[A.2](#a2) (model + channel) and
 > [B.4](#b4) (the draft-PR POST) respectively.
 
-<a id="f7"></a>
-### F.7 — `slack_live_round_trip_smoke` — Slack control plane (E.3)
-- **Test:** `crustcore-daemon/src/slack.rs::tests::slack_live_round_trip_smoke`, feature `live`. Seam tag `TODO(slack-live)`.
-- **Socket:** the Slack Bot API HTTP client + the Events-API / Socket-Mode listener
-  (the spawned `crustcore-net` helper, the Telegram pattern).
-- **CI core (passing):** `SlackAllowlist` (per-workspace/channel, **deny-all empty**),
-  `normalize_message` (plain → `QueuedTurn`, `!` → `Steer`, `/` → `Command`, reaction →
-  `ApprovalCallback` — the **same `RuntimeEvent` stream** as Telegram, invariants 8/16),
-  and `render_to_slack` (redacts every secret before the message leaves — invariants 1–3).
-- **Prereq:** a real Slack workspace + bot token (broker) + signing secret.
-- **Run:** `cargo test -p crustcore-daemon --features live slack::tests::slack_live_round_trip_smoke -- --ignored --nocapture`
-- **Success:** an allowed-channel message dispatches like Telegram; a reaction resolves an
-  approval via its nonce; outbound text is redacted; Slack is opt-in (operator-bound via
-  CLI, never the default — invariant 15). **Difficulty: medium.**
+<a id="f4"></a>
+### F.4 — `daemon_admin_live_socket_smoke` — admin socket (F.2)
+- **Test:** `crustcore-daemon/src/admin.rs::tests::daemon_admin_live_socket_smoke`. Seam tag `TODO(daemon-admin-live)`.
+- **Socket:** the real admin `UnixListener` (mode 0600) / TCP-loopback fallback + a
+  length-prefixed framed query/cancel round-trip.
+- **CI core (passing):** `parse_admin_command`, `frame`/`try_deframe` (bounded, hostile
+  length rejected), `authenticate` (constant-length nonce compare), and `dispatch_admin`
+  (owner-scoped cancel/kill — the same gate as Telegram, invariant 12; status snapshot).
+- **Prereq:** a bound socket + the startup nonce file (`~/.crustcore/admin.nonce`, 0600).
+- **Run:** `cargo test -p crustcore-daemon admin::tests::daemon_admin_live_socket_smoke -- --ignored --nocapture`
+- **Success:** an authenticated client gets the status snapshot and can cancel an owned
+  task; a wrong nonce is dropped; operator-only, never model-facing (invariant 5).
+  **Difficulty: medium.**
+
+<a id="f5"></a>
+### F.5 — `multi_repo_live_smoke` — multi-repo orchestration (F.3)
+- **Test:** `crustcore-daemon/src/multirepo.rs::tests::multi_repo_live_smoke`. Seam tag `TODO(P10-multi-repo-live)`.
+- **Socket:** the multi-repo CLI startup (`--repo id=/path`) + a simultaneous-task run.
+- **CI core (passing):** `classify_repo` (explicit-hint routing, sole-repo default, ambiguous
+  → `None`, case-insensitive, path-free — repo paths come from config/CLI, never the intent,
+  invariant 7). The registry already supervises repo-agnostic tasks under the global cap
+  (invariant 11).
+- **Prereq:** two or more real repos bound at startup.
+- **Run:** `cargo test -p crustcore-daemon multirepo::tests::multi_repo_live_smoke -- --ignored --nocapture`
+- **Success:** a launch routes to the right repo profile; two repos run tasks
+  simultaneously under the shared global concurrency cap. **Difficulty: medium.**
+
 <a id="f6"></a>
 ### F.6 — `daemon_recover_xproc_live_smoke` — cross-process recovery (F.1)
 - **Test:** `crustcore-daemon/src/registry.rs::tests::daemon_recover_xproc_live_smoke`. Seam tag `TODO(daemon-recover-xproc-live)`.
@@ -481,31 +494,23 @@ cargo test --workspace -- --list --ignored
 - **Run:** `cargo test -p crustcore-daemon registry::tests::daemon_recover_xproc_live_smoke -- --ignored --nocapture`
 - **Success:** after a restart the daemon reloads the dump and re-adopts the running
   tasks (stable ids), resuming supervision. **Difficulty: medium.**
-<a id="f5"></a>
-### F.5 — `multi_repo_live_smoke` — multi-repo orchestration (F.3)
-- **Test:** `crustcore-daemon/src/multirepo.rs::tests::multi_repo_live_smoke`. Seam tag `TODO(P10-multi-repo-live)`.
-- **Socket:** the multi-repo CLI startup (`--repo id=/path`) + a simultaneous-task run.
-- **CI core (passing):** `classify_repo` (explicit-hint routing, sole-repo default, ambiguous
-  → `None`, case-insensitive, path-free — repo paths come from config/CLI, never the intent,
-  invariant 7). The registry already supervises repo-agnostic tasks under the global cap
-  (invariant 11).
-- **Prereq:** two or more real repos bound at startup.
-- **Run:** `cargo test -p crustcore-daemon multirepo::tests::multi_repo_live_smoke -- --ignored --nocapture`
-- **Success:** a launch routes to the right repo profile; two repos run tasks
-  simultaneously under the shared global concurrency cap. **Difficulty: medium.**
-<a id="f4"></a>
-### F.4 — `daemon_admin_live_socket_smoke` — admin socket (F.2)
-- **Test:** `crustcore-daemon/src/admin.rs::tests::daemon_admin_live_socket_smoke`. Seam tag `TODO(daemon-admin-live)`.
-- **Socket:** the real admin `UnixListener` (mode 0600) / TCP-loopback fallback + a
-  length-prefixed framed query/cancel round-trip.
-- **CI core (passing):** `parse_admin_command`, `frame`/`try_deframe` (bounded, hostile
-  length rejected), `authenticate` (constant-length nonce compare), and `dispatch_admin`
-  (owner-scoped cancel/kill — the same gate as Telegram, invariant 12; status snapshot).
-- **Prereq:** a bound socket + the startup nonce file (`~/.crustcore/admin.nonce`, 0600).
-- **Run:** `cargo test -p crustcore-daemon admin::tests::daemon_admin_live_socket_smoke -- --ignored --nocapture`
-- **Success:** an authenticated client gets the status snapshot and can cancel an owned
-  task; a wrong nonce is dropped; operator-only, never model-facing (invariant 5).
-  **Difficulty: medium.**
+
+<a id="f7"></a>
+### F.7 — `slack_live_round_trip_smoke` — Slack control plane (E.3)
+- **Test:** `crustcore-daemon/src/slack.rs::tests::slack_live_round_trip_smoke`, feature `live`. Seam tag `TODO(slack-live)`.
+- **Socket:** the Slack Bot API HTTP client + the Events-API / Socket-Mode listener
+  (the spawned `crustcore-net` helper, the Telegram pattern).
+- **CI core (passing):** the `SlackSignature` request verifier (HMAC-SHA256 over
+  `v0:{ts}:{body}` + bounded inputs + timestamp-freshness replay defense, constant-time),
+  `SlackAllowlist` (per-workspace/channel, **deny-all empty**),
+  `normalize_message` (plain → `QueuedTurn`, `!` → `Steer`, `/` → `Command`, reaction →
+  `ApprovalCallback` — the **same `RuntimeEvent` stream** as Telegram, invariants 8/16),
+  and `render_to_slack` (redacts every secret before the message leaves — invariants 1–3).
+- **Prereq:** a real Slack workspace + bot token (broker) + signing secret.
+- **Run:** `cargo test -p crustcore-daemon --features live slack::tests::slack_live_round_trip_smoke -- --ignored --nocapture`
+- **Success:** an allowed-channel message dispatches like Telegram; a reaction resolves an
+  approval via its nonce; outbound text is redacted; Slack is opt-in (operator-bound via
+  CLI, never the default — invariant 15). **Difficulty: medium.**
 
 ---
 

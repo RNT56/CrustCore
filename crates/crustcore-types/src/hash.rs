@@ -205,6 +205,48 @@ pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
     sha256(&outer)
 }
 
+/// Constant-time equality for two 32-byte digests (a SHA-256 / HMAC-SHA256 output, or any
+/// fixed 32-byte tag/nonce). Visits **every** byte with no early return, so a near-miss
+/// cannot be distinguished from a far-miss by timing. This is the comparison every
+/// secret/MAC/signature check must use (receipts invariant 10, webhook + Slack signature
+/// verification) — the single audited home next to [`sha256`]/[`hmac_sha256`].
+#[must_use]
+pub fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    let mut diff = 0u8;
+    for i in 0..32 {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
+/// Decodes a single ASCII hex digit (`0-9`, `a-f`, `A-F`) to its 0–15 value, or `None` for
+/// any non-hex byte. The building block for decoding a hex-encoded digest/signature.
+#[must_use]
+pub fn hex_val(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Decodes exactly 64 ASCII hex chars into the 32-byte digest they encode, or `None` if the
+/// length is not 64 or any char is non-hex. The standard decoder for a hex-encoded
+/// SHA-256 / HMAC-SHA256 digest or signature (used by the webhook + Slack verifiers).
+#[must_use]
+pub fn hex32_decode(s: &str) -> Option<[u8; 32]> {
+    let bytes = s.as_bytes();
+    if bytes.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (slot, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
+        *slot = (hex_val(pair[0])? << 4) | hex_val(pair[1])?;
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,5 +309,43 @@ mod tests {
             )),
             "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
         );
+    }
+
+    #[test]
+    fn ct_eq_matches_only_identical_digests() {
+        let a = sha256(b"alpha");
+        assert!(ct_eq(&a, &a));
+        assert!(ct_eq(&[0u8; 32], &[0u8; 32]));
+        // A single differing byte (anywhere) fails.
+        let mut b = a;
+        b[31] ^= 0x01;
+        assert!(!ct_eq(&a, &b));
+        let mut c = a;
+        c[0] ^= 0x80;
+        assert!(!ct_eq(&a, &c));
+    }
+
+    #[test]
+    fn hex_val_decodes_every_case_and_rejects_non_hex() {
+        assert_eq!(hex_val(b'0'), Some(0));
+        assert_eq!(hex_val(b'9'), Some(9));
+        assert_eq!(hex_val(b'a'), Some(10));
+        assert_eq!(hex_val(b'f'), Some(15));
+        assert_eq!(hex_val(b'A'), Some(10));
+        assert_eq!(hex_val(b'F'), Some(15));
+        for bad in [b'g', b'G', b' ', b'/', b':', b'x', 0u8, 0xff] {
+            assert_eq!(hex_val(bad), None, "byte {bad} must not decode");
+        }
+    }
+
+    #[test]
+    fn hex32_decode_round_trips_a_digest_and_rejects_bad_input() {
+        let digest = sha256(b"round trip");
+        let encoded = hex(&digest); // 64 lowercase hex chars
+        assert_eq!(hex32_decode(&encoded), Some(digest));
+        // Wrong length and a non-hex char both fail.
+        assert_eq!(hex32_decode(&encoded[..63]), None);
+        assert_eq!(hex32_decode(&format!("{}zz", &encoded[..62])), None);
+        assert_eq!(hex32_decode(""), None);
     }
 }

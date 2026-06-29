@@ -28,7 +28,7 @@
 use std::collections::{HashSet, VecDeque};
 
 use crustcore_secrets::Redactor;
-use crustcore_types::{hmac_sha256, BoundedText};
+use crustcore_types::{ct_eq, hex32_decode, hmac_sha256, BoundedText};
 
 /// Cap on an inbound webhook body (bounded — a sender cannot flood us; invariant 11).
 pub const MAX_WEBHOOK_BODY: usize = 1024 * 1024;
@@ -169,7 +169,7 @@ impl WebhookVerifier {
         let Some(hex) = signature.strip_prefix("sha256=") else {
             return false;
         };
-        let Some(provided) = hex32(hex) else {
+        let Some(provided) = hex32_decode(hex) else {
             return false;
         };
         let expected = hmac_sha256(&self.secret, body);
@@ -185,37 +185,6 @@ fn parse_kind(event: &str) -> GitHubEventKind {
         "issue_comment" | "pull_request_review_comment" => GitHubEventKind::IssueComment,
         "push" => GitHubEventKind::Push,
         _ => GitHubEventKind::Other,
-    }
-}
-
-/// Constant-time 32-byte compare: visits every byte (no early return), so a near-miss
-/// signature cannot be distinguished from a far-miss by timing.
-fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    a.iter()
-        .zip(b.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
-}
-
-/// Decodes exactly 64 hex chars into 32 bytes (the HMAC-SHA256 digest), or `None`.
-fn hex32(s: &str) -> Option<[u8; 32]> {
-    let bytes = s.as_bytes();
-    if bytes.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (slot, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
-        *slot = (hex_val(pair[0])? << 4) | hex_val(pair[1])?;
-    }
-    Some(out)
-}
-
-fn hex_val(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
     }
 }
 

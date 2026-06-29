@@ -21,7 +21,7 @@ pub mod text;
 pub mod time;
 
 pub use budget::{Budget, BudgetAxis, BudgetCheck, BudgetDelta, Meter, BUDGET_AXIS_COUNT};
-pub use hash::{hmac_sha256, sha256};
+pub use hash::{ct_eq, hex32_decode, hex_val, hmac_sha256, sha256};
 pub use ids::{
     ApprovalId, ArtifactId, CapabilityId, EventSeq, JobId, LeaseOwner, ScopeId, SecretId, TaskId,
     ToolCallId,

@@ -95,14 +95,3 @@ pub mod task;
 pub mod task_loop;
 pub mod telegram;
 pub mod webhook;
-
-/// Surfaces the daemon supervises. Marker enum so the crate is real.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DaemonSurface {
-    /// The Telegram runtime channel (default human channel; invariant 15).
-    Telegram,
-    /// The GitHub task/PR control plane.
-    GitHub,
-    /// The authenticated local/remote admin socket.
-    AdminSocket,
-}

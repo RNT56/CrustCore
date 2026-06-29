@@ -12,7 +12,9 @@
 
 pub mod join;
 
-use crustcore_types::{hmac_sha256, sha256, ArtifactId, EventSeq, JobId, TaskId, ToolCallId};
+use crustcore_types::{
+    ct_eq, hmac_sha256, sha256, ArtifactId, EventSeq, JobId, TaskId, ToolCallId,
+};
 
 /// The genesis `prev_receipt_hash`: the first receipt chains from all-zeros.
 pub const GENESIS_RECEIPT_HASH: [u8; 32] = [0u8; 32];
@@ -193,15 +195,6 @@ fn receipt_body(r: &ToolReceipt) -> Vec<u8> {
 /// `prev_receipt_hash` equals this.
 fn receipt_chain_hash(r: &ToolReceipt) -> [u8; 32] {
     sha256(&receipt_body(r))
-}
-
-/// Constant-time comparison of two 32-byte tags (avoids MAC timing leaks).
-fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    let mut diff = 0u8;
-    for i in 0..32 {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
 }
 
 /// Mints and verifies a chain of [`ToolReceipt`]s under a CrustCore-held key.
