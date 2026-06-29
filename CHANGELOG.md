@@ -30,6 +30,20 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Credential-proxy branch push (roadmap-v0.6 A.2).** Added the git
+  **credential-helper protocol** to `crustcore_daemon::github`, the mechanism that
+  hands `git` a short-lived installation token **without it ever entering the
+  sandbox** (invariant 1): `parse_credential_request` (git's `get` stdin →
+  protocol/host/path, bounded), `authorize_credential` (issues a credential **only**
+  for `https://github.com/<registered-repo>`, binding the token to a `GitHubWriteCap`
+  — invariants 1, 9), `credential_helper_response` (`x-access-token` + token, pipe-only,
+  never logged), and `confining_git_config` (reset-then-set-*only*-ours +
+  `useHttpPath`, so the worktree can never fall back to `.git/credentials` or SSH).
+  Composes with the existing `parse_push_argv`/`validate_push` refspec/force/protected-branch
+  gate. The helper-subprocess exec + the real push is the `#[ignore]`d
+  `cred_proxy_live_push_smoke` (`TODO(cred-proxy-live)`), catalogued in the runbook
+  §B.5. 5 new tests; daemon-only; **zero nano impact**.
+
 - **Multi-verifier advisory path (roadmap-v0.6 C.2).** Added
   `crustcore_daemon::reviewer`: `required_reviewers(task, risk)` decides which
   blocking review roles a change needs (SecuritySensitive/WorkflowChange/
@@ -197,6 +211,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/A.2 | Git credential-helper protocol: `parse_credential_request`/`authorize_credential`/`credential_helper_response`/`confining_git_config` — token reaches git only over the helper pipe, bound to a registered cap; live exec/push `#[ignore]`d | `claude/v06-a2-credproxy` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 1, 9, 13; no raw token in the sandbox, push confined to cap repo+prefix |
 | 2026-06-28 | v0.6/C.2 | Multi-verifier advisory gate: `required_reviewers` + `orchestrate_review` folding Reviewer/SecurityAuditor verdicts + verifier result via `decide_integration`; veto-not-approval, times out into refusal | `claude/v06-c2-reviewer` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 5, 13; verdicts veto, verifier still completes |
 | 2026-06-28 | v0.6/C.1 | Pure `decide_routing` executor router (single/fan-out/advisory/blocked) over task shape+risk+budget+configured; selection only, verifier still completes | `claude/v06-c1-router` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 6, 13; routing picks a worker, never authority |
 | 2026-06-28 | v0.6/B.3 | Persistent repo-memory helpers (`record_failure` redacts via Redactor before persist, `record_successful_verifier`, `get_prior_failure`, `flaky_test_hints`, `changed_paths_key`) on `MemoryStore` | `claude/v06-b3-memory` | Claude (Implementer) | 0 kB (index-only) | Enforces 2, 7, 11; memory is a redacted, bounded hint, never authority |

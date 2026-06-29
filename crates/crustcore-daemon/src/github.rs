@@ -350,6 +350,129 @@ pub fn branch_under_prefix(branch: &str, prefix: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Git credential-helper protocol (roadmap-v0.6 A.2) — the token-injection seam
+// ---------------------------------------------------------------------------
+
+/// The host CrustCore mints write credentials for. A request for any other host is
+/// denied — the proxy never hands a GitHub token to an unrelated remote.
+pub const GITHUB_HOST: &str = "github.com";
+
+/// A parsed git **credential-helper** request: the `key=value` lines git writes to a
+/// helper's stdin for a `get` operation. The credential helper is how a short-lived
+/// installation token reaches `git` **without ever entering the sandbox** (invariant
+/// 1): the helper runs *outside* the worktree sandbox, so the token is never in the
+/// worker's argv, env, or `.git/config`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CredentialRequest {
+    /// `protocol=` (we only issue for `https`).
+    pub protocol: String,
+    /// `host=` (we only issue for [`GITHUB_HOST`]).
+    pub host: String,
+    /// `path=` (with `credential.useHttpPath=true`), e.g. `owner/repo.git`.
+    pub path: String,
+}
+
+/// Parses git's credential-helper `get` stdin (`key=value\n` lines, blank-line
+/// terminated). Unknown keys are ignored; each value is bounded so a hostile remote
+/// cannot blow up memory (invariant 11). Trusted-but-bounded: git is trusted, yet the
+/// credential is still bound to a *registered* repo before issuance.
+#[must_use]
+pub fn parse_credential_request(stdin: &str) -> CredentialRequest {
+    let mut req = CredentialRequest::default();
+    for line in stdin.lines().take(64) {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            break; // blank line terminates the request
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.chars().take(512).collect::<String>();
+        match key {
+            "protocol" => req.protocol = value,
+            "host" => req.host = value,
+            "path" => req.path = value,
+            _ => {}
+        }
+    }
+    req
+}
+
+/// Why the credential proxy refused to issue a credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialDenied {
+    /// Not `https` — CrustCore never issues a token over an unencrypted protocol.
+    WrongProtocol,
+    /// Not [`GITHUB_HOST`] — the token is scoped to GitHub only.
+    WrongHost,
+    /// The requested repo is not registered (no `GitHubWriteCap`).
+    RepoNotRegistered,
+}
+
+/// The repo slug a credential request resolves to (`owner/repo`), stripped of a
+/// leading `/` and a trailing `.git`.
+#[must_use]
+pub fn repo_from_credential_path(path: &str) -> String {
+    path.trim_start_matches('/')
+        .trim_end_matches(".git")
+        .to_string()
+}
+
+/// Authorizes a credential request against the registry. A credential is issued
+/// **only** for `https://github.com/<registered-repo>` — binding the proxy's token to
+/// a `GitHubWriteCap` (invariants 1, 9: a token is never issued for a repo CrustCore
+/// is not capability-scoped to). On success returns the resolved repo slug.
+///
+/// # Errors
+/// [`CredentialDenied`] for a non-https/non-GitHub/unregistered request.
+pub fn authorize_credential(
+    req: &CredentialRequest,
+    registry: &RepoRegistry,
+) -> Result<String, CredentialDenied> {
+    if req.protocol != "https" {
+        return Err(CredentialDenied::WrongProtocol);
+    }
+    if req.host != GITHUB_HOST {
+        return Err(CredentialDenied::WrongHost);
+    }
+    let repo = repo_from_credential_path(&req.path);
+    if registry.is_registered(&repo) {
+        Ok(repo)
+    } else {
+        Err(CredentialDenied::RepoNotRegistered)
+    }
+}
+
+/// Formats the git credential-helper `get` response that hands git a short-lived
+/// installation token: `username=x-access-token` + `password=<token>`. GitHub App
+/// installation tokens authenticate as the user `x-access-token`.
+///
+/// **Secret handling (invariant 1):** the returned string carries the token and goes
+/// **only** to git over the helper pipe — it is never logged, stored, or placed in an
+/// error. The caller writes it straight to the helper's stdout and drops it.
+#[must_use]
+pub fn credential_helper_response(token: &str) -> String {
+    format!("username=x-access-token\npassword={token}\n")
+}
+
+/// The git config flags that **confine** a worktree to this credential helper and
+/// nothing else (the A.2 design: "no fallback to `.git/credentials` or SSH"). It first
+/// clears any inherited helper (an empty `credential.helper` resets the list), then
+/// sets ours, and enables `useHttpPath` so the repo path reaches
+/// [`authorize_credential`]. Returns argv fragments to splice into the `git` invocation.
+#[must_use]
+pub fn confining_git_config(helper_path: &str) -> Vec<String> {
+    vec![
+        "-c".to_string(),
+        "credential.helper=".to_string(), // reset: drop any inherited helper
+        "-c".to_string(),
+        format!("credential.helper={helper_path}"),
+        "-c".to_string(),
+        "credential.useHttpPath=true".to_string(),
+    ]
+}
+
+// ---------------------------------------------------------------------------
 // Merge gate (P10.5 / §3.1) — ask always, never autonomous
 // ---------------------------------------------------------------------------
 
@@ -833,6 +956,97 @@ mod tests {
             ),
             Err(PushDenied::Host(_))
         ));
+    }
+
+    // --- credential-helper protocol (A.2) ---
+
+    fn registry_with_repo() -> RepoRegistry {
+        let mut reg = RepoRegistry::new();
+        reg.register(cap()); // registers "RNT56/CrustCore"
+        reg
+    }
+
+    #[test]
+    fn parses_a_git_credential_get_request() {
+        let req = parse_credential_request(
+            "protocol=https\nhost=github.com\npath=RNT56/CrustCore.git\n\nignored=after-blank\n",
+        );
+        assert_eq!(req.protocol, "https");
+        assert_eq!(req.host, "github.com");
+        assert_eq!(req.path, "RNT56/CrustCore.git");
+    }
+
+    #[test]
+    fn authorizes_only_https_github_registered_repos() {
+        let reg = registry_with_repo();
+        // Happy path → resolves the repo slug.
+        let ok = authorize_credential(
+            &parse_credential_request(
+                "protocol=https\nhost=github.com\npath=RNT56/CrustCore.git\n",
+            ),
+            &reg,
+        );
+        assert_eq!(ok, Ok("RNT56/CrustCore".to_string()));
+        // Wrong protocol / host / unregistered repo are each denied.
+        assert_eq!(
+            authorize_credential(
+                &parse_credential_request("protocol=http\nhost=github.com\npath=RNT56/CrustCore\n"),
+                &reg
+            ),
+            Err(CredentialDenied::WrongProtocol)
+        );
+        assert_eq!(
+            authorize_credential(
+                &parse_credential_request("protocol=https\nhost=evil.com\npath=RNT56/CrustCore\n"),
+                &reg
+            ),
+            Err(CredentialDenied::WrongHost)
+        );
+        assert_eq!(
+            authorize_credential(
+                &parse_credential_request("protocol=https\nhost=github.com\npath=someone/other\n"),
+                &reg
+            ),
+            Err(CredentialDenied::RepoNotRegistered)
+        );
+    }
+
+    #[test]
+    fn credential_response_uses_x_access_token_and_carries_the_token() {
+        let resp = credential_helper_response("ghs_TESTTOKEN");
+        assert!(resp.contains("username=x-access-token"));
+        assert!(resp.contains("password=ghs_TESTTOKEN"));
+    }
+
+    #[test]
+    fn confining_config_resets_then_sets_only_our_helper() {
+        let cfg = confining_git_config("/usr/lib/crustcore/cred-helper");
+        // An empty credential.helper precedes ours so no inherited helper survives.
+        let reset = cfg.iter().position(|s| s == "credential.helper=").unwrap();
+        let ours = cfg
+            .iter()
+            .position(|s| s == "credential.helper=/usr/lib/crustcore/cred-helper")
+            .unwrap();
+        assert!(reset < ours, "reset must precede our helper");
+        assert!(cfg.iter().any(|s| s == "credential.useHttpPath=true"));
+    }
+
+    // Live seam: the credential-helper subprocess exec + a real push to GitHub.
+    // The argv parse, push validation, request parse, and authorization are all
+    // CI-tested above; this is the irreducible subprocess + network inch.
+    #[test]
+    #[ignore = "live: credential-helper subprocess exec + a real verified-branch push to GitHub (TODO(cred-proxy-live))"]
+    fn cred_proxy_live_push_smoke() {
+        // Requires a registered test repo + a minted installation token + a worktree
+        // with a verified branch. See docs/live-socket-validation.md §B.5.
+        let reg = registry_with_repo();
+        let req =
+            parse_credential_request("protocol=https\nhost=github.com\npath=RNT56/CrustCore.git\n");
+        let repo = authorize_credential(&req, &reg).expect("registered repo");
+        assert_eq!(repo, "RNT56/CrustCore");
+        // The live inch: spawn the helper, set confining_git_config on the worktree,
+        // and `git push origin crustcore/task` — out of CI scope (no token/network).
+        panic!("live seam: run manually with a real App token + test repo (see runbook §B.5)");
     }
 
     // --- merge gate (§3.1) ---
