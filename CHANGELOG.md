@@ -30,6 +30,18 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Remote admin socket protocol (roadmap-v0.6 F.2).** Added `crustcore_daemon::admin`:
+  an authenticated operator control plane (`status` / `detail <id>` / `cancel <id>` /
+  `kill <id>`) over a length-prefixed framed socket. Pure protocol core —
+  `parse_admin_command`, `frame`/`try_deframe` (bounded; a hostile length is rejected
+  before allocating — invariant 11), `authenticate` (constant-length nonce compare; the
+  startup nonce file gates every command), and `dispatch_admin` which feeds the **same
+  owner-scoped `request_cancel`/`request_kill`** path as Telegram (invariant 12). It is
+  **operator-only, never model-facing** (invariant 5). The real `UnixListener` (0600) /
+  TCP-loopback bind is the `#[ignore]`d `daemon_admin_live_socket_smoke`
+  (`TODO(daemon-admin-live)`), catalogued in runbook §F.4. 6 new tests; daemon-only;
+  **zero nano impact**.
+
 - **Evidence bundle rendering (roadmap-v0.6 C.3).** Added
   `EvidenceBundle::to_markdown()` and `to_json()` to `crustcore_daemon::product`.
   `to_markdown` is the **bounded** canonical PR-body/cockpit renderer: it opens with
@@ -249,6 +261,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/F.2 | Admin socket protocol: parse/frame(bounded)/nonce-auth + `dispatch_admin` (status/detail/cancel/kill) feeding the same owner-scoped path as Telegram; live listener `#[ignore]`d | `claude/v06-f2-adminsock` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 5, 11, 12; operator-only, owner-scoped cancel/kill |
 | 2026-06-28 | v0.6/C.3 | `EvidenceBundle::to_markdown` (bounded PR-body/cockpit render, 🔴 review notice, per-list overflow) + `to_json` (schema v1); `draft_pr_body` delegates | `claude/v06-c3-evidence` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 2, 10, 11; bounded redacted evidence, every receipt included |
 | 2026-06-28 | v0.6/D.1 | Task-loop wiring `plan_task`/`finalize_task` composing routing (C.1) + advisory gate (C.2) into a terminal `TaskOutcome`; sandboxed run `#[ignore]`d | `claude/v06-d1-executor-wire` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 5, 6, 13; verifier-owned completion, advisory only gates |
 | 2026-06-28 | v0.6/A.3 | `pr_intent_to_create_request`: PrIntent→CreatePrRequest for the live draft-PR POST; evidence body verbatim, draft=true; real POST `#[ignore]`d | `claude/v06-a3-draftpr` | Claude (Implementer) | 0 kB (daemon/live-only) | Enforces 6, 13, 14; body is evidence not a model claim |

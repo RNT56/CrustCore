@@ -35,6 +35,10 @@
 //! (`TODO(P10-net)`) land with the daemon runtime entry point.
 #![forbid(unsafe_code)]
 
+/// Remote admin socket protocol (roadmap-v0.6 F.2): authenticated operator commands
+/// (status / detail / cancel / kill) over a length-prefixed framed socket, feeding the
+/// same owner-scoped cancel/kill path as Telegram. Operator-only, never model-facing.
+pub mod admin;
 pub mod advisor;
 pub mod chat;
 pub mod exec;
