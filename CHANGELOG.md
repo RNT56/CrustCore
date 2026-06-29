@@ -30,6 +30,19 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **CI monitor → bounded repair loop (roadmap-v0.6 A.4).** Added to
+  `crustcore_daemon::github`: `aggregate_check_runs` folds per-check
+  `crustcore_net::github::CheckState`s into one overall state (**failure dominates**;
+  empty/any-pending → Pending), `monitor_decision` routes it (Pending→Wait /
+  Passed→Green / Failed→the existing budget-bounded `repair_decision` →
+  SpawnRepair/StopExhausted), and `repair_task_goal` builds a **bounded** failure-context
+  line from the untrusted failed-check names (capped to `MAX_REPAIR_CONTEXT_CHECKS` with
+  a "+N more" note). Repair is bounded by the budget (invariant 11), **CrustCore decides
+  repair — not a model or a PR comment** (invariant 4), and the decision uses the
+  *aggregated state*, never untrusted CI log text (invariant 7). The real polling loop is
+  the `#[ignore]`d `ci_monitor_live_poll_smoke` (`TODO(ci-monitor-live)`), catalogued in
+  runbook §B.8. 4 new tests; daemon-only; **zero nano impact**.
+
 - **Task-loop wiring (roadmap-v0.6 D.1).** Added `crustcore_daemon::task_loop`,
   composing the v0.6 decision cores into one pipeline: `plan_task` (routing C.1 →
   `ExecutionPlan`: Single / Fanout / AdvisoryOnly / Blocked) and `finalize_task`
@@ -235,6 +248,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/A.4 | CI monitor: `aggregate_check_runs` (failure-dominates) + `monitor_decision` (Wait/Green/SpawnRepair/StopExhausted over the budget) + bounded `repair_task_goal`; live poll `#[ignore]`d | `claude/v06-a4-cimonitor` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 7, 11; repair bounded, decided by CrustCore from aggregated state |
 | 2026-06-28 | v0.6/D.1 | Task-loop wiring `plan_task`/`finalize_task` composing routing (C.1) + advisory gate (C.2) into a terminal `TaskOutcome`; sandboxed run `#[ignore]`d | `claude/v06-d1-executor-wire` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 5, 6, 13; verifier-owned completion, advisory only gates |
 | 2026-06-28 | v0.6/A.3 | `pr_intent_to_create_request`: PrIntent→CreatePrRequest for the live draft-PR POST; evidence body verbatim, draft=true; real POST `#[ignore]`d | `claude/v06-a3-draftpr` | Claude (Implementer) | 0 kB (daemon/live-only) | Enforces 6, 13, 14; body is evidence not a model claim |
 | 2026-06-28 | v0.6/A.2 | Git credential-helper protocol: `parse_credential_request`/`authorize_credential`/`credential_helper_response`/`confining_git_config` — token reaches git only over the helper pipe, bound to a registered cap; live exec/push `#[ignore]`d | `claude/v06-a2-credproxy` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 1, 9, 13; no raw token in the sandbox, push confined to cap repo+prefix |
