@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crustcore_secrets::Redactor;
-use crustcore_types::{hmac_sha256, BoundedText};
+use crustcore_types::{ct_eq, hex32_decode, hmac_sha256, BoundedText};
 
 use crate::telegram::{CallbackData, Command, RuntimeEvent};
 
@@ -132,6 +132,15 @@ pub fn render_to_slack(text: &str, redactor: &Redactor) -> String {
 /// possible replay even if its signature is valid.
 pub const SLACK_MAX_SKEW_SECS: u64 = 300;
 
+/// Max accepted request-body size (bytes) for signature verification — bounds the work an
+/// unauthenticated caller can force (invariant 11), mirroring `MAX_WEBHOOK_BODY`. Rejected
+/// *before* the basestring is allocated or the HMAC is computed.
+pub const MAX_SLACK_BODY: usize = 1024 * 1024;
+
+/// Max accepted `X-Slack-Request-Timestamp` length (bytes). A unix timestamp is ~10
+/// digits; anything longer is malformed and rejected before any allocation.
+pub const MAX_SLACK_TIMESTAMP: usize = 32;
+
 /// Verifies a Slack request's signature **and** timestamp freshness — the "is this really
 /// from Slack" gate that runs *before* [`normalize_message`] ever sees the body.
 ///
@@ -170,6 +179,12 @@ impl SlackSignature {
         body: &[u8],
         now_unix_secs: u64,
     ) -> bool {
+        // 0. Bound the untrusted inputs BEFORE any allocation or HMAC work (invariant 11):
+        //    an oversized body/timestamp from an unauthenticated caller is rejected outright,
+        //    so it can never force an unbounded basestring allocation or HMAC computation.
+        if body.len() > MAX_SLACK_BODY || timestamp.len() > MAX_SLACK_TIMESTAMP {
+            return false;
+        }
         // 1. Freshness: a captured-and-replayed (or forward-dated) request is rejected even
         //    with a valid signature.
         let Ok(ts) = timestamp.parse::<u64>() else {
@@ -183,7 +198,7 @@ impl SlackSignature {
         let Some(hex) = signature.strip_prefix("v0=") else {
             return false;
         };
-        let Some(provided) = slack_hex32(hex) else {
+        let Some(provided) = hex32_decode(hex) else {
             return false;
         };
         let mut base = Vec::with_capacity(3 + timestamp.len() + 1 + body.len());
@@ -192,32 +207,8 @@ impl SlackSignature {
         base.push(b':');
         base.extend_from_slice(body);
         let expected = hmac_sha256(&self.secret, &base);
-        slack_ct_eq(&provided, &expected)
+        ct_eq(&provided, &expected)
     }
-}
-
-/// Constant-time 32-byte compare: visits every byte (no early return), so a near-miss
-/// signature cannot be distinguished from a far-miss by timing.
-fn slack_ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    a.iter()
-        .zip(b.iter())
-        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
-        == 0
-}
-
-/// Decodes exactly 64 hex chars into the 32-byte HMAC-SHA256 digest, or `None`.
-fn slack_hex32(s: &str) -> Option<[u8; 32]> {
-    let bytes = s.as_bytes();
-    if bytes.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for (slot, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
-        let hi = (pair[0] as char).to_digit(16)?;
-        let lo = (pair[1] as char).to_digit(16)?;
-        *slot = (hi * 16 + lo) as u8;
-    }
-    Some(out)
 }
 
 #[cfg(test)]
@@ -366,6 +357,19 @@ mod tests {
             body,
             1700000000
         ));
+    }
+
+    #[test]
+    fn an_oversized_body_or_timestamp_is_rejected_before_any_work() {
+        let v = SlackSignature::new(SIGNING_SECRET);
+        let ts = "1700000000";
+        // A body past the bound is refused outright (invariant 11) — even though we never
+        // even reach the signature step, fail-closed returns false.
+        let huge = vec![b'x'; MAX_SLACK_BODY + 1];
+        assert!(!v.verify(&valid_sig(ts, &huge), ts, &huge, 1700000005));
+        // An over-long timestamp is likewise refused before allocation.
+        let long_ts = "1".repeat(MAX_SLACK_TIMESTAMP + 1);
+        assert!(!v.verify("v0=deadbeef", &long_ts, b"{}", 1700000005));
     }
 
     #[test]

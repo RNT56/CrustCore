@@ -10,15 +10,21 @@
 optional capability packs.
 **Repository:** https://github.com/RNT56/CrustCore
 **Status:** v0.1 done; **v0.2 (Track A "light it up"), v0.3 (Track B "expand", B1–B6),
-and v0.4 (Track C "compose & adopt", C1–C7) merged — tagged `v0.4.0`** — Phases 0–16
+and v0.4 (Track C "compose & adopt", C1–C7) merged — tagged `v0.4.0`; v0.5 (version roll)
+and v0.6 (the GitHub-PR-supervisor roadmap — GitHub-App onboarding, a richer verifier +
+repo memory, task-shape routing / multi-verifier review / evidence bundles, the daemon
+task-loop, the loopback cockpit + `/crustcore` GitHub commands + Slack control plane +
+CoT-stream redaction, and runtime lease-recovery / admin socket / multi-repo) merged to
+`main`** — the signed tag/sign/publish is the only maintainer-owned step left. Phases 0–16
 plus every Track A phase (P5-join, P7-live, P8-store, P9-net, P10-net, P11-exec,
 P12-native, P13-net, P14-store), every Track B surface (B1-mcp-modes, B2-gh-app,
-B3-vector-memory, B4-sandbox-tiers, B5-autoloop, B6-release-infra), and every Track C
-phase (C1-providers, C2-toolmacro, C3-flow, C4-session, C5-rag, C6-telemetry, C7-devui)
-are complete and merged (see [`docs/roadmap-v0.2.md`](./docs/roadmap-v0.2.md)). Green
+B3-vector-memory, B4-sandbox-tiers, B5-autoloop, B6-release-infra), every Track C
+phase (C1-providers, C2-toolmacro, C3-flow, C4-session, C5-rag, C6-telemetry, C7-devui),
+and every v0.6 task are complete and merged (see [`docs/roadmap-v0.6.md`](./docs/roadmap-v0.6.md),
+and the earlier [`docs/roadmap-v0.2.md`](./docs/roadmap-v0.2.md)). Green
 `cargo xtask verify` on Linux and macOS; nano **478.7 KiB** (Linux x86_64, the flagship
 target; 412.0 KiB on macOS), 59.8% of the 800 kB budget — within the < 600 kB stretch
-goal; **~834** workspace tests; the v0.1
+goal; **~1,120** workspace tests; the v0.1
 [definition of done](./ROADMAP.md) §22, all 12 criteria, is met. The trusted
 `Kernel::step` state machine is real (task/job transitions, typed budgets, approval
 request/resolution; sync, deterministic, no async/net/db, no wall clock). The

@@ -376,8 +376,30 @@ agent/PR/role/size/invariant audit trail.
   `VerifierPlan` without reading repo contents or granting authority. No kernel
   or nano changes; no new dependencies.
 
+### Fixed
+
+- **Final-polish audit (multi-agent) — fixed 5 union-merge + hygiene defects.** A
+  comprehensive end-to-end audit (6 finder dimensions; every finding adversarially
+  verified to reject churn) surfaced, and this fixes: a missing untrusted-input bound on
+  `SlackSignature::verify` (body/timestamp are now capped — `MAX_SLACK_BODY` /
+  `MAX_SLACK_TIMESTAMP` — **before** any allocation or HMAC work, invariant 11); the
+  duplicate `### Added` block under `[0.5.0]` (a union-merge artifact — consolidated into
+  one section, no content lost); the out-of-order `F.4`–`F.7` subsections in
+  `docs/live-socket-validation.md` (reordered to ascending); and the stale `~834` test
+  count in `README.md` (badge + table → `~1,120`). A separate architecture re-audit found
+  **no** trust-boundary defects across the v0.6 additions (Slack/cockpit/admin/multirepo/
+  token-stream). Non-nano + docs; one new bound test; `cargo xtask verify` green.
+
 ### Changed
 
+- **Consolidated the duplicated security primitives into `crustcore-types::hash`.** The
+  constant-time 32-byte compare (`ct_eq`) and the hex decoders (`hex_val`, `hex32_decode`)
+  were copy-pasted across `crustcore-receipts`, `crustcore-daemon` (webhook + Slack), and
+  `crustcore-dev` (auth + backend). They now live **once**, beside `sha256`/`hmac_sha256`,
+  as the single audited home for every MAC/signature check. Behaviour-identical (each
+  consumer's security tests pass unchanged); net nano size impact ~0 (the code already sat
+  in the nano-linked `receipts`/`types` graph). Also removed the now-unused `DaemonSurface`
+  marker enum. 3 new primitive tests.
 - **Workspace version bumped `0.4.0` → `0.5.0`.** Aligns the `[workspace.package]`
   version (and all 26 internal path-dependency pins) with the rolled `[0.5.0]`
   changelog section, so prebuilt artifacts (`crustcore --version`, the release
@@ -449,33 +471,6 @@ agent/PR/role/size/invariant audit trail.
   live I/O (HTTP/TLS, DBs, tree-sitter) never links in. README + CLAUDE.md size tables updated.
   Invariant 19/20 (the same size-discipline thesis, now measured for the full build too).
 
-### Fixed
-
-- **Docs accuracy — corrected the nano size figures + test count (a final-polish audit
-  finding).** The contract/overview docs cited **412.0 KiB / 51.5%** as the flagship "Linux
-  x86_64" nano size, but that is the **macOS** figure — the CI size gate reports Linux x86_64
-  at **478.7 KiB (490184 bytes), 59.8%** of the 800 kB budget (still within the < 600 kB
-  *stretch* goal). The macOS figure is the smaller one (~412 KiB). Corrected across
-  `CLAUDE.md`, `README.md` (badge + prose + tier table + size-check example), and
-  `docs/roadmap-v0.2.md` (intro). Also refreshed the stale workspace **test count
-  (~663 → ~834)**. No code change — nano is byte-identical across this session's feature work
-  (confirmed: no nano-linked crate changed); the figures were simply mislabeled/stale.
-
-- **Chat front-door polish — two gaps found by an end-to-end completeness audit, closed.**
-  (1) **Route-aware budgets:** the chat classifier emits 4 execution routes
-  (QuickFix/Feature/Project/Continue) and threaded them to `LoopAction::LaunchTask.route`, but
-  the runtime *discarded* `route` and launched every task with one default budget — a dangling
-  feature. `runtime::budget_for_route` now honors it with tiered per-task budgets (QuickFix
-  tight → Project the generous default; Continue → Feature tier), wired through `TaskRunner::
-  launch` and the PR-gated path. (2) **Abuse suppressor:** `telegram::AbuseSuppressor` (bounded,
-  per-chat, deterministic over injected time) rate-limits how often a not-allowlisted chat's
-  rejections are surfaced, so a flooding chat can't spam the risk signal (`docs/telegram.md`
-  §4) — the allowlist still rejects every message; this only smooths reporting. 5 new tests.
-  The audit also **refuted a false high-severity finding** (task progress reaching the user
-  unredacted — `renderer.notice` IS the sanctioned declassifier) and confirmed all 20 invariants
-  are structurally enforced + tested. Invariants 11. Nano: n/a (daemon-only).
-
-### Added
 
 - **Supervisor fan-out coordinator (`P11`) — race verified proposers, the verifier picks the
   winner.** `crustcore_daemon::exec::run_fanout` is the multi-proposer extension of
@@ -813,6 +808,32 @@ agent/PR/role/size/invariant audit trail.
   (persona + steering) — and prints a readiness report; the live Bot-API long-poll loop
   stays `TODO(P9-net-live)` (no fake network loop). Pure `parse_args` unit-tested (11
   tests). Non-nano, no new deps, nano unaffected.
+
+### Fixed
+
+- **Docs accuracy — corrected the nano size figures + test count (a final-polish audit
+  finding).** The contract/overview docs cited **412.0 KiB / 51.5%** as the flagship "Linux
+  x86_64" nano size, but that is the **macOS** figure — the CI size gate reports Linux x86_64
+  at **478.7 KiB (490184 bytes), 59.8%** of the 800 kB budget (still within the < 600 kB
+  *stretch* goal). The macOS figure is the smaller one (~412 KiB). Corrected across
+  `CLAUDE.md`, `README.md` (badge + prose + tier table + size-check example), and
+  `docs/roadmap-v0.2.md` (intro). Also refreshed the stale workspace **test count
+  (~663 → ~834)**. No code change — nano is byte-identical across this session's feature work
+  (confirmed: no nano-linked crate changed); the figures were simply mislabeled/stale.
+
+- **Chat front-door polish — two gaps found by an end-to-end completeness audit, closed.**
+  (1) **Route-aware budgets:** the chat classifier emits 4 execution routes
+  (QuickFix/Feature/Project/Continue) and threaded them to `LoopAction::LaunchTask.route`, but
+  the runtime *discarded* `route` and launched every task with one default budget — a dangling
+  feature. `runtime::budget_for_route` now honors it with tiered per-task budgets (QuickFix
+  tight → Project the generous default; Continue → Feature tier), wired through `TaskRunner::
+  launch` and the PR-gated path. (2) **Abuse suppressor:** `telegram::AbuseSuppressor` (bounded,
+  per-chat, deterministic over injected time) rate-limits how often a not-allowlisted chat's
+  rejections are surfaced, so a flooding chat can't spam the risk signal (`docs/telegram.md`
+  §4) — the allowlist still rejects every message; this only smooths reporting. 5 new tests.
+  The audit also **refuted a false high-severity finding** (task progress reaching the user
+  unredacted — `renderer.notice` IS the sanctioned declassifier) and confirmed all 20 invariants
+  are structurally enforced + tested. Invariants 11. Nano: n/a (daemon-only).
 
 ### Changed
 

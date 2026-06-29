@@ -9,6 +9,8 @@
 
 use std::fmt;
 
+use crustcore_types::hex_val;
+
 /// Number of random bytes in a launch token (256 bits).
 pub const TOKEN_BYTES: usize = 32;
 
@@ -96,15 +98,6 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
         i += 2;
     }
     Some(out)
-}
-
-fn hex_val(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
-    }
 }
 
 /// The result of authenticating a request.

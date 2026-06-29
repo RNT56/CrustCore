@@ -24,7 +24,7 @@ use crustcore_eventlog::{ChainStatus, EventLog, RedactionState};
 use crustcore_receipts::join::JoinStatus;
 use crustcore_receipts::ToolReceipt;
 use crustcore_secrets::Redactor;
-use crustcore_types::{ArtifactId, EventSeq, TaskId, Timestamp};
+use crustcore_types::{hex_val, ArtifactId, EventSeq, TaskId, Timestamp};
 
 // ---------------------------------------------------------------------------
 // View models — already redacted, already bounded. Carry NO live/secret types.
@@ -437,15 +437,6 @@ fn decode_hex32(s: &str) -> Option<[u8; 32]> {
         i += 1;
     }
     Some(out)
-}
-
-fn hex_val(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
-    }
 }
 
 impl ReadOnlyBackend for MockDevBackend {
