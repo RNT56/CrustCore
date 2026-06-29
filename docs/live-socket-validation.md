@@ -81,6 +81,7 @@ cargo test --workspace -- --list --ignored
 | `live_get_updates_smoke` | F | `live` | [F.1](#f1) | `RestTelegram` shaping + redaction ✓ | easy (bot token) |
 | `live_telegram_round_trip_smoke` | F | `live` | [F.2](#f2) | runtime-channel decision logic ✓ | easy (bot token) |
 | `live_ws_sse_emits_a_snapshot` | F | — | [F.3](#f3) | snapshot serialize + `ws_stream` ✓ | easy (loopback port) |
+| `multi_repo_live_smoke` | F | — | [F.5](#f5) | `classify_repo` routing core ✓ | medium (multiple repos) |
 
 ---
 
@@ -417,6 +418,19 @@ cargo test --workspace -- --list --ignored
 > The **chat front door** and the **self-improvement loop** are runtime loops too;
 > their live inches are covered by [F.2](#f2)/[A.2](#a2) (model + channel) and
 > [B.4](#b4) (the draft-PR POST) respectively.
+
+<a id="f5"></a>
+### F.5 — `multi_repo_live_smoke` — multi-repo orchestration (F.3)
+- **Test:** `crustcore-daemon/src/multirepo.rs::tests::multi_repo_live_smoke`. Seam tag `TODO(P10-multi-repo-live)`.
+- **Socket:** the multi-repo CLI startup (`--repo id=/path`) + a simultaneous-task run.
+- **CI core (passing):** `classify_repo` (explicit-hint routing, sole-repo default, ambiguous
+  → `None`, case-insensitive, path-free — repo paths come from config/CLI, never the intent,
+  invariant 7). The registry already supervises repo-agnostic tasks under the global cap
+  (invariant 11).
+- **Prereq:** two or more real repos bound at startup.
+- **Run:** `cargo test -p crustcore-daemon multirepo::tests::multi_repo_live_smoke -- --ignored --nocapture`
+- **Success:** a launch routes to the right repo profile; two repos run tasks
+  simultaneously under the shared global concurrency cap. **Difficulty: medium.**
 
 ---
 

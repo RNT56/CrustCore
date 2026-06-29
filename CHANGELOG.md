@@ -30,6 +30,18 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Multi-repo orchestration skeleton (roadmap-v0.6 F.3).** Added
+  `crustcore_daemon::multirepo`: `RepoId`, `RepoBinding` (id/path/verify/base/keywords,
+  from config/CLI), and a pure `classify_repo(intent, repos) → Option<RepoId>` that routes
+  a chat launch — exactly one keyword hint → that repo; no hint + a single bound repo →
+  the sole-repo default; ambiguous (multiple hits) or unhinted-with-multiple → `None`
+  (the dispatcher asks "which repo?" rather than guessing). The intent is matched only
+  against **operator-supplied keywords** and never supplies a path (invariant 7); the
+  global concurrency cap is unchanged (invariant 11). The live `--repo id=/path` CLI
+  startup + a simultaneous-task run is the `#[ignore]`d `multi_repo_live_smoke`
+  (`TODO(P10-multi-repo-live)`), catalogued in runbook §F.5. 4 new tests; daemon-only;
+  **zero nano impact**.
+
 - **Evidence bundle rendering (roadmap-v0.6 C.3).** Added
   `EvidenceBundle::to_markdown()` and `to_json()` to `crustcore_daemon::product`.
   `to_markdown` is the **bounded** canonical PR-body/cockpit renderer: it opens with
@@ -249,6 +261,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/F.3 | `multirepo::classify_repo` (explicit-hint → sole-repo default → ambiguous asks) + `RepoBinding`; intent matches operator keywords only, never supplies a path | `claude/v06-f3-multirepo` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 7, 11; repo paths from config/CLI, shared global cap |
 | 2026-06-28 | v0.6/C.3 | `EvidenceBundle::to_markdown` (bounded PR-body/cockpit render, 🔴 review notice, per-list overflow) + `to_json` (schema v1); `draft_pr_body` delegates | `claude/v06-c3-evidence` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 2, 10, 11; bounded redacted evidence, every receipt included |
 | 2026-06-28 | v0.6/D.1 | Task-loop wiring `plan_task`/`finalize_task` composing routing (C.1) + advisory gate (C.2) into a terminal `TaskOutcome`; sandboxed run `#[ignore]`d | `claude/v06-d1-executor-wire` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 5, 6, 13; verifier-owned completion, advisory only gates |
 | 2026-06-28 | v0.6/A.3 | `pr_intent_to_create_request`: PrIntent→CreatePrRequest for the live draft-PR POST; evidence body verbatim, draft=true; real POST `#[ignore]`d | `claude/v06-a3-draftpr` | Claude (Implementer) | 0 kB (daemon/live-only) | Enforces 6, 13, 14; body is evidence not a model claim |
