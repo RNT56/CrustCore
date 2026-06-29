@@ -73,6 +73,10 @@ pub mod supervisor;
 /// `live` feature — it reuses the worktree/sandbox/verifier flow (non-nano deps).
 #[cfg(feature = "live")]
 pub mod task;
+/// Task-loop wiring (roadmap-v0.6 D.1): composes routing (C.1) → execution plan →
+/// `orchestrate_review` (C.2) → terminal `TaskOutcome`. Pure decision cores; the
+/// sandboxed `run_fanout`/`WorktreeSubagentExecutor` run is the live seam.
+pub mod task_loop;
 pub mod telegram;
 pub mod webhook;
 

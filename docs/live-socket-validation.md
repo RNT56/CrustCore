@@ -70,6 +70,7 @@ cargo test --workspace -- --list --ignored
 | `live_grep_lines_on_this_repo` | C | — | [C.4](#c4) | arg build + output parse ✓ | easy (git repo) |
 | `live_list_files_on_this_repo` | C | — | [C.4](#c4) | arg build + output parse ✓ | easy (git repo) |
 | `live_parse_test_manifest_reads_a_real_manifest` | C | — | [C.5](#c5) | pure `parse_test_manifest` over text ✓ | easy (a repo file) |
+| `live_executor_wire_smoke` | C | — | [C.6](#c6) | `plan_task`/`finalize_task` route+gate cores ✓ | hard (sandbox+repo) |
 | `live_insert_query_delete_roundtrip` (lancedb) | D | — | [D.1](#d1) | in-memory store roundtrip ✓ | medium (LanceDB) |
 | `live_upsert_search_delete_roundtrip` (qdrant) | D | — | [D.2](#d2) | in-memory store roundtrip ✓ | easy (docker qdrant) |
 | `live_post_to_loopback_collector` | D | — | [D.3](#d3) | OTLP/GenAI payload assembly ✓ | easy (docker otel) |
@@ -287,6 +288,22 @@ cargo test --workspace -- --list --ignored
   (invariant 13). **Difficulty: easy.**
 
 ---
+
+<a id="c6"></a>
+### C.6 — `live_executor_wire_smoke` — end-to-end task loop (D.1)
+- **Test:** `crustcore-daemon/src/task_loop.rs::tests::live_executor_wire_smoke`. Seam tag `TODO(P3-live-executor-wire)`.
+- **Socket:** a real sandbox backend + a git repo worktree + a configured executor —
+  the full pipeline route → `run_fanout`/`run_subagent` → verify → finalize → draft PR.
+- **CI core (passing):** `plan_task` (routing → `ExecutionPlan`) and `finalize_task`
+  (verifier result + advisory verdicts → terminal `TaskOutcome`) are pure and fully
+  CI-tested over the routing/review cores; the executor (`run_subagent`/`run_fanout`)
+  is already CI-tested over a mock `SubagentExecutor`.
+- **Prereq:** `bubblewrap`/`sandbox-exec` + a git repo + a configured executor (Codex/
+  Claude Code/external command).
+- **Run:** `cargo test -p crustcore-daemon --features live task_loop::tests::live_executor_wire_smoke -- --ignored --nocapture`
+- **Success:** a routed task runs in a sandboxed worktree, the verifier accepts a
+  candidate (`VerifiedPatch`), the advisory gate clears, and a draft PR is proposed —
+  integration only after a verifier pass (invariant 13). **Difficulty: hard.**
 
 ## D. Vector / embedding / telemetry
 
