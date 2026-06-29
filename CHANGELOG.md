@@ -30,6 +30,16 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **End-to-end issue → draft PR live smoke (roadmap-v0.6 A.5).** Added the `#[ignore]`d
+  `live_issue_to_pr_smoke` (`crustcore-eval`, `TODO(issue-to-pr-live)`): the irreducible
+  live composition of the whole PR-Supervisor wedge — untrusted issue → routed (C.1) +
+  sandbox-verified (`VerifiedPatch`, invariant 13) → credential-proxy push (A.2) →
+  evidence-backed draft PR (A.3/C.3, body is evidence not a model claim, invariant 6) →
+  bounded CI repair (A.4, invariant 11). The whole **decision path** is already CI-tested
+  socket-free by `golden_issue_to_pr_flow`; this seam needs a real App + sandbox + repo.
+  Catalogued in runbook §B.9. **This completes Phase A (PR Supervisor go-live).** Test +
+  runbook only; **zero nano impact**.
+
 - **CI monitor → bounded repair loop (roadmap-v0.6 A.4).** Added to
   `crustcore_daemon::github`: `aggregate_check_runs` folds per-check
   `crustcore_net::github::CheckState`s into one overall state (**failure dominates**;
@@ -274,6 +284,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/A.5 | `#[ignore]`d `live_issue_to_pr_smoke` composing A.1–A.4 + D.1 end-to-end; CI decision path already covered by `golden_issue_to_pr_flow`. Completes Phase A | `claude/v06-a5-issuetopr` | Claude (Implementer) | 0 kB (eval/docs only) | Composes 6, 11, 13; verifier-owned end-to-end |
 | 2026-06-28 | v0.6/A.4 | CI monitor: `aggregate_check_runs` (failure-dominates) + `monitor_decision` (Wait/Green/SpawnRepair/StopExhausted over the budget) + bounded `repair_task_goal`; live poll `#[ignore]`d | `claude/v06-a4-cimonitor` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 7, 11; repair bounded, decided by CrustCore from aggregated state |
 | 2026-06-28 | v0.6/B.2 | `score_candidate`/`pick_best` scored fan-out selection; correctness dominates so verified always > unverified (scoring never bypasses the verifier); smaller-diff/more-gates rank higher, ties→first | `claude/v06-b2-scoring` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 6, 11, 13; scoring is a tie-break among accepted, never a bypass |
 | 2026-06-28 | v0.6/C.3 | `EvidenceBundle::to_markdown` (bounded PR-body/cockpit render, 🔴 review notice, per-list overflow) + `to_json` (schema v1); `draft_pr_body` delegates | `claude/v06-c3-evidence` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 2, 10, 11; bounded redacted evidence, every receipt included |
