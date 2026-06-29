@@ -30,6 +30,19 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Slack runtime control plane (roadmap-v0.6 E.3).** Added `crustcore_daemon::slack`:
+  a pure `SlackAllowlist` (per-workspace/per-channel, **deny-all empty** — invariants 5,
+  15), `normalize_message(msg, allowlist) → Option<RuntimeEvent>` that maps a Slack event
+  onto the **same `RuntimeEvent` stream as Telegram** (plain → `QueuedTurn`, `!` → `Steer`,
+  `/` → `Command`, reaction → `ApprovalCallback` with the same nonce format) — so Slack
+  routes through the same policy gates, **not a parallel ungoverned surface** (invariants
+  8, 16) — and `render_to_slack` which **redacts every secret** before any message leaves
+  (invariants 1–3). Text is untrusted + bounded (invariants 7, 11); approvals come from
+  Slack users gated by the allowlist, never model output (invariant 4); Slack is opt-in,
+  operator-bound via CLI (invariant 15). The Slack Bot API + Events-API/Socket-Mode
+  listener is the `live`-gated `#[ignore]`d `slack_live_round_trip_smoke`
+  (`TODO(slack-live)`), in runbook §F.7. 5 new tests; daemon-only; **zero nano impact**.
+
 - **Evidence bundle rendering (roadmap-v0.6 C.3).** Added
   `EvidenceBundle::to_markdown()` and `to_json()` to `crustcore_daemon::product`.
   `to_markdown` is the **bounded** canonical PR-body/cockpit renderer: it opens with
@@ -249,6 +262,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/E.3 | `slack::SlackAllowlist` + `normalize_message` mirroring Telegram (same RuntimeEvent stream + gates, deny-all empty) + redacted `render_to_slack`; live API `#[ignore]`d | `claude/v06-e3-slack` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 1-5, 7, 8, 11, 15, 16; opt-in, redacted, same dispatch as Telegram |
 | 2026-06-28 | v0.6/C.3 | `EvidenceBundle::to_markdown` (bounded PR-body/cockpit render, 🔴 review notice, per-list overflow) + `to_json` (schema v1); `draft_pr_body` delegates | `claude/v06-c3-evidence` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 2, 10, 11; bounded redacted evidence, every receipt included |
 | 2026-06-28 | v0.6/D.1 | Task-loop wiring `plan_task`/`finalize_task` composing routing (C.1) + advisory gate (C.2) into a terminal `TaskOutcome`; sandboxed run `#[ignore]`d | `claude/v06-d1-executor-wire` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 5, 6, 13; verifier-owned completion, advisory only gates |
 | 2026-06-28 | v0.6/A.3 | `pr_intent_to_create_request`: PrIntent→CreatePrRequest for the live draft-PR POST; evidence body verbatim, draft=true; real POST `#[ignore]`d | `claude/v06-a3-draftpr` | Claude (Implementer) | 0 kB (daemon/live-only) | Enforces 6, 13, 14; body is evidence not a model claim |

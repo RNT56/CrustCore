@@ -64,6 +64,10 @@ pub mod reviewer;
 pub mod router;
 pub mod runtime;
 pub mod selfimprove;
+/// Slack runtime control plane (roadmap-v0.6 E.3): a pure `SlackAllowlist` +
+/// `normalize_message` that mirror Telegram — feeding the same `RuntimeEvent` stream
+/// through the same policy gates (opt-in, deny-all empty, redacted, nonce approvals).
+pub mod slack;
 pub mod supervisor;
 /// Chat-launched verified tasks (the "do the work" half of the front door). Behind the
 /// `live` feature — it reuses the worktree/sandbox/verifier flow (non-nano deps).
