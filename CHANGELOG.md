@@ -30,6 +30,19 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Scored verified candidates (roadmap-v0.6 B.2).** Added `crustcore_daemon::score`:
+  `score_candidate(PatchMetadata, RiskTier) → PatchScore` and `pick_best` select the
+  **best verifier-accepted** fan-out candidate instead of merely the first accepted.
+  Correctness dominates by construction — the `VERIFIED_BONUS` (100) exceeds the sum of
+  every other term (diff penalty ≤50, gates ≤20, security ≤8), so a verified candidate
+  *always* outranks an unverified one: **scoring reorders accepted candidates but can
+  never promote an unverified patch** (invariants 6, 13). Among verified candidates a
+  smaller diff and more gates passed rank higher, with a small security-review boost;
+  ties keep the first proposer (deterministic). Pure + total — missing metadata defaults
+  to zero and never fails (the live executor fills it from the real `VerifiedPatch`, the
+  existing P11-exec-live seam). 7 new tests incl. the golden fail/pass-large/pass-small
+  ranking; daemon-only; **zero nano impact**.
+
 - **Real draft-PR creation mapping (roadmap-v0.6 A.3).** Added the `live`-gated
   `crustcore_daemon::github::pr_intent_to_create_request`: maps the backend's
   `PrIntent` (minted by `open_pr` **only** from a `VerifiedPatch` + a valid
@@ -222,6 +235,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/B.2 | `score_candidate`/`pick_best` scored fan-out selection; correctness dominates so verified always > unverified (scoring never bypasses the verifier); smaller-diff/more-gates rank higher, ties→first | `claude/v06-b2-scoring` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 6, 11, 13; scoring is a tie-break among accepted, never a bypass |
 | 2026-06-28 | v0.6/A.3 | `pr_intent_to_create_request`: PrIntent→CreatePrRequest for the live draft-PR POST; evidence body verbatim, draft=true; real POST `#[ignore]`d | `claude/v06-a3-draftpr` | Claude (Implementer) | 0 kB (daemon/live-only) | Enforces 6, 13, 14; body is evidence not a model claim |
 | 2026-06-28 | v0.6/A.2 | Git credential-helper protocol: `parse_credential_request`/`authorize_credential`/`credential_helper_response`/`confining_git_config` — token reaches git only over the helper pipe, bound to a registered cap; live exec/push `#[ignore]`d | `claude/v06-a2-credproxy` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 1, 9, 13; no raw token in the sandbox, push confined to cap repo+prefix |
 | 2026-06-28 | v0.6/C.2 | Multi-verifier advisory gate: `required_reviewers` + `orchestrate_review` folding Reviewer/SecurityAuditor verdicts + verifier result via `decide_integration`; veto-not-approval, times out into refusal | `claude/v06-c2-reviewer` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 5, 13; verdicts veto, verifier still completes |
