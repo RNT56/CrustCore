@@ -61,6 +61,7 @@ cargo test --workspace -- --list --ignored
 | `gh_live` | B | `live` | [B.2](#b2) | canned-REST request rendering ✓ | easy (PAT) |
 | `live_serve_webhooks_once_round_trip` | B | `live` | [B.3](#b3) | HMAC verify + bound + dedup ✓ | medium (port + POST) |
 | `live_draft_pr_post_smoke` | B/F | `live` | [B.4](#b4) | eval→contract gate→`draft_pr_request` ✓ | hard (patch+approval+token) |
+| `cred_proxy_live_push_smoke` | B | — | [B.5](#b5) | argv-parse + validate_push + cred-request authorize ✓ | hard (token+repo+worktree) |
 | `live_worktree_executor_accepts_only_verifier_evidence` | C | `live` | [C.1](#c1) | scheduler/budget/verifier-owned accept ✓ | medium (sandbox+git) |
 | `run_one_task_completes_only_on_verifier_evidence` | C | `live` | [C.2](#c2) | task lifecycle decision core ✓ | medium (sandbox+git) |
 | `live_verify_node_completes_only_on_a_real_verified_patch` | C | — | [C.3](#c3) | flow graph w/ mock verify driver ✓ | medium (sandbox+git) |
@@ -189,6 +190,22 @@ cargo test --workspace -- --list --ignored
   **Difficulty: hard.**
 
 ---
+
+<a id="b5"></a>
+### B.5 — `cred_proxy_live_push_smoke` — credential-proxy branch push (A.2)
+- **Test:** `crustcore-daemon/src/github.rs::tests::cred_proxy_live_push_smoke`. Seam tag `TODO(cred-proxy-live)`.
+- **Socket:** the credential-helper **subprocess exec** + a real `git push` to GitHub.
+- **CI core (passing):** `parse_push_argv` (every force spelling) + `validate_push`
+  (refspec smuggling, multi-ref, protected branches) + `parse_credential_request` +
+  `authorize_credential` (https/github.com/registered-repo only) +
+  `credential_helper_response` (`x-access-token` + token) + `confining_git_config`
+  (reset-then-set-only-ours, `useHttpPath`).
+- **Prereq:** a registered test repo + a minted installation token + a worktree with a
+  verified branch under the `crustcore/` prefix.
+- **Run:** `cargo test -p crustcore-daemon github::tests::cred_proxy_live_push_smoke -- --ignored --nocapture`
+- **Success:** the branch pushes; the token **never** appears in the worker/verifier
+  env, argv, or logs (it reaches `git` only over the helper pipe); an out-of-prefix or
+  protected-branch push is rejected. **Difficulty: hard.**
 
 ## C. Sandbox backend (`bubblewrap` / `sandbox-exec`) + git
 
