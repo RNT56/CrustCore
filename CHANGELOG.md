@@ -30,6 +30,20 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **GitHub `/crustcore` slash commands (roadmap-v0.6 E.2).** Added the pure parser
+  `crustcore_daemon::github_commands`: `parse_command(text) → Option<GithubCommand>`
+  turns an **untrusted** PR/issue comment into a typed, bounded command —
+  `Run{goal,dir}` / `Retry{id}` / `Cancel{id}` / `Explain{id}` / `RiskDetected(reason)`.
+  Flag-style args (`--goal`, `--dir`); the goal is bounded to `MAX_GOAL` (512) and stays
+  a **literal string** (a prompt injection in the goal is inert data, never interpreted —
+  invariant 7); ids parse strictly as `u64`; one command per comment (extras counted for
+  logging); anything malformed/unknown becomes `RiskDetected`, **never silently dropped**.
+  These route through the *same* policy-gated dispatch as Telegram (invariants 8, 16 — not
+  a parallel ungoverned surface); the author-authorization check + webhook→dispatch
+  round-trip remain the live parts (reusing `B2-webhook-live`). 8 new tests
+  (incl. injection-as-literal + prose-isolation + first-wins + bounds); daemon-only;
+  **zero nano impact**.
+
 - **End-to-end issue → draft PR live smoke (roadmap-v0.6 A.5).** Added the `#[ignore]`d
   `live_issue_to_pr_smoke` (`crustcore-eval`, `TODO(issue-to-pr-live)`): the irreducible
   live composition of the whole PR-Supervisor wedge — untrusted issue → routed (C.1) +
@@ -284,6 +298,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/E.2 | `github_commands::parse_command`: untrusted PR comment → typed bounded `/crustcore` command (Run/Retry/Cancel/Explain/RiskDetected); injection stays literal; routes through the Telegram dispatch | `claude/v06-e2-ghcommands` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 7, 8, 11, 16; parsed by the daemon, never model output |
 | 2026-06-28 | v0.6/A.5 | `#[ignore]`d `live_issue_to_pr_smoke` composing A.1–A.4 + D.1 end-to-end; CI decision path already covered by `golden_issue_to_pr_flow`. Completes Phase A | `claude/v06-a5-issuetopr` | Claude (Implementer) | 0 kB (eval/docs only) | Composes 6, 11, 13; verifier-owned end-to-end |
 | 2026-06-28 | v0.6/A.4 | CI monitor: `aggregate_check_runs` (failure-dominates) + `monitor_decision` (Wait/Green/SpawnRepair/StopExhausted over the budget) + bounded `repair_task_goal`; live poll `#[ignore]`d | `claude/v06-a4-cimonitor` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 7, 11; repair bounded, decided by CrustCore from aggregated state |
 | 2026-06-28 | v0.6/B.2 | `score_candidate`/`pick_best` scored fan-out selection; correctness dominates so verified always > unverified (scoring never bypasses the verifier); smaller-diff/more-gates rank higher, ties→first | `claude/v06-b2-scoring` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 6, 11, 13; scoring is a tie-break among accepted, never a bypass |
