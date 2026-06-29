@@ -43,14 +43,14 @@ pub mod advisor;
 pub mod chat;
 pub mod exec;
 pub mod github;
-/// Multi-repo orchestration (roadmap-v0.6 F.3): bind several repos at startup and a pure
-/// `classify_repo` that routes a chat launch to the right one (explicit hint → sole-repo
-/// default → ambiguous asks). Repo paths from config/CLI, never model/user input.
-pub mod multirepo;
 /// GitHub `/crustcore` slash commands (roadmap-v0.6 E.2): a pure parser turning an
 /// untrusted PR/issue comment into a typed, bounded `GithubCommand` routed through the
 /// same policy-gated dispatch as Telegram — never free text to a model.
 pub mod github_commands;
+/// Multi-repo orchestration (roadmap-v0.6 F.3): bind several repos at startup and a pure
+/// `classify_repo` that routes a chat launch to the right one (explicit hint → sole-repo
+/// default → ambiguous asks). Repo paths from config/CLI, never model/user input.
+pub mod multirepo;
 /// GitHub App onboarding (roadmap-v0.6 A.1): turns an untrusted install redirect
 /// into a registered, write-capable repo + a minted `Approved<GitHubWriteCap>`.
 /// Pure decision core; the install-confirm + token-mint are the live seam.
