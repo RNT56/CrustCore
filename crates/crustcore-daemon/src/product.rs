@@ -2059,12 +2059,21 @@ impl EvidenceBundle {
         line
     }
 
-    /// Renders the evidence block intended for a draft PR body.
+    /// Renders the evidence bundle to **bounded** Markdown for a draft-PR body or the
+    /// cockpit (roadmap-v0.6 C.3). Every list is capped to the same bounds the JSON
+    /// export uses (invariant 11 — no unbounded dump), appending a "…N more (see audit
+    /// JSON)" line when truncated, and every receipt that fits is included (invariant
+    /// 10). Notes/risks are already redacted+bounded on the way in (invariant 2). Opens
+    /// with the unmissable human-review notice — CrustCore opens *draft* PRs; a human
+    /// approves the merge (invariant 14).
     #[must_use]
-    pub fn draft_pr_body(&self) -> String {
+    pub fn to_markdown(&self) -> String {
         let mut body = String::new();
         body.push_str("## CrustCore evidence-backed draft PR\n\n");
-        body.push_str("Machine-produced change. Human review required before merge.\n\n");
+        body.push_str(
+            "🔴 **Human review required before merge** — machine-produced change; a human \
+             approves the merge.\n\n",
+        );
         body.push_str(&format!("- Run: `{}`\n", bound(&self.run_id, 160)));
         body.push_str(&format!("- State: `{}`\n", self.lifecycle.label()));
         body.push_str(&format!(
@@ -2079,33 +2088,72 @@ impl EvidenceBundle {
         if let Some(hash) = &self.patch_hash {
             body.push_str(&format!("- Patch: `{}`\n", bound(hash, 128)));
         }
+
         body.push_str("\n### Verifier Commands\n");
         if self.commands.is_empty() {
             body.push_str("- none recorded\n");
         } else {
-            for command in &self.commands {
-                body.push_str(&format!(
-                    "- `{}` - {}\n",
-                    bound(&command.command, 240),
-                    if command.passed { "passed" } else { "failed" }
-                ));
+            for command in self.commands.iter().take(MAX_EVIDENCE_EXPORT_COMMANDS) {
+                let status = if command.passed { "passed" } else { "failed" };
+                match &command.note {
+                    Some(note) => body.push_str(&format!(
+                        "- `{}` — {} — {}\n",
+                        bound(&command.command, 240),
+                        status,
+                        bound(note, 240)
+                    )),
+                    None => body.push_str(&format!(
+                        "- `{}` — {}\n",
+                        bound(&command.command, 240),
+                        status
+                    )),
+                }
             }
+            append_overflow(&mut body, self.commands.len(), MAX_EVIDENCE_EXPORT_COMMANDS);
         }
+
         body.push_str("\n### Receipts\n");
         if self.receipts.is_empty() {
             body.push_str("- none recorded\n");
         } else {
-            for receipt in &self.receipts {
+            for receipt in self.receipts.iter().take(MAX_EVIDENCE_EXPORT_REFS) {
                 body.push_str(&format!("- `{}`\n", bound(receipt, 160)));
             }
+            append_overflow(&mut body, self.receipts.len(), MAX_EVIDENCE_EXPORT_REFS);
         }
+
         if !self.risks.is_empty() {
             body.push_str("\n### Unresolved Risks\n");
-            for risk in &self.risks {
+            for risk in self.risks.iter().take(MAX_EVIDENCE_EXPORT_RISKS) {
                 body.push_str(&format!("- {}\n", bound(risk, 240)));
             }
+            append_overflow(&mut body, self.risks.len(), MAX_EVIDENCE_EXPORT_RISKS);
         }
         body
+    }
+
+    /// Renders the evidence block intended for a draft PR body. Delegates to the bounded
+    /// [`to_markdown`](Self::to_markdown) renderer (single source of truth).
+    #[must_use]
+    pub fn draft_pr_body(&self) -> String {
+        self.to_markdown()
+    }
+
+    /// The stable `crustcore.evidence_bundle.v1` JSON (audit/replay). Alias of
+    /// [`export_json`](Self::export_json) under the roadmap-v0.6 C.3 name.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        self.export_json()
+    }
+}
+
+/// Appends a bounded "…N more" overflow note when a list was truncated to `cap`.
+fn append_overflow(body: &mut String, total: usize, cap: usize) {
+    if total > cap {
+        body.push_str(&format!(
+            "- …{} more (see the audit JSON for the full set)\n",
+            total - cap
+        ));
     }
 }
 
@@ -2359,6 +2407,85 @@ mod tests {
         let manifest = parse_test_manifest(ManifestKind::Pytest, &text);
         // Just assert the pure parser ran over real bytes; groups may be empty.
         let _ = manifest.groups.len();
+    }
+
+    // ----- C.3 evidence rendering (markdown + JSON v1) -----
+
+    fn evidence_with(n_cmds: usize, n_receipts: usize, n_risks: usize) -> EvidenceBundle {
+        let mut b = EvidenceBundle::new("run-c3");
+        b.verifier_plan = "feature verifier plan (strong)".to_string();
+        b.ci = CiState::Passed;
+        b.patch_hash = Some("abcdef0123".to_string());
+        for i in 0..n_cmds {
+            b.commands
+                .push(CommandEvidenceLine::new(format!("cargo test {i}"), true));
+        }
+        for i in 0..n_receipts {
+            b.receipts.push(format!("receipt:verify:{i}"));
+        }
+        for i in 0..n_risks {
+            b.risks.push(format!("risk {i}"));
+        }
+        b
+    }
+
+    #[test]
+    fn to_markdown_opens_with_the_human_review_notice() {
+        let md = evidence_with(1, 1, 0).to_markdown();
+        assert!(md.contains("🔴"), "missing the review marker: {md}");
+        assert!(md.contains("Human review required before merge"));
+        assert!(md.contains("Run: `run-c3`"));
+        assert!(md.contains("CI: `passed`"));
+    }
+
+    #[test]
+    fn to_markdown_renders_command_status_and_notes() {
+        let mut b = evidence_with(0, 0, 0);
+        b.commands
+            .push(CommandEvidenceLine::new("cargo clippy", false).with_note("1 warning"));
+        let md = b.to_markdown();
+        assert!(
+            md.contains("`cargo clippy` — failed — 1 warning"),
+            "got: {md}"
+        );
+    }
+
+    #[test]
+    fn to_markdown_bounds_each_list_with_an_overflow_note() {
+        // Far more than the export caps — the markdown must cap, not dump.
+        let md = evidence_with(
+            MAX_EVIDENCE_EXPORT_COMMANDS + 40,
+            MAX_EVIDENCE_EXPORT_REFS + 5,
+            0,
+        )
+        .to_markdown();
+        let cmd_lines = md.matches("- `cargo test ").count();
+        assert!(
+            cmd_lines <= MAX_EVIDENCE_EXPORT_COMMANDS,
+            "commands not bounded: {cmd_lines}"
+        );
+        assert!(
+            md.contains("…40 more"),
+            "missing command overflow note: {md}"
+        );
+        assert!(md.contains("…5 more"), "missing receipt overflow note");
+    }
+
+    #[test]
+    fn to_json_is_the_schema_v1_export() {
+        let b = evidence_with(2, 1, 1);
+        assert_eq!(b.to_json(), b.export_json());
+        assert!(b.to_json().contains("crustcore.evidence_bundle.v1"));
+    }
+
+    // Live seam: the supervisor appending the rendered markdown to a real draft PR body.
+    // The rendering is CI-tested; this is the GitHub edit-PR-body socket.
+    #[test]
+    #[ignore = "live: append the evidence markdown to a real draft PR body (TODO(P3-live-evidence-render))"]
+    fn live_evidence_render_append_smoke() {
+        // See docs/live-socket-validation.md §B.7. Requires a real draft PR + token.
+        let _ = evidence_with(1, 1, 0).to_markdown();
+        panic!("live seam: run manually against a real draft PR (see runbook §B.7)");
     }
 
     #[test]

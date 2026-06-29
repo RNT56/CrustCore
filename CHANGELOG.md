@@ -42,6 +42,20 @@ agent/PR/role/size/invariant audit trail.
   to zero and never fails (the live executor fills it from the real `VerifiedPatch`, the
   existing P11-exec-live seam). 7 new tests incl. the golden fail/pass-large/pass-small
   ranking; daemon-only; **zero nano impact**.
+- **Evidence bundle rendering (roadmap-v0.6 C.3).** Added
+  `EvidenceBundle::to_markdown()` and `to_json()` to `crustcore_daemon::product`.
+  `to_markdown` is the **bounded** canonical PR-body/cockpit renderer: it opens with
+  the 🔴 "Human review required before merge" notice (CrustCore opens *draft* PRs — a
+  human approves the merge, invariant 14), lists verifier commands (status + redacted
+  note), receipts, and unresolved risks — each **capped to the same export bounds**
+  with a "…N more (see audit JSON)" overflow note so the body can never become an
+  unbounded dump (invariant 11), every fitting receipt included (invariant 10), and
+  notes/risks pre-redacted (invariant 2). `to_json` is the stable
+  `crustcore.evidence_bundle.v1` schema (audit/replay). `draft_pr_body` now delegates
+  to `to_markdown` (single renderer). The supervisor appending the markdown to a real
+  draft PR is the `#[ignore]`d `live_evidence_render_append_smoke`
+  (`TODO(P3-live-evidence-render)`), catalogued in runbook §B.7. 4 new tests;
+  daemon-only; **zero nano impact**.
 - **Task-loop wiring (roadmap-v0.6 D.1).** Added `crustcore_daemon::task_loop`,
   composing the v0.6 decision cores into one pipeline: `plan_task` (routing C.1 →
   `ExecutionPlan`: Single / Fanout / AdvisoryOnly / Blocked) and `finalize_task`
@@ -248,6 +262,7 @@ agent/PR/role/size/invariant audit trail.
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
 | 2026-06-28 | v0.6/B.2 | `score_candidate`/`pick_best` scored fan-out selection; correctness dominates so verified always > unverified (scoring never bypasses the verifier); smaller-diff/more-gates rank higher, ties→first | `claude/v06-b2-scoring` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 6, 11, 13; scoring is a tie-break among accepted, never a bypass |
+| 2026-06-28 | v0.6/C.3 | `EvidenceBundle::to_markdown` (bounded PR-body/cockpit render, 🔴 review notice, per-list overflow) + `to_json` (schema v1); `draft_pr_body` delegates | `claude/v06-c3-evidence` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 2, 10, 11; bounded redacted evidence, every receipt included |
 | 2026-06-28 | v0.6/D.1 | Task-loop wiring `plan_task`/`finalize_task` composing routing (C.1) + advisory gate (C.2) into a terminal `TaskOutcome`; sandboxed run `#[ignore]`d | `claude/v06-d1-executor-wire` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 5, 6, 13; verifier-owned completion, advisory only gates |
 | 2026-06-28 | v0.6/A.3 | `pr_intent_to_create_request`: PrIntent→CreatePrRequest for the live draft-PR POST; evidence body verbatim, draft=true; real POST `#[ignore]`d | `claude/v06-a3-draftpr` | Claude (Implementer) | 0 kB (daemon/live-only) | Enforces 6, 13, 14; body is evidence not a model claim |
 | 2026-06-28 | v0.6/A.2 | Git credential-helper protocol: `parse_credential_request`/`authorize_credential`/`credential_helper_response`/`confining_git_config` — token reaches git only over the helper pipe, bound to a registered cap; live exec/push `#[ignore]`d | `claude/v06-a2-credproxy` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 1, 9, 13; no raw token in the sandbox, push confined to cap repo+prefix |
