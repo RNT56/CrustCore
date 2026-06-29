@@ -62,6 +62,7 @@ cargo test --workspace -- --list --ignored
 | `live_serve_webhooks_once_round_trip` | B | `live` | [B.3](#b3) | HMAC verify + bound + dedup ✓ | medium (port + POST) |
 | `live_draft_pr_post_smoke` | B/F | `live` | [B.4](#b4) | eval→contract gate→`draft_pr_request` ✓ | hard (patch+approval+token) |
 | `cred_proxy_live_push_smoke` | B | — | [B.5](#b5) | argv-parse + validate_push + cred-request authorize ✓ | hard (token+repo+worktree) |
+| `draft_pr_live_post_smoke` | B | `live` | [B.6](#b6) | `pr_intent_to_create_request` mapping + non-2xx typed errors ✓ | medium (token+repo) |
 | `live_worktree_executor_accepts_only_verifier_evidence` | C | `live` | [C.1](#c1) | scheduler/budget/verifier-owned accept ✓ | medium (sandbox+git) |
 | `run_one_task_completes_only_on_verifier_evidence` | C | `live` | [C.2](#c2) | task lifecycle decision core ✓ | medium (sandbox+git) |
 | `live_verify_node_completes_only_on_a_real_verified_patch` | C | — | [C.3](#c3) | flow graph w/ mock verify driver ✓ | medium (sandbox+git) |
@@ -206,6 +207,21 @@ cargo test --workspace -- --list --ignored
 - **Success:** the branch pushes; the token **never** appears in the worker/verifier
   env, argv, or logs (it reaches `git` only over the helper pipe); an out-of-prefix or
   protected-branch push is rejected. **Difficulty: hard.**
+
+<a id="b6"></a>
+### B.6 — `draft_pr_live_post_smoke` — real draft PR creation (A.3)
+- **Test:** `crustcore-daemon/src/github.rs::tests::draft_pr_live_post_smoke`, feature `live`. Seam tag `TODO(draft-pr-live)`.
+- **Socket:** the real `POST /repos/{owner}/{repo}/pulls` that opens the draft PR.
+- **CI core (passing):** `pr_intent_to_create_request` maps a `PrIntent` (minted by
+  `open_pr` *only* from a `VerifiedPatch` + valid approval) onto `CreatePrRequest`,
+  carrying the **verifier-evidence body verbatim** (no `self_claimed_done`) and
+  `draft = true`; the net layer already maps non-2xx (401/404/422) to typed
+  `GitHubError` (never a fake success).
+- **Prereq:** a registered test repo + a minted token + a pushed verified branch.
+- **Run:** `cargo test -p crustcore-daemon --features live github::tests::draft_pr_live_post_smoke -- --ignored --nocapture`
+- **Success:** a **draft** PR opens with the verifier-evidence body + "human review
+  required" notice and no secrets/self-claims; an existing head → 422 surfaces, never
+  a fake success. **Difficulty: medium.**
 
 ## C. Sandbox backend (`bubblewrap` / `sandbox-exec`) + git
 
