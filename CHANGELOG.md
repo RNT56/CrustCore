@@ -44,6 +44,41 @@ agent/PR/role/size/invariant audit trail.
   (incl. injection-as-literal + prose-isolation + first-wins + bounds); daemon-only;
   **zero nano impact**.
 
+- **End-to-end issue → draft PR live smoke (roadmap-v0.6 A.5).** Added the `#[ignore]`d
+  `live_issue_to_pr_smoke` (`crustcore-eval`, `TODO(issue-to-pr-live)`): the irreducible
+  live composition of the whole PR-Supervisor wedge — untrusted issue → routed (C.1) +
+  sandbox-verified (`VerifiedPatch`, invariant 13) → credential-proxy push (A.2) →
+  evidence-backed draft PR (A.3/C.3, body is evidence not a model claim, invariant 6) →
+  bounded CI repair (A.4, invariant 11). The whole **decision path** is already CI-tested
+  socket-free by `golden_issue_to_pr_flow`; this seam needs a real App + sandbox + repo.
+  Catalogued in runbook §B.9. **This completes Phase A (PR Supervisor go-live).** Test +
+  runbook only; **zero nano impact**.
+
+- **CI monitor → bounded repair loop (roadmap-v0.6 A.4).** Added to
+  `crustcore_daemon::github`: `aggregate_check_runs` folds per-check
+  `crustcore_net::github::CheckState`s into one overall state (**failure dominates**;
+  empty/any-pending → Pending), `monitor_decision` routes it (Pending→Wait /
+  Passed→Green / Failed→the existing budget-bounded `repair_decision` →
+  SpawnRepair/StopExhausted), and `repair_task_goal` builds a **bounded** failure-context
+  line from the untrusted failed-check names (capped to `MAX_REPAIR_CONTEXT_CHECKS` with
+  a "+N more" note). Repair is bounded by the budget (invariant 11), **CrustCore decides
+  repair — not a model or a PR comment** (invariant 4), and the decision uses the
+  *aggregated state*, never untrusted CI log text (invariant 7). The real polling loop is
+  the `#[ignore]`d `ci_monitor_live_poll_smoke` (`TODO(ci-monitor-live)`), catalogued in
+  runbook §B.8. 4 new tests; daemon-only; **zero nano impact**.
+
+- **Scored verified candidates (roadmap-v0.6 B.2).** Added `crustcore_daemon::score`:
+  `score_candidate(PatchMetadata, RiskTier) → PatchScore` and `pick_best` select the
+  **best verifier-accepted** fan-out candidate instead of merely the first accepted.
+  Correctness dominates by construction — the `VERIFIED_BONUS` (100) exceeds the sum of
+  every other term (diff penalty ≤50, gates ≤20, security ≤8), so a verified candidate
+  *always* outranks an unverified one: **scoring reorders accepted candidates but can
+  never promote an unverified patch** (invariants 6, 13). Among verified candidates a
+  smaller diff and more gates passed rank higher, with a small security-review boost;
+  ties keep the first proposer (deterministic). Pure + total — missing metadata defaults
+  to zero and never fails (the live executor fills it from the real `VerifiedPatch`, the
+  existing P11-exec-live seam). 7 new tests incl. the golden fail/pass-large/pass-small
+  ranking; daemon-only; **zero nano impact**.
 - **Evidence bundle rendering (roadmap-v0.6 C.3).** Added
   `EvidenceBundle::to_markdown()` and `to_json()` to `crustcore_daemon::product`.
   `to_markdown` is the **bounded** canonical PR-body/cockpit renderer: it opens with
@@ -264,6 +299,9 @@ agent/PR/role/size/invariant audit trail.
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
 | 2026-06-28 | v0.6/E.2 | `github_commands::parse_command`: untrusted PR comment → typed bounded `/crustcore` command (Run/Retry/Cancel/Explain/RiskDetected); injection stays literal; routes through the Telegram dispatch | `claude/v06-e2-ghcommands` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 7, 8, 11, 16; parsed by the daemon, never model output |
+| 2026-06-28 | v0.6/A.5 | `#[ignore]`d `live_issue_to_pr_smoke` composing A.1–A.4 + D.1 end-to-end; CI decision path already covered by `golden_issue_to_pr_flow`. Completes Phase A | `claude/v06-a5-issuetopr` | Claude (Implementer) | 0 kB (eval/docs only) | Composes 6, 11, 13; verifier-owned end-to-end |
+| 2026-06-28 | v0.6/A.4 | CI monitor: `aggregate_check_runs` (failure-dominates) + `monitor_decision` (Wait/Green/SpawnRepair/StopExhausted over the budget) + bounded `repair_task_goal`; live poll `#[ignore]`d | `claude/v06-a4-cimonitor` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 7, 11; repair bounded, decided by CrustCore from aggregated state |
+| 2026-06-28 | v0.6/B.2 | `score_candidate`/`pick_best` scored fan-out selection; correctness dominates so verified always > unverified (scoring never bypasses the verifier); smaller-diff/more-gates rank higher, ties→first | `claude/v06-b2-scoring` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 6, 11, 13; scoring is a tie-break among accepted, never a bypass |
 | 2026-06-28 | v0.6/C.3 | `EvidenceBundle::to_markdown` (bounded PR-body/cockpit render, 🔴 review notice, per-list overflow) + `to_json` (schema v1); `draft_pr_body` delegates | `claude/v06-c3-evidence` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 2, 10, 11; bounded redacted evidence, every receipt included |
 | 2026-06-28 | v0.6/D.1 | Task-loop wiring `plan_task`/`finalize_task` composing routing (C.1) + advisory gate (C.2) into a terminal `TaskOutcome`; sandboxed run `#[ignore]`d | `claude/v06-d1-executor-wire` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 5, 6, 13; verifier-owned completion, advisory only gates |
 | 2026-06-28 | v0.6/A.3 | `pr_intent_to_create_request`: PrIntent→CreatePrRequest for the live draft-PR POST; evidence body verbatim, draft=true; real POST `#[ignore]`d | `claude/v06-a3-draftpr` | Claude (Implementer) | 0 kB (daemon/live-only) | Enforces 6, 13, 14; body is evidence not a model claim |

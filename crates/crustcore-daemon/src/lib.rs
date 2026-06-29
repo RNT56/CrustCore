@@ -67,6 +67,10 @@ pub mod reviewer;
 /// configured executors. Selection only — the verifier still owns completion.
 pub mod router;
 pub mod runtime;
+/// Verified-candidate scoring (roadmap-v0.6 B.2): a pure `score_candidate` / `pick_best`
+/// that selects the best verifier-accepted fan-out candidate — correctness dominates, so
+/// a verified patch always outranks an unverified one (scoring never bypasses the verifier).
+pub mod score;
 pub mod selfimprove;
 pub mod supervisor;
 /// Chat-launched verified tasks (the "do the work" half of the front door). Behind the
