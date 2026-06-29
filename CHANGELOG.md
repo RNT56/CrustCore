@@ -37,8 +37,11 @@ agent/PR/role/size/invariant audit trail.
   before allocating — invariant 11), `authenticate` (constant-length nonce compare; the
   startup nonce file gates every command), and `dispatch_admin` which feeds the **same
   owner-scoped `request_cancel`/`request_kill`** path as Telegram (invariant 12). It is
-  **operator-only, never model-facing** (invariant 5). The real `UnixListener` (0600) /
-  TCP-loopback bind is the `#[ignore]`d `daemon_admin_live_socket_smoke`
+  **operator-only, never model-facing** (invariant 5). A transport-agnostic
+  `serve_admin_connection` (read framed nonce → authenticate → read framed command →
+  dispatch → framed response) is **CI-tested over in-memory streams**, so only the thin
+  `UnixListener` (0600) / TCP-loopback **accept loop** remains the `#[ignore]`d
+  `daemon_admin_live_socket_smoke`
   (`TODO(daemon-admin-live)`), catalogued in runbook §F.4. 6 new tests; daemon-only;
   **zero nano impact**.
 

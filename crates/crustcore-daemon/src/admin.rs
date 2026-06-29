@@ -11,6 +11,8 @@
 //! The real `UnixListener` / TCP-loopback bind + I/O loop is the
 //! `TODO(daemon-admin-live)` seam (`#[ignore]`d); everything here is CI-tested.
 
+use std::io::{Read, Write};
+
 use crustcore_types::Timestamp;
 
 use crate::registry::{RegistrySnapshot, TaskId, TaskRegistry};
@@ -187,6 +189,66 @@ fn render_row(id: TaskId, chat: ChatId, phase: &str, wall_ms: u64) -> String {
     format!("task {} chat {} {} {}ms", id.0, chat.0, phase, wall_ms)
 }
 
+/// Reads one length-prefixed frame from `r`, or `None` on a clean EOF before any byte. A
+/// length over [`MAX_ADMIN_FRAME`] is rejected before allocating (invariant 11).
+fn read_frame<R: Read>(r: &mut R) -> std::io::Result<Option<Vec<u8>>> {
+    let mut len_bytes = [0u8; 4];
+    match r.read_exact(&mut len_bytes) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    let len = u32::from_le_bytes(len_bytes) as usize;
+    if len > MAX_ADMIN_FRAME {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "admin frame too large",
+        ));
+    }
+    let mut buf = vec![0u8; len];
+    r.read_exact(&mut buf)?;
+    Ok(Some(buf))
+}
+
+fn write_frame<W: Write>(w: &mut W, payload: &[u8]) -> std::io::Result<()> {
+    w.write_all(&frame(payload))
+}
+
+/// Serves **one** admin request over any byte stream: read a framed nonce, then a framed
+/// command, authenticate, dispatch, and write the framed response. This is the
+/// **transport-agnostic** serve step — CI-tested over in-memory buffers; the real
+/// `UnixListener` (mode 0600) / TCP-loopback accept loop is the thin `#[ignore]`d wrapper
+/// that calls this per connection. A wrong nonce drops the connection after one
+/// `Unauthorized` reply (invariant 5).
+///
+/// # Errors
+/// An I/O error from the underlying stream (a malformed/oversized frame is an
+/// `InvalidData` error; a parse failure is answered as `BadRequest`, not an error).
+pub fn serve_admin_connection<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    registry: &mut TaskRegistry,
+    operator: ChatId,
+    expected_nonce: &[u8],
+    now: Timestamp,
+) -> std::io::Result<()> {
+    let Some(nonce) = read_frame(reader)? else {
+        return Ok(()); // connection closed before sending anything
+    };
+    if !authenticate(&nonce, expected_nonce) {
+        return write_frame(writer, AdminResponse::Unauthorized.render().as_bytes());
+    }
+    let Some(cmd_bytes) = read_frame(reader)? else {
+        return Ok(());
+    };
+    let line = String::from_utf8_lossy(&cmd_bytes);
+    let response = match parse_admin_command(&line) {
+        Some(cmd) => dispatch_admin(&cmd, registry, operator, now),
+        None => AdminResponse::BadRequest,
+    };
+    write_frame(writer, response.render().as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,7 +340,51 @@ mod tests {
         );
     }
 
-    // Live seam: the real Unix/TCP-loopback listener + framed socket round-trip.
+    #[test]
+    fn serve_connection_authenticates_then_dispatches_over_a_stream() {
+        let nonce = b"startup-nonce";
+        let mut reg = TaskRegistry::new(4, LeaseOwner(1));
+        reg.admit(ChatId(7), default_task_budget(), ts(0)).unwrap();
+
+        // A well-formed request: framed nonce, then framed `status`.
+        let mut request = frame(nonce);
+        request.extend_from_slice(&frame(b"status"));
+        let mut reader = std::io::Cursor::new(request);
+        let mut writer: Vec<u8> = Vec::new();
+        serve_admin_connection(&mut reader, &mut writer, &mut reg, ChatId(7), nonce, ts(1))
+            .unwrap();
+
+        // The single response frame carries the snapshot.
+        let (payload, _) = try_deframe(&writer).unwrap().unwrap();
+        let text = String::from_utf8_lossy(&payload);
+        assert!(
+            text.contains("tasks: 1"),
+            "expected a snapshot, got: {text}"
+        );
+    }
+
+    #[test]
+    fn serve_connection_drops_a_wrong_nonce() {
+        let mut reg = TaskRegistry::new(4, LeaseOwner(1));
+        let mut request = frame(b"wrong-nonce");
+        request.extend_from_slice(&frame(b"status"));
+        let mut reader = std::io::Cursor::new(request);
+        let mut writer: Vec<u8> = Vec::new();
+        serve_admin_connection(
+            &mut reader,
+            &mut writer,
+            &mut reg,
+            ChatId(7),
+            b"real-nonce",
+            ts(1),
+        )
+        .unwrap();
+        let (payload, _) = try_deframe(&writer).unwrap().unwrap();
+        assert_eq!(payload, AdminResponse::Unauthorized.render().as_bytes());
+    }
+
+    // Live seam: the real Unix/TCP-loopback listener accept loop (the bind + per-connection
+    // wrapper around `serve_admin_connection`, which is CI-tested over in-memory buffers).
     #[test]
     #[ignore = "live: bind the admin Unix/TCP socket + a framed query/cancel round-trip (TODO(daemon-admin-live))"]
     fn daemon_admin_live_socket_smoke() {
