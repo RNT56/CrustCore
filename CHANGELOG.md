@@ -30,6 +30,20 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Cockpit view core (roadmap-v0.6 E.1).** Added `crustcore_dev::views::cockpit`:
+  `build_cockpit(backend) → CockpitView` composes the existing redacted, read-only
+  event-log read-model into a bounded task/evidence/approval frame — `TaskDetailView`
+  (rolled up from the run inspector), `EvidenceSummaryView` (**references only** — frame
+  counts, seq range, terminal kind; never raw chain-of-thought or secrets, invariant 2),
+  and `ApprovalFormView` carrying the **operation-bound op-hash** so a resolution can only
+  approve the exact operation shown (invariant 14 — the binding is checked by the existing
+  `dispatch_resolution`). Every list is bounded (`MAX_COCKPIT_TASKS`/`MAX_COCKPIT_APPROVALS`,
+  invariant 11); the cockpit **renders evidence but mints nothing** (invariant 13) and is
+  supervisor-only (invariant 5). Pure view core over `MockDevBackend`; the axum bind + `/ws`
+  tick loop + HTML/JS assets remain the existing `C7-serve-live` seam. **This completes
+  Phase E and the entire roadmap-v0.6 buildable scope.** 4 new tests; non-nano; **zero nano
+  impact**.
+
 - **Evidence bundle rendering (roadmap-v0.6 C.3).** Added
   `EvidenceBundle::to_markdown()` and `to_json()` to `crustcore_daemon::product`.
   `to_markdown` is the **bounded** canonical PR-body/cockpit renderer: it opens with
@@ -249,6 +263,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/E.1 | Cockpit view core: `build_cockpit` composes TaskDetail/EvidenceSummary(refs-only)/ApprovalForm(op-hash-bound) from the read-model, bounded; renders evidence, mints nothing. Completes Phase E + all of v0.6 | `claude/v06-e1-cockpit` | Claude (Implementer) | 0 kB (crustcore-dev) | Enforces 2, 5, 11, 13, 14; read-model only, op-bound approvals, no minting |
 | 2026-06-28 | v0.6/C.3 | `EvidenceBundle::to_markdown` (bounded PR-body/cockpit render, 🔴 review notice, per-list overflow) + `to_json` (schema v1); `draft_pr_body` delegates | `claude/v06-c3-evidence` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 2, 10, 11; bounded redacted evidence, every receipt included |
 | 2026-06-28 | v0.6/D.1 | Task-loop wiring `plan_task`/`finalize_task` composing routing (C.1) + advisory gate (C.2) into a terminal `TaskOutcome`; sandboxed run `#[ignore]`d | `claude/v06-d1-executor-wire` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 5, 6, 13; verifier-owned completion, advisory only gates |
 | 2026-06-28 | v0.6/A.3 | `pr_intent_to_create_request`: PrIntent→CreatePrRequest for the live draft-PR POST; evidence body verbatim, draft=true; real POST `#[ignore]`d | `claude/v06-a3-draftpr` | Claude (Implementer) | 0 kB (daemon/live-only) | Enforces 6, 13, 14; body is evidence not a model claim |

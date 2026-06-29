@@ -4,6 +4,10 @@
 //! frame, advances a budget, or reaches the verifier.
 
 pub mod approvals;
+/// Cockpit view (roadmap-v0.6 E.1): composes the read-model into a bounded task/evidence/
+/// approval frame. Renders evidence + surfaces op-hash-bound approval forms — never
+/// approves, completes, or integrates.
+pub mod cockpit;
 pub mod flow;
 pub mod inspector;
 pub mod mcp;
