@@ -64,6 +64,7 @@ cargo test --workspace -- --list --ignored
 | `cred_proxy_live_push_smoke` | B | — | [B.5](#b5) | argv-parse + validate_push + cred-request authorize ✓ | hard (token+repo+worktree) |
 | `draft_pr_live_post_smoke` | B | `live` | [B.6](#b6) | `pr_intent_to_create_request` mapping + non-2xx typed errors ✓ | medium (token+repo) |
 | `ci_monitor_live_poll_smoke` | B | — | [B.8](#b8) | `aggregate_check_runs`/`monitor_decision`/`repair_task_goal` ✓ | medium (PR with checks) |
+| `live_evidence_render_append_smoke` | B | — | [B.7](#b7) | `to_markdown`/`to_json` bounded evidence render ✓ | medium (draft PR + token) |
 | `live_worktree_executor_accepts_only_verifier_evidence` | C | `live` | [C.1](#c1) | scheduler/budget/verifier-owned accept ✓ | medium (sandbox+git) |
 | `run_one_task_completes_only_on_verifier_evidence` | C | `live` | [C.2](#c2) | task lifecycle decision core ✓ | medium (sandbox+git) |
 | `live_verify_node_completes_only_on_a_real_verified_patch` | C | — | [C.3](#c3) | flow graph w/ mock verify driver ✓ | medium (sandbox+git) |
@@ -239,6 +240,18 @@ cargo test --workspace -- --list --ignored
 - **Run:** `cargo test -p crustcore-daemon github::tests::ci_monitor_live_poll_smoke -- --ignored --nocapture`
 - **Success:** failing checks under budget → a repair task spawns; at the cap →
   `StopExhausted`; no unbounded looping. **Difficulty: medium.**
+<a id="b7"></a>
+### B.7 — `live_evidence_render_append_smoke` — evidence body append (C.3)
+- **Test:** `crustcore-daemon/src/product.rs::tests::live_evidence_render_append_smoke`. Seam tag `TODO(P3-live-evidence-render)`.
+- **Socket:** the GitHub edit-PR-body call that appends the rendered evidence markdown.
+- **CI core (passing):** `EvidenceBundle::to_markdown` (bounded per the export caps, with
+  the 🔴 human-review notice + per-list overflow notes) and `to_json` (the stable
+  `crustcore.evidence_bundle.v1` schema) — no unbounded dump (invariant 11), every
+  fitting receipt included (invariant 10), notes/risks pre-redacted (invariant 2).
+- **Prereq:** a real draft PR + a GitHub token.
+- **Run:** `cargo test -p crustcore-daemon product::tests::live_evidence_render_append_smoke -- --ignored --nocapture`
+- **Success:** the draft PR body shows the bounded evidence markdown + the review
+  notice; no secrets/self-claims. **Difficulty: medium.**
 
 ## C. Sandbox backend (`bubblewrap` / `sandbox-exec`) + git
 
