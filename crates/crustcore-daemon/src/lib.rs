@@ -39,6 +39,10 @@ pub mod advisor;
 pub mod chat;
 pub mod exec;
 pub mod github;
+/// GitHub `/crustcore` slash commands (roadmap-v0.6 E.2): a pure parser turning an
+/// untrusted PR/issue comment into a typed, bounded `GithubCommand` routed through the
+/// same policy-gated dispatch as Telegram — never free text to a model.
+pub mod github_commands;
 /// GitHub App onboarding (roadmap-v0.6 A.1): turns an untrusted install redirect
 /// into a registered, write-capable repo + a minted `Approved<GitHubWriteCap>`.
 /// Pure decision core; the install-confirm + token-mint are the live seam.
@@ -63,6 +67,10 @@ pub mod reviewer;
 /// configured executors. Selection only — the verifier still owns completion.
 pub mod router;
 pub mod runtime;
+/// Verified-candidate scoring (roadmap-v0.6 B.2): a pure `score_candidate` / `pick_best`
+/// that selects the best verifier-accepted fan-out candidate — correctness dominates, so
+/// a verified patch always outranks an unverified one (scoring never bypasses the verifier).
+pub mod score;
 pub mod selfimprove;
 pub mod supervisor;
 /// Chat-launched verified tasks (the "do the work" half of the front door). Behind the
