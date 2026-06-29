@@ -39,8 +39,11 @@ agent/PR/role/size/invariant audit trail.
   already-over-budget task is adopted **terminal** (`Done(BudgetExhausted)`); an absent
   worktree → `WorktreeGone`; a duplicate id → `Duplicate`. A re-adopted task still
   completes only on a `VerifiedPatch` (invariant 13 — adoption restores supervision, never
-  completion). Pure state-machine steps; the dump/load file I/O + SIGTERM hook +
-  kill-and-restart cycle are the `#[ignore]`d `daemon_recover_xproc_live_smoke`
+  completion). **Persistence is real:** `encode_snapshots`/`decode_snapshots` (a dependency-free,
+  versioned, bounded `CCTS` frame — panic-free, fail-closed), `TaskRegistry::dump_snapshots`,
+  and `load_snapshots` actually write + reload the dump (CI-tested incl. a dump→load→re-adopt
+  simulated restart). Only the SIGTERM hook + a real OS process restart remain the `#[ignore]`d
+  `daemon_recover_xproc_live_smoke`
   (`TODO(daemon-recover-xproc-live)`), in runbook §F.6. Also derives `PartialEq`/`Eq` on
   `AgentBudget`. **This completes Phase F (daemon hardening).** 4 new tests; daemon-only;
   **zero nano impact**.

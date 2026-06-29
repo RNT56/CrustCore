@@ -640,6 +640,236 @@ pub enum AdoptError {
     Duplicate,
 }
 
+// --- F.1 persistence: a dependency-free, versioned, bounded snapshot dump ---
+
+/// Magic for a task-snapshot dump (`CrustCore Task Snapshots`). Mirrors the event-log /
+/// memory-store frame formats — no serde, no crypto.
+pub const SNAPSHOT_MAGIC: [u8; 4] = *b"CCTS";
+/// Dump format version (an old reader rejects a newer file rather than misreading it).
+pub const SNAPSHOT_VERSION: u8 = 1;
+/// Cap on snapshots restored from a dump (bounded — a corrupt/hostile file cannot blow up
+/// memory; invariant 11).
+pub const MAX_DUMP_SNAPSHOTS: usize = 4096;
+/// Cap on a restored worktree-path field.
+pub const MAX_WORKTREE_PATH: usize = 4096;
+
+/// Why a snapshot dump could not be written or read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotIoError {
+    /// An I/O error (bounded message).
+    Io(String),
+    /// Not a snapshot dump (bad magic / truncated header).
+    BadFormat,
+    /// An unsupported dump version.
+    BadVersion(u8),
+    /// Malformed or over-bound contents (corrupt / hostile file).
+    BadContents,
+}
+
+impl core::fmt::Display for SnapshotIoError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            SnapshotIoError::Io(e) => write!(f, "snapshot io: {e}"),
+            SnapshotIoError::BadFormat => write!(f, "not a task-snapshot dump"),
+            SnapshotIoError::BadVersion(v) => write!(f, "unsupported snapshot dump version {v}"),
+            SnapshotIoError::BadContents => write!(f, "malformed task-snapshot dump"),
+        }
+    }
+}
+
+impl std::error::Error for SnapshotIoError {}
+
+fn encode_phase(buf: &mut Vec<u8>, phase: TaskPhase) {
+    match phase {
+        TaskPhase::Pending => buf.push(0),
+        TaskPhase::Running => buf.push(1),
+        TaskPhase::Cancelling => buf.push(2),
+        TaskPhase::Done(done) => {
+            buf.push(3);
+            match done {
+                TaskDone::Completed => buf.push(0),
+                TaskDone::Cancelled => buf.push(1),
+                TaskDone::Killed => buf.push(2),
+                TaskDone::Expired => buf.push(3),
+                TaskDone::BudgetExhausted(axis) => {
+                    buf.push(4);
+                    buf.push(match axis {
+                        BudgetError::Wall => 0,
+                        BudgetError::Output => 1,
+                        BudgetError::Tokens => 2,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Encodes snapshots into the bounded `CCTS` frame. Pure (no I/O) — testable in memory.
+#[must_use]
+pub fn encode_snapshots(snaps: &[TaskSnapshot]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&SNAPSHOT_MAGIC);
+    buf.push(SNAPSHOT_VERSION);
+    let count = u32::try_from(snaps.len()).unwrap_or(u32::MAX);
+    buf.extend_from_slice(&count.to_le_bytes());
+    for s in snaps {
+        buf.extend_from_slice(&s.id.0.to_le_bytes());
+        buf.extend_from_slice(&s.chat.0.to_le_bytes());
+        encode_phase(&mut buf, s.phase);
+        buf.extend_from_slice(&s.lease_remaining_ms.to_le_bytes());
+        buf.extend_from_slice(&s.budget.max_wall_ms.to_le_bytes());
+        buf.extend_from_slice(&s.budget.max_output_bytes.to_le_bytes());
+        buf.extend_from_slice(&s.budget.max_tokens.to_le_bytes());
+        buf.extend_from_slice(&s.usage.wall_ms.to_le_bytes());
+        buf.extend_from_slice(&s.usage.output_bytes.to_le_bytes());
+        buf.extend_from_slice(&s.usage.tokens.to_le_bytes());
+        let path = s.worktree_path.as_deref().unwrap_or("");
+        let plen = path.len().min(MAX_WORKTREE_PATH);
+        buf.extend_from_slice(&(plen as u32).to_le_bytes());
+        buf.extend_from_slice(&path.as_bytes()[..plen]);
+    }
+    buf
+}
+
+/// A bounded byte cursor for decoding (no panics — every read is checked).
+struct SnapCursor<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> SnapCursor<'a> {
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let end = self.pos.checked_add(n)?;
+        if end > self.bytes.len() {
+            return None;
+        }
+        let s = &self.bytes[self.pos..end];
+        self.pos = end;
+        Some(s)
+    }
+    fn u8(&mut self) -> Option<u8> {
+        self.take(1).map(|s| s[0])
+    }
+    fn u32(&mut self) -> Option<u32> {
+        self.take(4)
+            .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
+    }
+    fn u64(&mut self) -> Option<u64> {
+        self.take(8)
+            .map(|s| u64::from_le_bytes(s.try_into().unwrap()))
+    }
+    fn i64(&mut self) -> Option<i64> {
+        self.take(8)
+            .map(|s| i64::from_le_bytes(s.try_into().unwrap()))
+    }
+}
+
+fn decode_phase(c: &mut SnapCursor) -> Option<TaskPhase> {
+    Some(match c.u8()? {
+        0 => TaskPhase::Pending,
+        1 => TaskPhase::Running,
+        2 => TaskPhase::Cancelling,
+        3 => TaskPhase::Done(match c.u8()? {
+            0 => TaskDone::Completed,
+            1 => TaskDone::Cancelled,
+            2 => TaskDone::Killed,
+            3 => TaskDone::Expired,
+            4 => TaskDone::BudgetExhausted(match c.u8()? {
+                0 => BudgetError::Wall,
+                1 => BudgetError::Output,
+                _ => BudgetError::Tokens,
+            }),
+            _ => return None,
+        }),
+        _ => return None,
+    })
+}
+
+/// Decodes a `CCTS` dump. **Fails closed** on bad magic/version and is **panic-free +
+/// bounded**: a corrupt/hostile file yields a [`SnapshotIoError`], never a panic or an
+/// unbounded allocation.
+///
+/// # Errors
+/// [`SnapshotIoError`] on a bad header or malformed/over-cap contents.
+pub fn decode_snapshots(bytes: &[u8]) -> Result<Vec<TaskSnapshot>, SnapshotIoError> {
+    let mut c = SnapCursor { bytes, pos: 0 };
+    if c.take(4) != Some(&SNAPSHOT_MAGIC) {
+        return Err(SnapshotIoError::BadFormat);
+    }
+    let version = c.u8().ok_or(SnapshotIoError::BadFormat)?;
+    if version != SNAPSHOT_VERSION {
+        return Err(SnapshotIoError::BadVersion(version));
+    }
+    let count = c.u32().ok_or(SnapshotIoError::BadContents)? as usize;
+    if count > MAX_DUMP_SNAPSHOTS {
+        return Err(SnapshotIoError::BadContents);
+    }
+    let mut out = Vec::with_capacity(count.min(256));
+    for _ in 0..count {
+        let id = TaskId(c.u64().ok_or(SnapshotIoError::BadContents)?);
+        let chat = ChatId(c.i64().ok_or(SnapshotIoError::BadContents)?);
+        let phase = decode_phase(&mut c).ok_or(SnapshotIoError::BadContents)?;
+        let lease_remaining_ms = c.u64().ok_or(SnapshotIoError::BadContents)?;
+        let budget = AgentBudget {
+            max_wall_ms: c.u64().ok_or(SnapshotIoError::BadContents)?,
+            max_output_bytes: c.u64().ok_or(SnapshotIoError::BadContents)?,
+            max_tokens: c.u64().ok_or(SnapshotIoError::BadContents)?,
+        };
+        let usage = AgentUsage {
+            wall_ms: c.u64().ok_or(SnapshotIoError::BadContents)?,
+            output_bytes: c.u64().ok_or(SnapshotIoError::BadContents)?,
+            tokens: c.u64().ok_or(SnapshotIoError::BadContents)?,
+        };
+        let plen = c.u32().ok_or(SnapshotIoError::BadContents)? as usize;
+        if plen > MAX_WORKTREE_PATH {
+            return Err(SnapshotIoError::BadContents);
+        }
+        let path_bytes = c.take(plen).ok_or(SnapshotIoError::BadContents)?;
+        let worktree_path = if plen == 0 {
+            None
+        } else {
+            Some(String::from_utf8_lossy(path_bytes).into_owned())
+        };
+        out.push(TaskSnapshot {
+            id,
+            chat,
+            phase,
+            lease_remaining_ms,
+            budget,
+            usage,
+            worktree_path,
+        });
+    }
+    Ok(out)
+}
+
+/// Loads a snapshot dump from `path` (F.1). The daemon calls this on startup to recover
+/// running tasks via [`TaskRegistry::adopt_from_snapshot`].
+///
+/// # Errors
+/// [`SnapshotIoError`] on an I/O failure or a malformed dump.
+pub fn load_snapshots(path: &std::path::Path) -> Result<Vec<TaskSnapshot>, SnapshotIoError> {
+    let bytes = std::fs::read(path).map_err(|e| SnapshotIoError::Io(e.to_string()))?;
+    decode_snapshots(&bytes)
+}
+
+impl TaskRegistry {
+    /// Dumps the live (non-terminal) tasks to `path` as a `CCTS` frame (F.1). Call this on
+    /// a SIGTERM hook so a restart can [`load_snapshots`] + re-adopt. Pure framing + one
+    /// `write`.
+    ///
+    /// # Errors
+    /// [`SnapshotIoError::Io`] if the file cannot be written.
+    pub fn dump_snapshots(
+        &self,
+        path: &std::path::Path,
+        now: Timestamp,
+    ) -> Result<(), SnapshotIoError> {
+        let bytes = encode_snapshots(&self.snapshot_all(now));
+        std::fs::write(path, &bytes).map_err(|e| SnapshotIoError::Io(e.to_string()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -730,11 +960,67 @@ mod tests {
         );
     }
 
-    // Live seam: the real dump/load file I/O, the SIGTERM hook, and a kill-and-restart smoke.
     #[test]
-    #[ignore = "live: dump on SIGTERM, reload + re-adopt after a process restart (TODO(daemon-recover-xproc-live))"]
+    fn snapshot_dump_encodes_and_decodes_round_trip() {
+        let mut old = reg();
+        old.admit(ChatId(7), default_task_budget(), at(1000))
+            .unwrap();
+        old.admit(ChatId(-3), default_task_budget(), at(1000))
+            .unwrap();
+        let mut snaps = old.snapshot_all(at(1000));
+        // Exercise a worktree path + a terminal-with-axis phase through the codec.
+        snaps[0].worktree_path = Some("/tmp/crustcore/wt-1".to_string());
+        snaps[1].phase = TaskPhase::Done(TaskDone::BudgetExhausted(BudgetError::Output));
+
+        let bytes = encode_snapshots(&snaps);
+        let decoded = decode_snapshots(&bytes).unwrap();
+        assert_eq!(decoded, snaps, "the CCTS frame must round-trip exactly");
+    }
+
+    #[test]
+    fn a_bad_magic_or_version_is_rejected_not_panicked() {
+        assert_eq!(decode_snapshots(b"XXXX"), Err(SnapshotIoError::BadFormat));
+        let mut bytes = encode_snapshots(&[]);
+        bytes[4] = 99; // bump the version byte
+        assert_eq!(
+            decode_snapshots(&bytes),
+            Err(SnapshotIoError::BadVersion(99))
+        );
+        // A truncated frame fails closed, never panics.
+        assert!(decode_snapshots(&[b'C', b'C', b'T', b'S', 1, 9]).is_err());
+    }
+
+    #[test]
+    fn dump_then_load_then_readopt_survives_a_simulated_restart() {
+        let mut old = reg();
+        let id = old
+            .admit(ChatId(7), default_task_budget(), at(1000))
+            .unwrap();
+        let mut path = std::env::temp_dir();
+        path.push("cc_registry_dump_test.ccts");
+        old.dump_snapshots(&path, at(1000)).unwrap();
+
+        // A fresh instance loads the dump and re-adopts (the worktree still exists).
+        let loaded = load_snapshots(&path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        let mut fresh = TaskRegistry::new(2, LeaseOwner(42));
+        let adopted = fresh
+            .adopt_from_snapshot(&loaded[0], true, at(5000))
+            .unwrap();
+        assert_eq!(adopted, id);
+        assert_eq!(
+            fresh.snapshot(at(5000)).get(id).unwrap().phase,
+            TaskPhase::Pending
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // Live seam: the SIGTERM hook + an actual kill-and-restart of the OS process (the dump
+    // encode/decode + file I/O above are CI-tested; this is the process-lifecycle inch).
+    #[test]
+    #[ignore = "live: dump on SIGTERM, reload + re-adopt after a real process restart (TODO(daemon-recover-xproc-live))"]
     fn daemon_recover_xproc_live_smoke() {
-        // See docs/live-socket-validation.md §F.6. Needs file I/O + a process restart.
+        // See docs/live-socket-validation.md §F.6. Needs a kill-and-restart of the daemon.
         panic!("live seam: run manually with a kill-and-restart cycle (see runbook §F.6)");
     }
 
