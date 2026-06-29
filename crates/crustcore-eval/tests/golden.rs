@@ -577,3 +577,28 @@ fn golden_issue_to_pr_flow() {
     let _ = manager.remove(&worktree);
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// **A.5 — live issue → draft PR smoke (`TODO(issue-to-pr-live)`).**
+///
+/// The full PR-Supervisor wedge end to end against *real* infrastructure: a GitHub
+/// issue arrives (untrusted) -> the task is routed (C.1) and run in a sandboxed worktree
+/// -> the verifier mints a `VerifiedPatch` (invariant 13) -> the credential proxy pushes
+/// the branch (A.2, token never in the sandbox) -> an evidence-backed **draft** PR opens
+/// (A.3/C.3, body is verifier evidence not a model claim -- invariant 6) -> the CI monitor
+/// watches checks and repairs within budget (A.4, invariant 11).
+///
+/// The **decision path** for every step is already CI-tested socket-free:
+/// `golden_issue_to_pr_flow` above exercises untrusted issue ingestion, the sandboxed
+/// worker, the verifier-minted `VerifiedPatch`, the approval-gated draft `PrIntent`, the
+/// canned REST create, and bounded CI repair. This `#[ignore]`d test is the irreducible
+/// live composition -- it needs a registered GitHub App, a sandbox backend, and a test
+/// repo. See `docs/live-socket-validation.md` section B.9.
+#[test]
+#[ignore = "live: end-to-end issue -> routed+verified -> cred-proxy push -> draft PR -> CI repair against a real App + sandbox + repo (TODO(issue-to-pr-live))"]
+fn live_issue_to_pr_smoke() {
+    panic!(
+        "live seam: run manually with a registered GitHub App + sandbox backend + test \
+         repo (see runbook B.9). The socket-free decision path is covered by \
+         golden_issue_to_pr_flow."
+    );
+}
