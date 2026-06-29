@@ -30,6 +30,21 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Streaming CoT-redaction prototype + feasibility (roadmap-v0.6 E.4).** Added
+  `crustcore_secrets::token_stream::TokenRedactor` and the supporting
+  `Redactor::longest_dangling_prefix` / `max_needle_len`. `TokenRedactor` buffers
+  streamed model tokens to a **redaction boundary** (newline), scans with the existing
+  `Redactor`, and emits only fully redacted chunks — so a secret split across tokens or
+  lines is caught before any byte reaches the user (invariants 2, 3). A forced
+  (no-boundary) emit retains only the **longest dangling needle-prefix** suffix (the
+  start of a not-yet-finished secret), keeping the buffer bounded without ever emitting a
+  partial secret. 6 red-team tests (split-across-tokens, straddling forced-emit,
+  full-secret-present, no-false-positives, flush-tail, bounded-worst-case). Added
+  [`docs/cot-streaming.md`](./docs/cot-streaming.md) concluding token-level CoT streaming
+  is **feasible** behind the existing `reveal_reasoning` opt-in, with the latency bound
+  (<500 ms) and the one constraint (the boundary char must not appear inside a secret).
+  Analysis + a pure core; **zero nano impact**.
+
 - **Evidence bundle rendering (roadmap-v0.6 C.3).** Added
   `EvidenceBundle::to_markdown()` and `to_json()` to `crustcore_daemon::product`.
   `to_markdown` is the **bounded** canonical PR-body/cockpit renderer: it opens with
@@ -249,6 +264,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/E.4 | `TokenRedactor` streaming-redaction prototype (buffer-to-boundary + dangling-prefix retention) + `docs/cot-streaming.md` feasibility (feasible, behind `reveal_reasoning`) | `claude/v06-e4-cotstream` | Claude (Implementer) | 0 kB (secrets/docs) | Enforces 2, 3, 11; no unredacted secret reaches the user mid-stream |
 | 2026-06-28 | v0.6/C.3 | `EvidenceBundle::to_markdown` (bounded PR-body/cockpit render, 🔴 review notice, per-list overflow) + `to_json` (schema v1); `draft_pr_body` delegates | `claude/v06-c3-evidence` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 2, 10, 11; bounded redacted evidence, every receipt included |
 | 2026-06-28 | v0.6/D.1 | Task-loop wiring `plan_task`/`finalize_task` composing routing (C.1) + advisory gate (C.2) into a terminal `TaskOutcome`; sandboxed run `#[ignore]`d | `claude/v06-d1-executor-wire` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 5, 6, 13; verifier-owned completion, advisory only gates |
 | 2026-06-28 | v0.6/A.3 | `pr_intent_to_create_request`: PrIntent→CreatePrRequest for the live draft-PR POST; evidence body verbatim, draft=true; real POST `#[ignore]`d | `claude/v06-a3-draftpr` | Claude (Implementer) | 0 kB (daemon/live-only) | Enforces 6, 13, 14; body is evidence not a model claim |

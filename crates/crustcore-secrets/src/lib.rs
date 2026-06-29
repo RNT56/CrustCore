@@ -37,6 +37,10 @@
 /// Encrypted-file vault backend (`vault-file` feature; never in nano).
 #[cfg(feature = "vault-file")]
 pub mod store;
+/// Streaming token redaction (roadmap-v0.6 E.4): buffers model tokens to a redaction
+/// boundary, scans with the existing `Redactor`, and yields only redacted chunks, with a
+/// bounded retain-window so a secret can never be split across the emit point.
+pub mod token_stream;
 
 /// OS keychain loaders (`macos-keychain` / `linux-keyring` features; never in nano).
 /// Dependency-free: they shell out to the system tool and load into an
@@ -238,6 +242,39 @@ impl Redactor {
         self.needles.push((label.to_string(), value.to_vec()));
         self.needles
             .sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
+    }
+
+    /// The byte length of the **longest** registered secret, or 0 if none.
+    #[must_use]
+    pub fn max_needle_len(&self) -> usize {
+        self.needles.iter().map(|(_, v)| v.len()).max().unwrap_or(0)
+    }
+
+    /// The length (bytes) of the longest **suffix of `text` that is a proper prefix of
+    /// some registered secret** — a "dangling partial secret" that may complete in a
+    /// later chunk. The streaming [`token_stream::TokenRedactor`](crate::token_stream::TokenRedactor)
+    /// retains exactly this suffix on a forced (no-boundary) emit, so it never emits the
+    /// start of a secret that will only finish later: anything *before* the dangling
+    /// suffix has no partial-secret tail, so redacting it and emitting is safe, while the
+    /// dangling suffix stays buffered until it completes (and is caught) or is proven not
+    /// a secret. Returns 0 when the buffer's tail is not the beginning of any secret. The
+    /// length leaks nothing about the secret's contents.
+    #[must_use]
+    pub fn longest_dangling_prefix(&self, text: &str) -> usize {
+        let t = text.as_bytes();
+        let mut best = 0;
+        for (_, needle) in &self.needles {
+            let max_k = t.len().min(needle.len().saturating_sub(1));
+            let mut k = max_k;
+            while k > best {
+                if t[t.len() - k..] == needle[..k] {
+                    best = k;
+                    break;
+                }
+                k -= 1;
+            }
+        }
+        best
     }
 
     /// Redacts every registered secret occurrence in `text`. It collects **all**
