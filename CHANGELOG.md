@@ -30,6 +30,17 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Real draft-PR creation mapping (roadmap-v0.6 A.3).** Added the `live`-gated
+  `crustcore_daemon::github::pr_intent_to_create_request`: maps the backend's
+  `PrIntent` (minted by `open_pr` **only** from a `VerifiedPatch` + a valid
+  `Approved<GitHubWriteCap>` — invariants 13, 14) onto the net layer's
+  `CreatePrRequest` for the live `POST …/pulls`. It carries the **verifier-evidence
+  body verbatim** (invariant 6 — never a model `self_claimed_done`) and preserves
+  `draft = true`. The net layer already maps non-2xx (401/404/422) to typed
+  `GitHubError` (never a fake success). The real POST is the `#[ignore]`d
+  `draft_pr_live_post_smoke` (`TODO(draft-pr-live)`), catalogued in runbook §B.6.
+  Daemon-only (live feature); **zero nano impact**.
+
 - **Credential-proxy branch push (roadmap-v0.6 A.2).** Added the git
   **credential-helper protocol** to `crustcore_daemon::github`, the mechanism that
   hands `git` a short-lived installation token **without it ever entering the
@@ -211,6 +222,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/A.3 | `pr_intent_to_create_request`: PrIntent→CreatePrRequest for the live draft-PR POST; evidence body verbatim, draft=true; real POST `#[ignore]`d | `claude/v06-a3-draftpr` | Claude (Implementer) | 0 kB (daemon/live-only) | Enforces 6, 13, 14; body is evidence not a model claim |
 | 2026-06-28 | v0.6/A.2 | Git credential-helper protocol: `parse_credential_request`/`authorize_credential`/`credential_helper_response`/`confining_git_config` — token reaches git only over the helper pipe, bound to a registered cap; live exec/push `#[ignore]`d | `claude/v06-a2-credproxy` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 1, 9, 13; no raw token in the sandbox, push confined to cap repo+prefix |
 | 2026-06-28 | v0.6/C.2 | Multi-verifier advisory gate: `required_reviewers` + `orchestrate_review` folding Reviewer/SecurityAuditor verdicts + verifier result via `decide_integration`; veto-not-approval, times out into refusal | `claude/v06-c2-reviewer` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 5, 13; verdicts veto, verifier still completes |
 | 2026-06-28 | v0.6/C.1 | Pure `decide_routing` executor router (single/fan-out/advisory/blocked) over task shape+risk+budget+configured; selection only, verifier still completes | `claude/v06-c1-router` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 6, 13; routing picks a worker, never authority |

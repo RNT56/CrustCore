@@ -544,6 +544,35 @@ pub fn mint_installation_token(
 }
 
 // ---------------------------------------------------------------------------
+// Draft PR creation (roadmap-v0.6 A.3) — PrIntent -> CreatePrRequest -> POST
+// ---------------------------------------------------------------------------
+
+/// Maps the backend's [`PrIntent`](crustcore_backend::integrate::PrIntent) (minted by
+/// `open_pr` **only** from a `VerifiedPatch` + a valid `Approved<GitHubWriteCap>` —
+/// invariants 13, 14) onto the net layer's `CreatePrRequest` for the live POST.
+///
+/// The mapping is a pure field copy: it carries the repo/head/base/title and the
+/// **verifier-evidence body verbatim** (invariant 6 — the body is evidence built by
+/// `format_pr_body`, never a model `self_claimed_done`), and it preserves `draft =
+/// true` (CrustCore opens draft PRs awaiting human review). The intent never carries a
+/// secret, so nothing here is redacted beyond what the daemon already does to the body
+/// before posting.
+#[cfg(feature = "live")]
+#[must_use]
+pub fn pr_intent_to_create_request(
+    intent: &crustcore_backend::integrate::PrIntent,
+) -> crustcore_net::github::CreatePrRequest {
+    crustcore_net::github::CreatePrRequest {
+        repo: intent.repo.0.as_str().to_string(),
+        head: intent.head_branch.clone(),
+        base: intent.base_branch.clone(),
+        title: intent.title.clone(),
+        body: intent.body.clone(),
+        draft: intent.draft,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // CI check monitoring → repair-task loop (P10.7)
 // ---------------------------------------------------------------------------
 
@@ -1047,6 +1076,45 @@ mod tests {
         // The live inch: spawn the helper, set confining_git_config on the worktree,
         // and `git push origin crustcore/task` — out of CI scope (no token/network).
         panic!("live seam: run manually with a real App token + test repo (see runbook §B.5)");
+    }
+
+    // --- draft PR mapping (A.3, live feature) ---
+
+    #[cfg(feature = "live")]
+    #[test]
+    fn pr_intent_maps_to_a_draft_create_request_with_evidence_body() {
+        use crustcore_backend::integrate::PrIntent;
+        use crustcore_types::{ApprovalId, RepoRef};
+        let intent = PrIntent {
+            repo: RepoRef(BoundedText::truncated("RNT56/CrustCore", 64)),
+            head_branch: "crustcore/fix".to_string(),
+            base_branch: "main".to_string(),
+            draft: true,
+            title: "[crustcore] verified patch on crustcore/fix".to_string(),
+            body: "Verifier: cargo test passed\nHuman review required before merge".to_string(),
+            approval_id: ApprovalId(7),
+        };
+        let req = pr_intent_to_create_request(&intent);
+        assert_eq!(req.repo, "RNT56/CrustCore");
+        assert_eq!(req.head, "crustcore/fix");
+        assert_eq!(req.base, "main");
+        assert!(req.draft, "CrustCore opens DRAFT PRs");
+        assert!(req.body.contains("Verifier:"));
+        assert!(
+            !req.body.contains("self_claimed"),
+            "the body is verifier evidence, not a model claim"
+        );
+    }
+
+    // Live seam: the real POST that creates the draft PR. The mapping above is
+    // CI-tested; the net layer already maps non-2xx (401/404/422) to typed errors.
+    #[cfg(feature = "live")]
+    #[test]
+    #[ignore = "live: real POST /repos/{owner}/{repo}/pulls creating a draft PR (TODO(draft-pr-live))"]
+    fn draft_pr_live_post_smoke() {
+        // Requires a VerifiedPatch -> open_pr -> Approved<GitHubWriteCap> + a GitHub
+        // token + a test repo. See docs/live-socket-validation.md §B.6.
+        panic!("live seam: run manually with a real token + test repo (see runbook §B.6)");
     }
 
     // --- merge gate (§3.1) ---
