@@ -30,6 +30,20 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Multi-repo orchestration skeleton (roadmap-v0.6 F.3).** Added
+  `crustcore_daemon::multirepo`: `RepoId`, `RepoBinding` (id/path/verify/base/keywords,
+  from config/CLI), and a pure `classify_repo(intent, repos) → Option<RepoId>` that routes
+  a chat launch — exactly one keyword hint → that repo; no hint + a single bound repo →
+  the sole-repo default; ambiguous (multiple hits) or unhinted-with-multiple → `None`
+  (the dispatcher asks "which repo?" rather than guessing). The intent is matched only
+  against **operator-supplied keywords** and never supplies a path (invariant 7); the
+  global concurrency cap is unchanged (invariant 11). `parse_repo_binding` / `parse_repo_bindings`
+  parse the real `--repo id=/path` CLI args (rejecting malformed args + duplicate ids,
+  CI-tested), so only the actual simultaneous-task daemon run is the `#[ignore]`d
+  `multi_repo_live_smoke`
+  (`TODO(P10-multi-repo-live)`), catalogued in runbook §F.5. 4 new tests; daemon-only;
+  **zero nano impact**.
+
 - **Remote admin socket protocol (roadmap-v0.6 F.2).** Added `crustcore_daemon::admin`:
   an authenticated operator control plane (`status` / `detail <id>` / `cancel <id>` /
   `kill <id>`) over a length-prefixed framed socket. Pure protocol core —
@@ -328,6 +342,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/F.3 | `multirepo::classify_repo` (explicit-hint → sole-repo default → ambiguous asks) + `RepoBinding`; intent matches operator keywords only, never supplies a path | `claude/v06-f3-multirepo` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 7, 11; repo paths from config/CLI, shared global cap |
 | 2026-06-28 | v0.6/F.2 | Admin socket protocol: parse/frame(bounded)/nonce-auth + `dispatch_admin` (status/detail/cancel/kill) feeding the same owner-scoped path as Telegram; live listener `#[ignore]`d | `claude/v06-f2-adminsock` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 5, 11, 12; operator-only, owner-scoped cancel/kill |
 | 2026-06-28 | v0.6/E.4 | `TokenRedactor` streaming-redaction prototype (buffer-to-boundary + dangling-prefix retention) + `docs/cot-streaming.md` feasibility (feasible, behind `reveal_reasoning`) | `claude/v06-e4-cotstream` | Claude (Implementer) | 0 kB (secrets/docs) | Enforces 2, 3, 11; no unredacted secret reaches the user mid-stream |
 | 2026-06-28 | v0.6/E.2 | `github_commands::parse_command`: untrusted PR comment → typed bounded `/crustcore` command (Run/Retry/Cancel/Explain/RiskDetected); injection stays literal; routes through the Telegram dispatch | `claude/v06-e2-ghcommands` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 7, 8, 11, 16; parsed by the daemon, never model output |
