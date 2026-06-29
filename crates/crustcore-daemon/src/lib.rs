@@ -35,10 +35,22 @@
 //! (`TODO(P10-net)`) land with the daemon runtime entry point.
 #![forbid(unsafe_code)]
 
+/// Remote admin socket protocol (roadmap-v0.6 F.2): authenticated operator commands
+/// (status / detail / cancel / kill) over a length-prefixed framed socket, feeding the
+/// same owner-scoped cancel/kill path as Telegram. Operator-only, never model-facing.
+pub mod admin;
 pub mod advisor;
 pub mod chat;
 pub mod exec;
 pub mod github;
+/// Multi-repo orchestration (roadmap-v0.6 F.3): bind several repos at startup and a pure
+/// `classify_repo` that routes a chat launch to the right one (explicit hint → sole-repo
+/// default → ambiguous asks). Repo paths from config/CLI, never model/user input.
+pub mod multirepo;
+/// GitHub `/crustcore` slash commands (roadmap-v0.6 E.2): a pure parser turning an
+/// untrusted PR/issue comment into a typed, bounded `GithubCommand` routed through the
+/// same policy-gated dispatch as Telegram — never free text to a model.
+pub mod github_commands;
 /// GitHub App onboarding (roadmap-v0.6 A.1): turns an untrusted install redirect
 /// into a registered, write-capable repo + a minted `Approved<GitHubWriteCap>`.
 /// Pure decision core; the install-confirm + token-mint are the live seam.
@@ -63,6 +75,10 @@ pub mod reviewer;
 /// configured executors. Selection only — the verifier still owns completion.
 pub mod router;
 pub mod runtime;
+/// Verified-candidate scoring (roadmap-v0.6 B.2): a pure `score_candidate` / `pick_best`
+/// that selects the best verifier-accepted fan-out candidate — correctness dominates, so
+/// a verified patch always outranks an unverified one (scoring never bypasses the verifier).
+pub mod score;
 pub mod selfimprove;
 /// Slack runtime control plane (roadmap-v0.6 E.3): a pure `SlackAllowlist` +
 /// `normalize_message` that mirror Telegram — feeding the same `RuntimeEvent` stream
