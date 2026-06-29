@@ -30,6 +30,20 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **GitHub `/crustcore` slash commands (roadmap-v0.6 E.2).** Added the pure parser
+  `crustcore_daemon::github_commands`: `parse_command(text) → Option<GithubCommand>`
+  turns an **untrusted** PR/issue comment into a typed, bounded command —
+  `Run{goal,dir}` / `Retry{id}` / `Cancel{id}` / `Explain{id}` / `RiskDetected(reason)`.
+  Flag-style args (`--goal`, `--dir`); the goal is bounded to `MAX_GOAL` (512) and stays
+  a **literal string** (a prompt injection in the goal is inert data, never interpreted —
+  invariant 7); ids parse strictly as `u64`; one command per comment (extras counted for
+  logging); anything malformed/unknown becomes `RiskDetected`, **never silently dropped**.
+  These route through the *same* policy-gated dispatch as Telegram (invariants 8, 16 — not
+  a parallel ungoverned surface); the author-authorization check + webhook→dispatch
+  round-trip remain the live parts (reusing `B2-webhook-live`). 8 new tests
+  (incl. injection-as-literal + prose-isolation + first-wins + bounds); daemon-only;
+  **zero nano impact**.
+
 - **Evidence bundle rendering (roadmap-v0.6 C.3).** Added
   `EvidenceBundle::to_markdown()` and `to_json()` to `crustcore_daemon::product`.
   `to_markdown` is the **bounded** canonical PR-body/cockpit renderer: it opens with
@@ -249,6 +263,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/E.2 | `github_commands::parse_command`: untrusted PR comment → typed bounded `/crustcore` command (Run/Retry/Cancel/Explain/RiskDetected); injection stays literal; routes through the Telegram dispatch | `claude/v06-e2-ghcommands` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 7, 8, 11, 16; parsed by the daemon, never model output |
 | 2026-06-28 | v0.6/C.3 | `EvidenceBundle::to_markdown` (bounded PR-body/cockpit render, 🔴 review notice, per-list overflow) + `to_json` (schema v1); `draft_pr_body` delegates | `claude/v06-c3-evidence` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 2, 10, 11; bounded redacted evidence, every receipt included |
 | 2026-06-28 | v0.6/D.1 | Task-loop wiring `plan_task`/`finalize_task` composing routing (C.1) + advisory gate (C.2) into a terminal `TaskOutcome`; sandboxed run `#[ignore]`d | `claude/v06-d1-executor-wire` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 5, 6, 13; verifier-owned completion, advisory only gates |
 | 2026-06-28 | v0.6/A.3 | `pr_intent_to_create_request`: PrIntent→CreatePrRequest for the live draft-PR POST; evidence body verbatim, draft=true; real POST `#[ignore]`d | `claude/v06-a3-draftpr` | Claude (Implementer) | 0 kB (daemon/live-only) | Enforces 6, 13, 14; body is evidence not a model claim |
