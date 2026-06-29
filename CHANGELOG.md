@@ -37,8 +37,10 @@ agent/PR/role/size/invariant audit trail.
   the sole-repo default; ambiguous (multiple hits) or unhinted-with-multiple → `None`
   (the dispatcher asks "which repo?" rather than guessing). The intent is matched only
   against **operator-supplied keywords** and never supplies a path (invariant 7); the
-  global concurrency cap is unchanged (invariant 11). The live `--repo id=/path` CLI
-  startup + a simultaneous-task run is the `#[ignore]`d `multi_repo_live_smoke`
+  global concurrency cap is unchanged (invariant 11). `parse_repo_binding` / `parse_repo_bindings`
+  parse the real `--repo id=/path` CLI args (rejecting malformed args + duplicate ids,
+  CI-tested), so only the actual simultaneous-task daemon run is the `#[ignore]`d
+  `multi_repo_live_smoke`
   (`TODO(P10-multi-repo-live)`), catalogued in runbook §F.5. 4 new tests; daemon-only;
   **zero nano impact**.
 

@@ -88,6 +88,42 @@ pub fn classify_repo(intent: &str, repos: &[RepoBinding]) -> Option<RepoId> {
     }
 }
 
+/// Parses a `--repo` CLI binding argument of the form `id=/path` into a [`RepoBinding`]
+/// (F.3 startup). The id and path come **only** from the operator's CLI (invariant 7);
+/// a missing `=`, an empty id, or an empty path is rejected (`None`) rather than guessed.
+/// The id is automatically a routing keyword.
+#[must_use]
+pub fn parse_repo_binding(arg: &str) -> Option<RepoBinding> {
+    let (id, path) = arg.split_once('=')?;
+    let id = id.trim();
+    let path = path.trim();
+    if id.is_empty() || path.is_empty() {
+        return None;
+    }
+    Some(RepoBinding::new(id, path))
+}
+
+/// Parses a set of `--repo id=/path` args into bindings, **rejecting duplicate ids** (a
+/// repo id must be unique so routing is unambiguous). On any malformed arg or a duplicate
+/// id, returns the offending argument as the error.
+///
+/// # Errors
+/// The first argument that is malformed or introduces a duplicate id.
+pub fn parse_repo_bindings<'a, I>(args: I) -> Result<Vec<RepoBinding>, &'a str>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut out: Vec<RepoBinding> = Vec::new();
+    for arg in args {
+        let binding = parse_repo_binding(arg).ok_or(arg)?;
+        if out.iter().any(|b| b.id == binding.id) {
+            return Err(arg); // duplicate id
+        }
+        out.push(binding);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,7 +184,40 @@ mod tests {
         );
     }
 
-    // Live seam: multi-repo CLI startup (`--repo id=/path`) + a simultaneous-task smoke.
+    #[test]
+    fn parse_repo_binding_reads_id_eq_path() {
+        let b = parse_repo_binding("app=/src/app").unwrap();
+        assert_eq!(b.id, RepoId("app".to_string()));
+        assert_eq!(b.path, "/src/app");
+        // The id is a routing keyword.
+        assert!(b.keywords.contains(&"app".to_string()));
+        // Malformed args are rejected, not guessed.
+        assert!(parse_repo_binding("noequals").is_none());
+        assert!(parse_repo_binding("=/p").is_none());
+        assert!(parse_repo_binding("id=").is_none());
+    }
+
+    #[test]
+    fn parse_repo_bindings_rejects_duplicate_ids() {
+        let ok = parse_repo_bindings(["app=/src/app", "infra=/src/infra"]).unwrap();
+        assert_eq!(ok.len(), 2);
+        // A duplicate id is the offending arg.
+        assert_eq!(parse_repo_bindings(["app=/a", "app=/b"]), Err("app=/b"));
+        // A malformed arg is surfaced.
+        assert_eq!(parse_repo_bindings(["good=/g", "bad"]), Err("bad"));
+    }
+
+    #[test]
+    fn parsed_bindings_route_via_classify_repo() {
+        let repos = parse_repo_bindings(["app=/src/app", "infra=/src/infra"]).unwrap();
+        assert_eq!(
+            classify_repo("deploy to infra", &repos),
+            Some(RepoId("infra".to_string()))
+        );
+    }
+
+    // Live seam: the actual simultaneous-task daemon run across the bound repos (the CLI
+    // parse + classify are CI-tested above; this is the multi-repo runtime-loop inch).
     #[test]
     #[ignore = "live: bind multiple repos via CLI and run simultaneous tasks (TODO(P10-multi-repo-live))"]
     fn multi_repo_live_smoke() {
