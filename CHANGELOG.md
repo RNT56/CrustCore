@@ -30,6 +30,19 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Slack runtime control plane (roadmap-v0.6 E.3).** Added `crustcore_daemon::slack`:
+  a pure `SlackAllowlist` (per-workspace/per-channel, **deny-all empty** — invariants 5,
+  15), `normalize_message(msg, allowlist) → Option<RuntimeEvent>` that maps a Slack event
+  onto the **same `RuntimeEvent` stream as Telegram** (plain → `QueuedTurn`, `!` → `Steer`,
+  `/` → `Command`, reaction → `ApprovalCallback` with the same nonce format) — so Slack
+  routes through the same policy gates, **not a parallel ungoverned surface** (invariants
+  8, 16) — and `render_to_slack` which **redacts every secret** before any message leaves
+  (invariants 1–3). Text is untrusted + bounded (invariants 7, 11); approvals come from
+  Slack users gated by the allowlist, never model output (invariant 4); Slack is opt-in,
+  operator-bound via CLI (invariant 15). The Slack Bot API + Events-API/Socket-Mode
+  listener is the `live`-gated `#[ignore]`d `slack_live_round_trip_smoke`
+  (`TODO(slack-live)`), in runbook §F.7. 5 new tests; daemon-only; **zero nano impact**.
+
 - **Cross-process task lease recovery (roadmap-v0.6 F.1).** Added
   `TaskRegistry::snapshot_all` + `adopt_from_snapshot` (with `TaskSnapshot` / `AdoptError`)
   — the recovery half of invariant 12. A restarting daemon re-adopts its running tasks
@@ -360,6 +373,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/E.3 | `slack::SlackAllowlist` + `normalize_message` mirroring Telegram (same RuntimeEvent stream + gates, deny-all empty) + redacted `render_to_slack`; live API `#[ignore]`d | `claude/v06-e3-slack` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 1-5, 7, 8, 11, 15, 16; opt-in, redacted, same dispatch as Telegram |
 | 2026-06-28 | v0.6/F.1 | `snapshot_all`/`adopt_from_snapshot` cross-process recovery: stable ids, re-leased under new owner, Pending-resume-from-log, carried-usage re-charge, over-budget→terminal. Completes Phase F | `claude/v06-f1-recovery` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 11, 12, 13; recovery restores supervision, never completion |
 | 2026-06-28 | v0.6/F.3 | `multirepo::classify_repo` (explicit-hint → sole-repo default → ambiguous asks) + `RepoBinding`; intent matches operator keywords only, never supplies a path | `claude/v06-f3-multirepo` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 7, 11; repo paths from config/CLI, shared global cap |
 | 2026-06-28 | v0.6/F.2 | Admin socket protocol: parse/frame(bounded)/nonce-auth + `dispatch_admin` (status/detail/cancel/kill) feeding the same owner-scoped path as Telegram; live listener `#[ignore]`d | `claude/v06-f2-adminsock` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 5, 11, 12; operator-only, owner-scoped cancel/kill |

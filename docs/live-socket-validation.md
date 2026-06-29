@@ -83,6 +83,7 @@ cargo test --workspace -- --list --ignored
 | `live_get_updates_smoke` | F | `live` | [F.1](#f1) | `RestTelegram` shaping + redaction ✓ | easy (bot token) |
 | `live_telegram_round_trip_smoke` | F | `live` | [F.2](#f2) | runtime-channel decision logic ✓ | easy (bot token) |
 | `live_ws_sse_emits_a_snapshot` | F | — | [F.3](#f3) | snapshot serialize + `ws_stream` ✓ | easy (loopback port) |
+| `slack_live_round_trip_smoke` | F | `live` | [F.7](#f7) | `SlackAllowlist`/`normalize_message`/render cores ✓ | medium (Slack workspace) |
 | `daemon_recover_xproc_live_smoke` | F | — | [F.6](#f6) | `snapshot_all`/`adopt_from_snapshot` cores ✓ | medium (restart) |
 | `multi_repo_live_smoke` | F | — | [F.5](#f5) | `classify_repo` routing core ✓ | medium (multiple repos) |
 | `daemon_admin_live_socket_smoke` | F | — | [F.4](#f4) | admin parse/frame/auth/dispatch cores ✓ | medium (bound socket) |
@@ -452,6 +453,20 @@ cargo test --workspace -- --list --ignored
 > their live inches are covered by [F.2](#f2)/[A.2](#a2) (model + channel) and
 > [B.4](#b4) (the draft-PR POST) respectively.
 
+<a id="f7"></a>
+### F.7 — `slack_live_round_trip_smoke` — Slack control plane (E.3)
+- **Test:** `crustcore-daemon/src/slack.rs::tests::slack_live_round_trip_smoke`, feature `live`. Seam tag `TODO(slack-live)`.
+- **Socket:** the Slack Bot API HTTP client + the Events-API / Socket-Mode listener
+  (the spawned `crustcore-net` helper, the Telegram pattern).
+- **CI core (passing):** `SlackAllowlist` (per-workspace/channel, **deny-all empty**),
+  `normalize_message` (plain → `QueuedTurn`, `!` → `Steer`, `/` → `Command`, reaction →
+  `ApprovalCallback` — the **same `RuntimeEvent` stream** as Telegram, invariants 8/16),
+  and `render_to_slack` (redacts every secret before the message leaves — invariants 1–3).
+- **Prereq:** a real Slack workspace + bot token (broker) + signing secret.
+- **Run:** `cargo test -p crustcore-daemon --features live slack::tests::slack_live_round_trip_smoke -- --ignored --nocapture`
+- **Success:** an allowed-channel message dispatches like Telegram; a reaction resolves an
+  approval via its nonce; outbound text is redacted; Slack is opt-in (operator-bound via
+  CLI, never the default — invariant 15). **Difficulty: medium.**
 <a id="f6"></a>
 ### F.6 — `daemon_recover_xproc_live_smoke` — cross-process recovery (F.1)
 - **Test:** `crustcore-daemon/src/registry.rs::tests::daemon_recover_xproc_live_smoke`. Seam tag `TODO(daemon-recover-xproc-live)`.
