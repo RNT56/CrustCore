@@ -30,6 +30,19 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Task-loop wiring (roadmap-v0.6 D.1).** Added `crustcore_daemon::task_loop`,
+  composing the v0.6 decision cores into one pipeline: `plan_task` (routing C.1 →
+  `ExecutionPlan`: Single / Fanout / AdvisoryOnly / Blocked) and `finalize_task`
+  (verifier result + `orchestrate_review` C.2 → terminal `TaskOutcome`:
+  ReadyToIntegrate / AwaitingReview / ReviewTimedOut / ReviewBlocked / Failed /
+  AdvisoryRequested / Blocked). Completion stays **verifier-owned** — an unverified
+  run is `Failed` regardless of any advisory approval (invariants 6, 13); advisory
+  verdicts only *further* gate (invariant 4); outcomes flow to the supervisor, not the
+  user (invariant 5). Pure decision cores (no sandbox/clock); the sandboxed
+  `run_fanout`/`WorktreeSubagentExecutor` run → verify → draft PR is the `#[ignore]`d
+  `live_executor_wire_smoke` (`TODO(P3-live-executor-wire)`), catalogued in runbook
+  §C.6. 8 new tests; daemon-only; **zero nano impact**.
+
 - **Real draft-PR creation mapping (roadmap-v0.6 A.3).** Added the `live`-gated
   `crustcore_daemon::github::pr_intent_to_create_request`: maps the backend's
   `PrIntent` (minted by `open_pr` **only** from a `VerifiedPatch` + a valid
@@ -222,6 +235,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/D.1 | Task-loop wiring `plan_task`/`finalize_task` composing routing (C.1) + advisory gate (C.2) into a terminal `TaskOutcome`; sandboxed run `#[ignore]`d | `claude/v06-d1-executor-wire` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 5, 6, 13; verifier-owned completion, advisory only gates |
 | 2026-06-28 | v0.6/A.3 | `pr_intent_to_create_request`: PrIntent→CreatePrRequest for the live draft-PR POST; evidence body verbatim, draft=true; real POST `#[ignore]`d | `claude/v06-a3-draftpr` | Claude (Implementer) | 0 kB (daemon/live-only) | Enforces 6, 13, 14; body is evidence not a model claim |
 | 2026-06-28 | v0.6/A.2 | Git credential-helper protocol: `parse_credential_request`/`authorize_credential`/`credential_helper_response`/`confining_git_config` — token reaches git only over the helper pipe, bound to a registered cap; live exec/push `#[ignore]`d | `claude/v06-a2-credproxy` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 1, 9, 13; no raw token in the sandbox, push confined to cap repo+prefix |
 | 2026-06-28 | v0.6/C.2 | Multi-verifier advisory gate: `required_reviewers` + `orchestrate_review` folding Reviewer/SecurityAuditor verdicts + verifier result via `decide_integration`; veto-not-approval, times out into refusal | `claude/v06-c2-reviewer` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 5, 13; verdicts veto, verifier still completes |
