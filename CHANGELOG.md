@@ -46,6 +46,130 @@ agent/PR/role/size/invariant audit trail.
   Phase E and the entire roadmap-v0.6 buildable scope.** 4 new tests; non-nano; **zero nano
   impact**.
 
+- **Slack runtime control plane (roadmap-v0.6 E.3).** Added `crustcore_daemon::slack`:
+  a pure `SlackAllowlist` (per-workspace/per-channel, **deny-all empty** — invariants 5,
+  15), `normalize_message(msg, allowlist) → Option<RuntimeEvent>` that maps a Slack event
+  onto the **same `RuntimeEvent` stream as Telegram** (plain → `QueuedTurn`, `!` → `Steer`,
+  `/` → `Command`, reaction → `ApprovalCallback` with the same nonce format) — so Slack
+  routes through the same policy gates, **not a parallel ungoverned surface** (invariants
+  8, 16) — and `render_to_slack` which **redacts every secret** before any message leaves
+  (invariants 1–3). Text is untrusted + bounded (invariants 7, 11); approvals come from
+  Slack users gated by the allowlist, never model output (invariant 4); Slack is opt-in,
+  operator-bound via CLI (invariant 15). The Slack Bot API + Events-API/Socket-Mode
+  listener is the `live`-gated `#[ignore]`d `slack_live_round_trip_smoke`
+  (`TODO(slack-live)`), in runbook §F.7. 5 new tests; daemon-only; **zero nano impact**.
+
+- **Cross-process task lease recovery (roadmap-v0.6 F.1).** Added
+  `TaskRegistry::snapshot_all` + `adopt_from_snapshot` (with `TaskSnapshot` / `AdoptError`)
+  — the recovery half of invariant 12. A restarting daemon re-adopts its running tasks
+  with **stable ids**, re-leasing under the new `LeaseOwner` and marking each **`Pending`**
+  so a fresh worker resumes from the log (an `mpsc` channel can't survive a restart).
+  Carried `usage` is preserved so budgets **re-charge, not reset** (invariant 11); an
+  already-over-budget task is adopted **terminal** (`Done(BudgetExhausted)`); an absent
+  worktree → `WorktreeGone`; a duplicate id → `Duplicate`. A re-adopted task still
+  completes only on a `VerifiedPatch` (invariant 13 — adoption restores supervision, never
+  completion). **Persistence is real:** `encode_snapshots`/`decode_snapshots` (a dependency-free,
+  versioned, bounded `CCTS` frame — panic-free, fail-closed), `TaskRegistry::dump_snapshots`,
+  and `load_snapshots` actually write + reload the dump (CI-tested incl. a dump→load→re-adopt
+  simulated restart). Only the SIGTERM hook + a real OS process restart remain the `#[ignore]`d
+  `daemon_recover_xproc_live_smoke`
+  (`TODO(daemon-recover-xproc-live)`), in runbook §F.6. Also derives `PartialEq`/`Eq` on
+  `AgentBudget`. **This completes Phase F (daemon hardening).** 4 new tests; daemon-only;
+  **zero nano impact**.
+
+- **Multi-repo orchestration skeleton (roadmap-v0.6 F.3).** Added
+  `crustcore_daemon::multirepo`: `RepoId`, `RepoBinding` (id/path/verify/base/keywords,
+  from config/CLI), and a pure `classify_repo(intent, repos) → Option<RepoId>` that routes
+  a chat launch — exactly one keyword hint → that repo; no hint + a single bound repo →
+  the sole-repo default; ambiguous (multiple hits) or unhinted-with-multiple → `None`
+  (the dispatcher asks "which repo?" rather than guessing). The intent is matched only
+  against **operator-supplied keywords** and never supplies a path (invariant 7); the
+  global concurrency cap is unchanged (invariant 11). `parse_repo_binding` / `parse_repo_bindings`
+  parse the real `--repo id=/path` CLI args (rejecting malformed args + duplicate ids,
+  CI-tested), so only the actual simultaneous-task daemon run is the `#[ignore]`d
+  `multi_repo_live_smoke`
+  (`TODO(P10-multi-repo-live)`), catalogued in runbook §F.5. 4 new tests; daemon-only;
+  **zero nano impact**.
+
+- **Remote admin socket protocol (roadmap-v0.6 F.2).** Added `crustcore_daemon::admin`:
+  an authenticated operator control plane (`status` / `detail <id>` / `cancel <id>` /
+  `kill <id>`) over a length-prefixed framed socket. Pure protocol core —
+  `parse_admin_command`, `frame`/`try_deframe` (bounded; a hostile length is rejected
+  before allocating — invariant 11), `authenticate` (constant-length nonce compare; the
+  startup nonce file gates every command), and `dispatch_admin` which feeds the **same
+  owner-scoped `request_cancel`/`request_kill`** path as Telegram (invariant 12). It is
+  **operator-only, never model-facing** (invariant 5). A transport-agnostic
+  `serve_admin_connection` (read framed nonce → authenticate → read framed command →
+  dispatch → framed response) is **CI-tested over in-memory streams**, so only the thin
+  `UnixListener` (0600) / TCP-loopback **accept loop** remains the `#[ignore]`d
+  `daemon_admin_live_socket_smoke`
+  (`TODO(daemon-admin-live)`), catalogued in runbook §F.4. 6 new tests; daemon-only;
+  **zero nano impact**.
+
+- **Streaming CoT-redaction prototype + feasibility (roadmap-v0.6 E.4).** Added
+  `crustcore_secrets::token_stream::TokenRedactor` and the supporting
+  `Redactor::longest_dangling_prefix` / `max_needle_len`. `TokenRedactor` buffers
+  streamed model tokens to a **redaction boundary** (newline), scans with the existing
+  `Redactor`, and emits only fully redacted chunks — so a secret split across tokens or
+  lines is caught before any byte reaches the user (invariants 2, 3). A forced
+  (no-boundary) emit retains only the **longest dangling needle-prefix** suffix (the
+  start of a not-yet-finished secret), keeping the buffer bounded without ever emitting a
+  partial secret. 6 red-team tests (split-across-tokens, straddling forced-emit,
+  full-secret-present, no-false-positives, flush-tail, bounded-worst-case). Added
+  [`docs/cot-streaming.md`](./docs/cot-streaming.md) concluding token-level CoT streaming
+  is **feasible** behind the existing `reveal_reasoning` opt-in, with the latency bound
+  (<500 ms) and the one constraint (the boundary char must not appear inside a secret).
+  Analysis + a pure core; **zero nano impact**.
+
+- **GitHub `/crustcore` slash commands (roadmap-v0.6 E.2).** Added the pure parser
+  `crustcore_daemon::github_commands`: `parse_command(text) → Option<GithubCommand>`
+  turns an **untrusted** PR/issue comment into a typed, bounded command —
+  `Run{goal,dir}` / `Retry{id}` / `Cancel{id}` / `Explain{id}` / `RiskDetected(reason)`.
+  Flag-style args (`--goal`, `--dir`); the goal is bounded to `MAX_GOAL` (512) and stays
+  a **literal string** (a prompt injection in the goal is inert data, never interpreted —
+  invariant 7); ids parse strictly as `u64`; one command per comment (extras counted for
+  logging); anything malformed/unknown becomes `RiskDetected`, **never silently dropped**.
+  These route through the *same* policy-gated dispatch as Telegram (invariants 8, 16 — not
+  a parallel ungoverned surface); the author-authorization check + webhook→dispatch
+  round-trip remain the live parts (reusing `B2-webhook-live`). 8 new tests
+  (incl. injection-as-literal + prose-isolation + first-wins + bounds); daemon-only;
+  **zero nano impact**.
+
+- **End-to-end issue → draft PR live smoke (roadmap-v0.6 A.5).** Added the `#[ignore]`d
+  `live_issue_to_pr_smoke` (`crustcore-eval`, `TODO(issue-to-pr-live)`): the irreducible
+  live composition of the whole PR-Supervisor wedge — untrusted issue → routed (C.1) +
+  sandbox-verified (`VerifiedPatch`, invariant 13) → credential-proxy push (A.2) →
+  evidence-backed draft PR (A.3/C.3, body is evidence not a model claim, invariant 6) →
+  bounded CI repair (A.4, invariant 11). The whole **decision path** is already CI-tested
+  socket-free by `golden_issue_to_pr_flow`; this seam needs a real App + sandbox + repo.
+  Catalogued in runbook §B.9. **This completes Phase A (PR Supervisor go-live).** Test +
+  runbook only; **zero nano impact**.
+
+- **CI monitor → bounded repair loop (roadmap-v0.6 A.4).** Added to
+  `crustcore_daemon::github`: `aggregate_check_runs` folds per-check
+  `crustcore_net::github::CheckState`s into one overall state (**failure dominates**;
+  empty/any-pending → Pending), `monitor_decision` routes it (Pending→Wait /
+  Passed→Green / Failed→the existing budget-bounded `repair_decision` →
+  SpawnRepair/StopExhausted), and `repair_task_goal` builds a **bounded** failure-context
+  line from the untrusted failed-check names (capped to `MAX_REPAIR_CONTEXT_CHECKS` with
+  a "+N more" note). Repair is bounded by the budget (invariant 11), **CrustCore decides
+  repair — not a model or a PR comment** (invariant 4), and the decision uses the
+  *aggregated state*, never untrusted CI log text (invariant 7). The real polling loop is
+  the `#[ignore]`d `ci_monitor_live_poll_smoke` (`TODO(ci-monitor-live)`), catalogued in
+  runbook §B.8. 4 new tests; daemon-only; **zero nano impact**.
+
+- **Scored verified candidates (roadmap-v0.6 B.2).** Added `crustcore_daemon::score`:
+  `score_candidate(PatchMetadata, RiskTier) → PatchScore` and `pick_best` select the
+  **best verifier-accepted** fan-out candidate instead of merely the first accepted.
+  Correctness dominates by construction — the `VERIFIED_BONUS` (100) exceeds the sum of
+  every other term (diff penalty ≤50, gates ≤20, security ≤8), so a verified candidate
+  *always* outranks an unverified one: **scoring reorders accepted candidates but can
+  never promote an unverified patch** (invariants 6, 13). Among verified candidates a
+  smaller diff and more gates passed rank higher, with a small security-review boost;
+  ties keep the first proposer (deterministic). Pure + total — missing metadata defaults
+  to zero and never fails (the live executor fills it from the real `VerifiedPatch`, the
+  existing P11-exec-live seam). 7 new tests incl. the golden fail/pass-large/pass-small
+  ranking; daemon-only; **zero nano impact**.
 - **Evidence bundle rendering (roadmap-v0.6 C.3).** Added
   `EvidenceBundle::to_markdown()` and `to_json()` to `crustcore_daemon::product`.
   `to_markdown` is the **bounded** canonical PR-body/cockpit renderer: it opens with
@@ -266,6 +390,15 @@ agent/PR/role/size/invariant audit trail.
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
 | 2026-06-28 | v0.6/E.1 | Cockpit view core: `build_cockpit` composes TaskDetail/EvidenceSummary(refs-only)/ApprovalForm(op-hash-bound) from the read-model, bounded; renders evidence, mints nothing. Completes Phase E + all of v0.6 | `claude/v06-e1-cockpit` | Claude (Implementer) | 0 kB (crustcore-dev) | Enforces 2, 5, 11, 13, 14; read-model only, op-bound approvals, no minting |
+| 2026-06-28 | v0.6/E.3 | `slack::SlackAllowlist` + `normalize_message` mirroring Telegram (same RuntimeEvent stream + gates, deny-all empty) + redacted `render_to_slack`; live API `#[ignore]`d | `claude/v06-e3-slack` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 1-5, 7, 8, 11, 15, 16; opt-in, redacted, same dispatch as Telegram |
+| 2026-06-28 | v0.6/F.1 | `snapshot_all`/`adopt_from_snapshot` cross-process recovery: stable ids, re-leased under new owner, Pending-resume-from-log, carried-usage re-charge, over-budget→terminal. Completes Phase F | `claude/v06-f1-recovery` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 11, 12, 13; recovery restores supervision, never completion |
+| 2026-06-28 | v0.6/F.3 | `multirepo::classify_repo` (explicit-hint → sole-repo default → ambiguous asks) + `RepoBinding`; intent matches operator keywords only, never supplies a path | `claude/v06-f3-multirepo` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 7, 11; repo paths from config/CLI, shared global cap |
+| 2026-06-28 | v0.6/F.2 | Admin socket protocol: parse/frame(bounded)/nonce-auth + `dispatch_admin` (status/detail/cancel/kill) feeding the same owner-scoped path as Telegram; live listener `#[ignore]`d | `claude/v06-f2-adminsock` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 5, 11, 12; operator-only, owner-scoped cancel/kill |
+| 2026-06-28 | v0.6/E.4 | `TokenRedactor` streaming-redaction prototype (buffer-to-boundary + dangling-prefix retention) + `docs/cot-streaming.md` feasibility (feasible, behind `reveal_reasoning`) | `claude/v06-e4-cotstream` | Claude (Implementer) | 0 kB (secrets/docs) | Enforces 2, 3, 11; no unredacted secret reaches the user mid-stream |
+| 2026-06-28 | v0.6/E.2 | `github_commands::parse_command`: untrusted PR comment → typed bounded `/crustcore` command (Run/Retry/Cancel/Explain/RiskDetected); injection stays literal; routes through the Telegram dispatch | `claude/v06-e2-ghcommands` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 7, 8, 11, 16; parsed by the daemon, never model output |
+| 2026-06-28 | v0.6/A.5 | `#[ignore]`d `live_issue_to_pr_smoke` composing A.1–A.4 + D.1 end-to-end; CI decision path already covered by `golden_issue_to_pr_flow`. Completes Phase A | `claude/v06-a5-issuetopr` | Claude (Implementer) | 0 kB (eval/docs only) | Composes 6, 11, 13; verifier-owned end-to-end |
+| 2026-06-28 | v0.6/A.4 | CI monitor: `aggregate_check_runs` (failure-dominates) + `monitor_decision` (Wait/Green/SpawnRepair/StopExhausted over the budget) + bounded `repair_task_goal`; live poll `#[ignore]`d | `claude/v06-a4-cimonitor` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 7, 11; repair bounded, decided by CrustCore from aggregated state |
+| 2026-06-28 | v0.6/B.2 | `score_candidate`/`pick_best` scored fan-out selection; correctness dominates so verified always > unverified (scoring never bypasses the verifier); smaller-diff/more-gates rank higher, ties→first | `claude/v06-b2-scoring` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 6, 11, 13; scoring is a tie-break among accepted, never a bypass |
 | 2026-06-28 | v0.6/C.3 | `EvidenceBundle::to_markdown` (bounded PR-body/cockpit render, 🔴 review notice, per-list overflow) + `to_json` (schema v1); `draft_pr_body` delegates | `claude/v06-c3-evidence` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 2, 10, 11; bounded redacted evidence, every receipt included |
 | 2026-06-28 | v0.6/D.1 | Task-loop wiring `plan_task`/`finalize_task` composing routing (C.1) + advisory gate (C.2) into a terminal `TaskOutcome`; sandboxed run `#[ignore]`d | `claude/v06-d1-executor-wire` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 5, 6, 13; verifier-owned completion, advisory only gates |
 | 2026-06-28 | v0.6/A.3 | `pr_intent_to_create_request`: PrIntent→CreatePrRequest for the live draft-PR POST; evidence body verbatim, draft=true; real POST `#[ignore]`d | `claude/v06-a3-draftpr` | Claude (Implementer) | 0 kB (daemon/live-only) | Enforces 6, 13, 14; body is evidence not a model claim |
