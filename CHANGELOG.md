@@ -30,6 +30,21 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Remote admin socket protocol (roadmap-v0.6 F.2).** Added `crustcore_daemon::admin`:
+  an authenticated operator control plane (`status` / `detail <id>` / `cancel <id>` /
+  `kill <id>`) over a length-prefixed framed socket. Pure protocol core —
+  `parse_admin_command`, `frame`/`try_deframe` (bounded; a hostile length is rejected
+  before allocating — invariant 11), `authenticate` (constant-length nonce compare; the
+  startup nonce file gates every command), and `dispatch_admin` which feeds the **same
+  owner-scoped `request_cancel`/`request_kill`** path as Telegram (invariant 12). It is
+  **operator-only, never model-facing** (invariant 5). A transport-agnostic
+  `serve_admin_connection` (read framed nonce → authenticate → read framed command →
+  dispatch → framed response) is **CI-tested over in-memory streams**, so only the thin
+  `UnixListener` (0600) / TCP-loopback **accept loop** remains the `#[ignore]`d
+  `daemon_admin_live_socket_smoke`
+  (`TODO(daemon-admin-live)`), catalogued in runbook §F.4. 6 new tests; daemon-only;
+  **zero nano impact**.
+
 - **Streaming CoT-redaction prototype + feasibility (roadmap-v0.6 E.4).** Added
   `crustcore_secrets::token_stream::TokenRedactor` and the supporting
   `Redactor::longest_dangling_prefix` / `max_needle_len`. `TokenRedactor` buffers
@@ -313,6 +328,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/F.2 | Admin socket protocol: parse/frame(bounded)/nonce-auth + `dispatch_admin` (status/detail/cancel/kill) feeding the same owner-scoped path as Telegram; live listener `#[ignore]`d | `claude/v06-f2-adminsock` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 5, 11, 12; operator-only, owner-scoped cancel/kill |
 | 2026-06-28 | v0.6/E.4 | `TokenRedactor` streaming-redaction prototype (buffer-to-boundary + dangling-prefix retention) + `docs/cot-streaming.md` feasibility (feasible, behind `reveal_reasoning`) | `claude/v06-e4-cotstream` | Claude (Implementer) | 0 kB (secrets/docs) | Enforces 2, 3, 11; no unredacted secret reaches the user mid-stream |
 | 2026-06-28 | v0.6/E.2 | `github_commands::parse_command`: untrusted PR comment → typed bounded `/crustcore` command (Run/Retry/Cancel/Explain/RiskDetected); injection stays literal; routes through the Telegram dispatch | `claude/v06-e2-ghcommands` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 7, 8, 11, 16; parsed by the daemon, never model output |
 | 2026-06-28 | v0.6/A.5 | `#[ignore]`d `live_issue_to_pr_smoke` composing A.1–A.4 + D.1 end-to-end; CI decision path already covered by `golden_issue_to_pr_flow`. Completes Phase A | `claude/v06-a5-issuetopr` | Claude (Implementer) | 0 kB (eval/docs only) | Composes 6, 11, 13; verifier-owned end-to-end |

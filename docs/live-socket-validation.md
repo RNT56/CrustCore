@@ -83,6 +83,7 @@ cargo test --workspace -- --list --ignored
 | `live_get_updates_smoke` | F | `live` | [F.1](#f1) | `RestTelegram` shaping + redaction ✓ | easy (bot token) |
 | `live_telegram_round_trip_smoke` | F | `live` | [F.2](#f2) | runtime-channel decision logic ✓ | easy (bot token) |
 | `live_ws_sse_emits_a_snapshot` | F | — | [F.3](#f3) | snapshot serialize + `ws_stream` ✓ | easy (loopback port) |
+| `daemon_admin_live_socket_smoke` | F | — | [F.4](#f4) | admin parse/frame/auth/dispatch cores ✓ | medium (bound socket) |
 
 ---
 
@@ -448,6 +449,20 @@ cargo test --workspace -- --list --ignored
 > The **chat front door** and the **self-improvement loop** are runtime loops too;
 > their live inches are covered by [F.2](#f2)/[A.2](#a2) (model + channel) and
 > [B.4](#b4) (the draft-PR POST) respectively.
+
+<a id="f4"></a>
+### F.4 — `daemon_admin_live_socket_smoke` — admin socket (F.2)
+- **Test:** `crustcore-daemon/src/admin.rs::tests::daemon_admin_live_socket_smoke`. Seam tag `TODO(daemon-admin-live)`.
+- **Socket:** the real admin `UnixListener` (mode 0600) / TCP-loopback fallback + a
+  length-prefixed framed query/cancel round-trip.
+- **CI core (passing):** `parse_admin_command`, `frame`/`try_deframe` (bounded, hostile
+  length rejected), `authenticate` (constant-length nonce compare), and `dispatch_admin`
+  (owner-scoped cancel/kill — the same gate as Telegram, invariant 12; status snapshot).
+- **Prereq:** a bound socket + the startup nonce file (`~/.crustcore/admin.nonce`, 0600).
+- **Run:** `cargo test -p crustcore-daemon admin::tests::daemon_admin_live_socket_smoke -- --ignored --nocapture`
+- **Success:** an authenticated client gets the status snapshot and can cancel an owned
+  task; a wrong nonce is dropped; operator-only, never model-facing (invariant 5).
+  **Difficulty: medium.**
 
 ---
 
