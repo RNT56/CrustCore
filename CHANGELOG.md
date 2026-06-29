@@ -30,6 +30,22 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **Cockpit view core (roadmap-v0.6 E.1).** Added `crustcore_dev::views::cockpit`:
+  `build_cockpit(backend) → CockpitView` composes the existing redacted, read-only
+  event-log read-model into a bounded task/evidence/approval frame — `TaskDetailView`
+  (rolled up from the run inspector), `EvidenceSummaryView` (**references only** — frame
+  counts, seq range, terminal kind; never raw chain-of-thought or secrets, invariant 2),
+  and `ApprovalFormView` carrying the **operation-bound op-hash** so a resolution can only
+  approve the exact operation shown (invariant 14 — the binding is checked by the existing
+  `dispatch_resolution`). Every list is bounded (`MAX_COCKPIT_TASKS`/`MAX_COCKPIT_APPROVALS`,
+  invariant 11); the cockpit **renders evidence but mints nothing** (invariant 13) and is
+  supervisor-only (invariant 5). **The serve route is wired**: a read-only `GET /cockpit`
+  route (route table + `handle_read` render via the pure `mutation::route` core, CI-tested
+  over `MockDevBackend` + a POST-rejected red-team check) renders the frame; only the axum
+  bind + `/ws` tick loop remain the existing `C7-serve-live` seam. **This completes
+  Phase E and the entire roadmap-v0.6 buildable scope.** 4 new tests; non-nano; **zero nano
+  impact**.
+
 - **Slack runtime control plane (roadmap-v0.6 E.3).** Added `crustcore_daemon::slack`:
   a pure `SlackAllowlist` (per-workspace/per-channel, **deny-all empty** — invariants 5,
   15), `normalize_message(msg, allowlist) → Option<RuntimeEvent>` that maps a Slack event
@@ -373,6 +389,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/E.1 | Cockpit view core: `build_cockpit` composes TaskDetail/EvidenceSummary(refs-only)/ApprovalForm(op-hash-bound) from the read-model, bounded; renders evidence, mints nothing. Completes Phase E + all of v0.6 | `claude/v06-e1-cockpit` | Claude (Implementer) | 0 kB (crustcore-dev) | Enforces 2, 5, 11, 13, 14; read-model only, op-bound approvals, no minting |
 | 2026-06-28 | v0.6/E.3 | `slack::SlackAllowlist` + `normalize_message` mirroring Telegram (same RuntimeEvent stream + gates, deny-all empty) + redacted `render_to_slack`; live API `#[ignore]`d | `claude/v06-e3-slack` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 1-5, 7, 8, 11, 15, 16; opt-in, redacted, same dispatch as Telegram |
 | 2026-06-28 | v0.6/F.1 | `snapshot_all`/`adopt_from_snapshot` cross-process recovery: stable ids, re-leased under new owner, Pending-resume-from-log, carried-usage re-charge, over-budget→terminal. Completes Phase F | `claude/v06-f1-recovery` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 11, 12, 13; recovery restores supervision, never completion |
 | 2026-06-28 | v0.6/F.3 | `multirepo::classify_repo` (explicit-hint → sole-repo default → ambiguous asks) + `RepoBinding`; intent matches operator keywords only, never supplies a path | `claude/v06-f3-multirepo` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 7, 11; repo paths from config/CLI, shared global cap |

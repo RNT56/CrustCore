@@ -201,6 +201,7 @@ fn handle_read(backend: &dyn ReadOnlyBackend, req: &DevRequest) -> DevResponse {
         "/flow" => format!("{:?}", backend.flow_graph()),
         "/sessions" => format!("{:?}", backend.sessions()),
         "/approvals" => format!("{:?}", crate::views::approvals::render(backend)),
+        "/cockpit" => format!("{:?}", crate::views::cockpit::build_cockpit(backend)),
         _ => return DevResponse::error(Status::NotFound, "no such read view"),
     };
     DevResponse::ok(body)
@@ -291,6 +292,39 @@ mod tests {
         assert_eq!(resp.status, Status::Ok);
         assert_eq!(resp.body, crate::assets::INSPECTOR_CSS);
         assert!(resp.body.contains("CrustCore dev UI styles"));
+    }
+
+    #[test]
+    fn cockpit_route_renders_a_bounded_read_only_frame() {
+        // E.1 serve route: an authed GET /cockpit is classified ReadOnly and renders the
+        // cockpit frame from the read-model — no mutation, no minting.
+        let config = DevConfig::default(); // mutation OFF by default
+        let auth = Authenticator::new(token());
+        let mut mock = MockDevBackend::new();
+        let resp = route(
+            &mut mock,
+            &auth,
+            &config,
+            &authed("GET", "/cockpit", Vec::new()),
+        );
+        assert_eq!(resp.status, Status::Ok);
+        assert!(resp.body.contains("CockpitView"), "got: {}", resp.body);
+        assert!(resp.body.contains("chain_intact"));
+    }
+
+    #[test]
+    fn cockpit_route_rejects_a_post_as_not_a_mutating_route() {
+        // The cockpit is read-only: a POST to it is not the one mutating route.
+        let config = DevConfig::default();
+        let auth = Authenticator::new(token());
+        let mut mock = MockDevBackend::new();
+        let resp = route(
+            &mut mock,
+            &auth,
+            &config,
+            &authed("POST", "/cockpit", Vec::new()),
+        );
+        assert_eq!(resp.status, Status::NotFound);
     }
 
     #[test]

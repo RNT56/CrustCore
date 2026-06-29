@@ -107,10 +107,11 @@ fn assets_serves_the_stylesheet_bytes() {
 }
 
 #[test]
-fn route_table_is_unchanged_ten_read_and_one_mutating() {
-    // The SPA reuses the existing read routes; it adds none. The table stays exactly the
-    // ten read GET routes (`/`, `/assets`, `/ws`, `/inspector`, `/replay`, `/provider`,
-    // `/mcp`, `/flow`, `/sessions`, `/approvals`) plus the single mutating POST.
+fn route_table_is_eleven_read_and_one_mutating() {
+    // The read GET routes (`/`, `/assets`, `/ws`, `/inspector`, `/replay`, `/provider`,
+    // `/mcp`, `/flow`, `/sessions`, `/approvals`, and the E.1 `/cockpit` frame) plus the
+    // single mutating POST (`/approvals/resolve`). The cockpit is **read-only** — it adds
+    // a GET, never a second mutating route, so the one-mutating-route invariant holds.
     let read = ROUTES
         .iter()
         .filter(|r| r.class == RouteClass::ReadOnly)
@@ -119,9 +120,9 @@ fn route_table_is_unchanged_ten_read_and_one_mutating() {
         .iter()
         .filter(|r| r.class == RouteClass::Mutating)
         .count();
-    assert_eq!(read, 10, "exactly ten read routes");
+    assert_eq!(read, 11, "exactly eleven read routes (incl. /cockpit)");
     assert_eq!(mutating, 1, "exactly one mutating route");
-    assert_eq!(ROUTES.len(), 11);
+    assert_eq!(ROUTES.len(), 12);
 }
 
 // ---------------------------------------------------------------------------
