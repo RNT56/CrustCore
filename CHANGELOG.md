@@ -30,6 +30,16 @@ agent/PR/role/size/invariant audit trail.
 
 ### Added
 
+- **End-to-end issue → draft PR live smoke (roadmap-v0.6 A.5).** Added the `#[ignore]`d
+  `live_issue_to_pr_smoke` (`crustcore-eval`, `TODO(issue-to-pr-live)`): the irreducible
+  live composition of the whole PR-Supervisor wedge — untrusted issue → routed (C.1) +
+  sandbox-verified (`VerifiedPatch`, invariant 13) → credential-proxy push (A.2) →
+  evidence-backed draft PR (A.3/C.3, body is evidence not a model claim, invariant 6) →
+  bounded CI repair (A.4, invariant 11). The whole **decision path** is already CI-tested
+  socket-free by `golden_issue_to_pr_flow`; this seam needs a real App + sandbox + repo.
+  Catalogued in runbook §B.9. **This completes Phase A (PR Supervisor go-live).** Test +
+  runbook only; **zero nano impact**.
+
 - **Task-loop wiring (roadmap-v0.6 D.1).** Added `crustcore_daemon::task_loop`,
   composing the v0.6 decision cores into one pipeline: `plan_task` (routing C.1 →
   `ExecutionPlan`: Single / Fanout / AdvisoryOnly / Blocked) and `finalize_task`
@@ -235,6 +245,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-06-28 | v0.6/A.5 | `#[ignore]`d `live_issue_to_pr_smoke` composing A.1–A.4 + D.1 end-to-end; CI decision path already covered by `golden_issue_to_pr_flow`. Completes Phase A | `claude/v06-a5-issuetopr` | Claude (Implementer) | 0 kB (eval/docs only) | Composes 6, 11, 13; verifier-owned end-to-end |
 | 2026-06-28 | v0.6/D.1 | Task-loop wiring `plan_task`/`finalize_task` composing routing (C.1) + advisory gate (C.2) into a terminal `TaskOutcome`; sandboxed run `#[ignore]`d | `claude/v06-d1-executor-wire` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 4, 5, 6, 13; verifier-owned completion, advisory only gates |
 | 2026-06-28 | v0.6/A.3 | `pr_intent_to_create_request`: PrIntent→CreatePrRequest for the live draft-PR POST; evidence body verbatim, draft=true; real POST `#[ignore]`d | `claude/v06-a3-draftpr` | Claude (Implementer) | 0 kB (daemon/live-only) | Enforces 6, 13, 14; body is evidence not a model claim |
 | 2026-06-28 | v0.6/A.2 | Git credential-helper protocol: `parse_credential_request`/`authorize_credential`/`credential_helper_response`/`confining_git_config` — token reaches git only over the helper pipe, bound to a registered cap; live exec/push `#[ignore]`d | `claude/v06-a2-credproxy` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 1, 9, 13; no raw token in the sandbox, push confined to cap repo+prefix |

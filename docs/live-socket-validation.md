@@ -63,6 +63,7 @@ cargo test --workspace -- --list --ignored
 | `live_draft_pr_post_smoke` | B/F | `live` | [B.4](#b4) | eval→contract gate→`draft_pr_request` ✓ | hard (patch+approval+token) |
 | `cred_proxy_live_push_smoke` | B | — | [B.5](#b5) | argv-parse + validate_push + cred-request authorize ✓ | hard (token+repo+worktree) |
 | `draft_pr_live_post_smoke` | B | `live` | [B.6](#b6) | `pr_intent_to_create_request` mapping + non-2xx typed errors ✓ | medium (token+repo) |
+| `live_issue_to_pr_smoke` | B | — | [B.9](#b9) | `golden_issue_to_pr_flow` decision path ✓ | hard (App+sandbox+repo) |
 | `live_worktree_executor_accepts_only_verifier_evidence` | C | `live` | [C.1](#c1) | scheduler/budget/verifier-owned accept ✓ | medium (sandbox+git) |
 | `run_one_task_completes_only_on_verifier_evidence` | C | `live` | [C.2](#c2) | task lifecycle decision core ✓ | medium (sandbox+git) |
 | `live_verify_node_completes_only_on_a_real_verified_patch` | C | — | [C.3](#c3) | flow graph w/ mock verify driver ✓ | medium (sandbox+git) |
@@ -223,6 +224,22 @@ cargo test --workspace -- --list --ignored
 - **Success:** a **draft** PR opens with the verifier-evidence body + "human review
   required" notice and no secrets/self-claims; an existing head → 422 surfaces, never
   a fake success. **Difficulty: medium.**
+
+<a id="b9"></a>
+### B.9 — `live_issue_to_pr_smoke` — end-to-end issue → draft PR (A.5)
+- **Test:** `crustcore-eval/tests/golden.rs::live_issue_to_pr_smoke`. Seam tag `TODO(issue-to-pr-live)`.
+- **Socket:** the full PR-Supervisor wedge against real infra — App + sandbox backend + repo.
+- **CI core (passing):** `golden_issue_to_pr_flow` exercises the whole **decision path**
+  socket-free: untrusted issue ingestion → sandboxed worker → verifier-minted
+  `VerifiedPatch` → approval-gated draft `PrIntent` → canned REST create → bounded CI
+  repair. This is the irreducible live composition of A.1–A.4 + D.1.
+- **Prereq:** a registered GitHub App + a sandbox backend (`bubblewrap`/`sandbox-exec`)
+  + a throwaway test repo.
+- **Run:** `cargo test -p crustcore-eval --test golden live_issue_to_pr_smoke -- --ignored --nocapture`
+- **Success:** an issue becomes a routed, sandbox-verified change pushed over the
+  credential proxy and opened as an evidence-backed **draft** PR, with CI repair within
+  budget — completion only on verifier evidence (invariant 13); body is evidence, not a
+  model claim (invariant 6). **Difficulty: hard.**
 
 ## C. Sandbox backend (`bubblewrap` / `sandbox-exec`) + git
 
