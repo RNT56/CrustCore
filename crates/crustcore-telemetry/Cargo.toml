@@ -22,7 +22,7 @@ crustcore-secrets = { workspace = true }
 # shapes the OTLP/HTTP JSON body. This is a non-nano sidecar crate the nano binary never
 # links — `xtask forbidden-deps` proves ureq/serde_json never enter the nano graph
 # (CLAUDE.md §5.1, invariants 19, 20).
-ureq = { version = "2.12", optional = true }
+ureq = { version = "3.3", optional = true }
 serde_json = { version = "1", optional = true }
 
 [features]

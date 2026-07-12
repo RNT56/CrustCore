@@ -34,7 +34,7 @@ crustcore-netproto = { workspace = true }
 
 # The heavy web stack — OPTIONAL, enabled ONLY by the `serve` feature. The default
 # CI build links none of these; the deterministic core is tested without them.
-axum = { version = "0.7", optional = true, default-features = false, features = [
+axum = { version = "0.8", optional = true, default-features = false, features = [
     "http1",
     "tokio",
     "query",

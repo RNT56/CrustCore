@@ -27,7 +27,7 @@ serde_json = "1"
 # the sync `Provider::complete` contract (no async runtime). `forbidden-deps` asserts
 # the default crustcore-net build links no ureq/rustls. The live Telegram Bot API
 # client reuses this same `UreqClient` (no new HTTP stack).
-ureq = { version = "2", optional = true }
+ureq = { version = "3", optional = true }
 
 # RS256 JWT minting for GitHub App auth (P10/B2-gh-app), behind the `github-app`
 # feature ONLY — all three OPTIONAL so the default build (workspace + CI + the mock
