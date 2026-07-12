@@ -416,6 +416,8 @@ agent/PR/role/size/invariant audit trail.
   the zero-third-party nano graph. CI runs
   `cargo audit --deny warnings`; workflow actions are immutable-SHA pinned; Dependabot
   and CODEOWNERS cover dependencies, workflows, contracts, secrets, and sandbox code.
+  Feature branches validate once through `pull_request`; `push` CI is reserved for
+  `main`, eliminating duplicate PR-branch runs without weakening post-merge coverage.
   The minimum supported Rust version is now 1.88.
 
 - **Consolidated the duplicated security primitives into `crustcore-types::hash`.** The
