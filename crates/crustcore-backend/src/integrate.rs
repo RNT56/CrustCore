@@ -87,14 +87,14 @@ pub fn open_pr(
         return Err(IntegrateError::ApprovalExpired);
     }
     let cap = approval.value();
-    if !branch_under_prefix(head_branch, cap.branch_prefix.0.as_str()) {
+    if !branch_under_prefix(head_branch, cap.branch_prefix().0.as_str()) {
         return Err(IntegrateError::BranchNotUnderPrefix(
             head_branch.to_string(),
         ));
     }
     let body = format_pr_body(&patch);
     Ok(PrIntent {
-        repo: RepoRef(cap.repo.0.clone()),
+        repo: RepoRef(cap.repo().0.clone()),
         head_branch: head_branch.to_string(),
         base_branch: base_branch.to_string(),
         draft: true,
@@ -226,11 +226,15 @@ mod tests {
     }
 
     fn cap() -> GitHubWriteCap {
-        GitHubWriteCap {
-            repo: RepoRef(BoundedText::truncated("RNT56/CrustCore", 64)),
-            branch_prefix: BranchPrefix(BoundedText::truncated("crustcore/", 64)),
-            scope: ScopeId(1),
-        }
+        AuthorizedUser::bind(1)
+            .approve_github_write(
+                RepoRef(BoundedText::truncated("RNT56/CrustCore", 64)),
+                BranchPrefix(BoundedText::truncated("crustcore/", 64)),
+                ScopeId(1),
+                ApprovalId(1),
+                Timestamp::from_millis(1),
+            )
+            .0
     }
 
     fn approved(cap: GitHubWriteCap, expires_ms: u64) -> Approved<GitHubWriteCap> {

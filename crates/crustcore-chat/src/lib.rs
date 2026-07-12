@@ -55,7 +55,9 @@ pub use persona::{OperatorSteering, Persona, MAX_PREAMBLE_BYTES};
 pub use route::{ChatRoute, Classifier};
 pub use session::{ChatConfig, ChatSession, ConsultFn, Turn};
 pub use steer::{Activity, Disposition, Inbound, InboundKind, TurnQueue, MAX_QUEUE_DEPTH};
-pub use terminal::{complete_text, run_repl, run_terminal};
+pub use terminal::{
+    complete_text, run_repl, run_repl_with_tasks, run_terminal, run_terminal_with_tasks,
+};
 
 use crustcore_netproto::MAX_TEXT_BYTES;
 

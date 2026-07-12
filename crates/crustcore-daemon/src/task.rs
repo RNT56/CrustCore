@@ -17,7 +17,7 @@
 //! gets one `#[ignore]`d end-to-end test (it needs a sandbox backend + a git repo).
 #![cfg(feature = "live")]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -29,6 +29,333 @@ use crate::telegram::ChatId;
 /// Maximum verify output we fold into a final status line (bounded — invariant 11,
 /// §6.5). Verify output is untrusted (invariant 7); the runtime redacts before send.
 const MAX_VERIFY_TAIL: usize = 1500;
+static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_task_id() -> crustcore_types::TaskId {
+    let counter = NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed);
+    let high = now_ts().as_millis() as u128;
+    let low = ((std::process::id() as u128) << 32) | counter as u128;
+    crustcore_types::TaskId((high << 64) | low)
+}
+
+fn task_state_root() -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os("CRUSTCORE_STATE") {
+        return path.into();
+    }
+    if let Some(path) = std::env::var_os("XDG_STATE_HOME") {
+        return std::path::PathBuf::from(path).join("crustcore");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return std::path::PathBuf::from(home).join(".local/state/crustcore");
+    }
+    std::env::temp_dir().join("crustcore-state")
+}
+
+struct TaskAudit {
+    log: crustcore_eventlog::EventLog,
+    path: std::path::PathBuf,
+}
+
+impl TaskAudit {
+    fn new(task: crustcore_types::TaskId) -> Self {
+        TaskAudit {
+            log: crustcore_eventlog::EventLog::new(),
+            path: task_state_root()
+                .join("runs")
+                .join(format!("task-{:032x}.cclog", task.0)),
+        }
+    }
+
+    fn append(
+        &mut self,
+        seq: u64,
+        kind: crustcore_kernel::EventKind,
+        task: crustcore_types::TaskId,
+        job: Option<crustcore_types::JobId>,
+        payload: &[u8],
+    ) {
+        let mut meta = crustcore_eventlog::FrameMeta::new(seq, kind)
+            .actor(crustcore_kernel::Actor::Adapter)
+            .visibility(crustcore_kernel::Visibility::Internal)
+            .timestamp(now_ts())
+            .task(task);
+        if let Some(job) = job {
+            meta = meta.job(job);
+        }
+        self.log.append(&meta, payload);
+    }
+}
+
+fn read_owner_only_token(path: &std::path::Path) -> Result<zeroize::Zeroizing<String>, String> {
+    let meta = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect GitHub token file: {error}"))?;
+    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > 16 * 1024 {
+        return Err("GitHub token file must be a small regular file, not a symlink".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if meta.permissions().mode() & 0o077 != 0 {
+            return Err("GitHub token file permissions must be owner-only (0600)".into());
+        }
+    }
+    let bytes = zeroize::Zeroizing::new(
+        std::fs::read(path).map_err(|error| format!("cannot read GitHub token file: {error}"))?,
+    );
+    let token = std::str::from_utf8(&bytes)
+        .map_err(|_| "GitHub token file is not valid UTF-8".to_string())?;
+    let token = token
+        .strip_suffix("\r\n")
+        .or_else(|| token.strip_suffix('\n'))
+        .unwrap_or(token);
+    if token.is_empty()
+        || token.trim() != token
+        || token.chars().any(|ch| matches!(ch, '\r' | '\n'))
+    {
+        return Err("GitHub token file must contain exactly one non-empty token".into());
+    }
+    Ok(zeroize::Zeroizing::new(token.to_string()))
+}
+
+fn valid_repo_slug(repo: &str) -> bool {
+    if repo.is_empty() || repo.len() > 200 {
+        return false;
+    }
+    let Some((owner, name)) = repo.split_once('/') else {
+        return false;
+    };
+    let valid_segment = |segment: &str| {
+        !segment.is_empty()
+            && !matches!(segment, "." | "..")
+            && segment
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    };
+    !name.contains('/') && valid_segment(owner) && valid_segment(name)
+}
+
+fn valid_git_branch(branch: &str) -> bool {
+    !branch.is_empty()
+        && branch.len() <= 255
+        && branch != "@"
+        && !branch.starts_with(['/', '.'])
+        && !branch.ends_with(['/', '.'])
+        && !branch.contains("..")
+        && !branch.contains("//")
+        && !branch.contains("@{")
+        && branch.split('/').all(|segment| {
+            !segment.is_empty()
+                && !matches!(segment, "." | "..")
+                && !segment.ends_with(".lock")
+                && segment.bytes().all(|byte| {
+                    byte.is_ascii_graphic()
+                        && !matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
+                })
+        })
+}
+
+fn validate_pr_target(target: &PrTarget) -> Result<(), String> {
+    if !valid_repo_slug(&target.repo) {
+        return Err("PR repo must be a safe owner/name GitHub slug".into());
+    }
+    if !valid_git_branch(&target.base_branch) {
+        return Err("PR base must be a valid Git branch name".into());
+    }
+    if !valid_git_branch(&format!(
+        "{}/probe",
+        target.branch_prefix.trim_end_matches('/')
+    )) {
+        return Err("PR branch prefix must be a valid Git branch prefix".into());
+    }
+    Ok(())
+}
+
+struct CredentialHelperLease {
+    dir: std::path::PathBuf,
+    helper_command: String,
+}
+
+impl CredentialHelperLease {
+    fn create(task: crustcore_types::TaskId, repo: &str, token: &str) -> Result<Self, String> {
+        use std::io::Write as _;
+
+        let dir = std::path::PathBuf::from(format!(
+            "/tmp/crustcore-credential-{}-{:032x}",
+            std::process::id(),
+            task.0
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            let mut builder = std::fs::DirBuilder::new();
+            builder.mode(0o700);
+            builder
+                .create(&dir)
+                .map_err(|error| format!("cannot create credential-helper dir: {error}"))?;
+        }
+        #[cfg(not(unix))]
+        std::fs::create_dir(&dir)
+            .map_err(|error| format!("cannot create credential-helper dir: {error}"))?;
+        let helper = dir.join("helper");
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("cannot locate daemon executable: {error}"))?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&executable, &helper)
+            .map_err(|error| format!("cannot link credential helper: {error}"))?;
+        #[cfg(not(unix))]
+        std::fs::copy(&executable, &helper)
+            .map_err(|error| format!("cannot copy credential helper: {error}"))?;
+
+        let config = dir.join("config");
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&config)
+            .map_err(|error| format!("cannot create credential config: {error}"))?;
+        let payload = zeroize::Zeroizing::new(format!("CCGH1\n{repo}\n{token}"));
+        file.write_all(payload.as_bytes())
+            .map_err(|error| format!("cannot write credential config: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("cannot sync credential config: {error}"))?;
+        Ok(CredentialHelperLease {
+            helper_command: format!(
+                "{} credential-helper {}",
+                helper.display(),
+                config.display()
+            ),
+            dir,
+        })
+    }
+}
+
+impl Drop for CredentialHelperLease {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn trusted_git(worktree: &crustcore_path::WorktreeRoot) -> std::process::Command {
+    let mut command = std::process::Command::new("git");
+    command
+        .env_clear()
+        .env(
+            "PATH",
+            "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
+        )
+        .env("HOME", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .arg("-C")
+        .arg(worktree.as_path())
+        .args(["-c", "core.hooksPath=/dev/null"])
+        .args(["-c", "commit.gpgSign=false"])
+        .args(["-c", "core.fsmonitor=false"]);
+    command
+}
+
+fn prepare_pr_commit(
+    worktree: &crustcore_path::WorktreeRoot,
+) -> Result<crustcore_backend::PatchRef, String> {
+    let add = trusted_git(worktree)
+        .args(["add", "-A", "--", "."])
+        .output()
+        .map_err(|error| format!("cannot stage verified candidate: {error}"))?;
+    if !add.status.success() {
+        return Err(format!(
+            "staging verified candidate failed: {}",
+            bound_tail(&String::from_utf8_lossy(&add.stderr))
+        ));
+    }
+    let commit = trusted_git(worktree)
+        .args([
+            "-c",
+            "user.name=CrustCore",
+            "-c",
+            "user.email=crustcore@localhost",
+            "commit",
+            "-q",
+            "-m",
+            "CrustCore verified candidate",
+        ])
+        .output()
+        .map_err(|error| format!("cannot commit candidate: {error}"))?;
+    if !commit.status.success() {
+        return Err(format!(
+            "candidate commit failed: {}",
+            bound_tail(&String::from_utf8_lossy(&commit.stderr))
+        ));
+    }
+    let head = trusted_git(worktree)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map_err(|error| format!("cannot resolve candidate commit: {error}"))?;
+    if !head.status.success() {
+        return Err("cannot resolve candidate commit".into());
+    }
+    Ok(crustcore_backend::PatchRef {
+        diff_hash: crustcore_types::hash::sha256(&head.stdout),
+    })
+}
+
+fn push_and_create_pr(
+    cap: &Approved<GitHubWriteCap>,
+    intent: &crustcore_backend::integrate::PrIntent,
+    worktree: &crustcore_path::WorktreeRoot,
+    target: &PrTarget,
+    task: crustcore_types::TaskId,
+) -> Result<crustcore_net::github::PrCreated, String> {
+    use crustcore_net::github::{GitHubApi as _, RestGitHub, GITHUB_API};
+    use std::rc::Rc;
+
+    let push = crate::github::PushRequest::new(
+        target.repo.clone(),
+        crate::github::GITHUB_HOST,
+        false,
+        vec![format!("HEAD:refs/heads/{}", intent.head_branch)],
+    );
+    crate::github::validate_push(cap.value(), &push)
+        .map_err(|error| format!("push policy refused: {error:?}"))?;
+
+    let token = read_owner_only_token(&target.credential_file)?;
+    let helper = CredentialHelperLease::create(task, &target.repo, token.as_str())?;
+    let mut command = trusted_git(worktree);
+    command.args(crate::github::confining_git_config(&helper.helper_command));
+    let remote = format!("https://github.com/{}.git", target.repo);
+    let pushed = command
+        .args([
+            "push",
+            "--porcelain",
+            "--",
+            &remote,
+            &format!("HEAD:refs/heads/{}", intent.head_branch),
+        ])
+        .output()
+        .map_err(|error| format!("cannot launch confined git push: {error}"))?;
+    if !pushed.status.success() {
+        return Err(format!(
+            "git push failed: {}",
+            bound_tail(&String::from_utf8_lossy(&pushed.stderr))
+        ));
+    }
+
+    let credentials =
+        Rc::new(crustcore_net::credsource::StaticCredentials::new().with("github", token.as_str()));
+    let api = RestGitHub::new(
+        GITHUB_API,
+        "github",
+        Rc::new(crustcore_net::transport::UreqClient::new()),
+        credentials,
+    );
+    api.create_pull(&crate::github::pr_intent_to_create_request(intent))
+        .map_err(|error| format!("GitHub draft PR creation failed: {error}"))
+}
 
 /// The coding backend for a chat-launched task. `Native` verifies the worktree as it
 /// stands (its HEAD is the verified state); the others run an external worker that
@@ -59,6 +386,10 @@ pub struct PrTarget {
     pub base_branch: String,
     /// The branch prefix the head branch is confined under (e.g. `crustcore`).
     pub branch_prefix: String,
+    /// Owner-only file containing a fine-grained PAT or short-lived installation
+    /// token. The path is operator configuration; bytes never enter a model,
+    /// sandbox environment, argv, log, or worktree.
+    pub credential_file: std::path::PathBuf,
 }
 
 /// What a chat-launched task runs against: the repo, the verify command (split into
@@ -213,11 +544,13 @@ fn run_one_task(
 ) -> String {
     use crustcore_backend::verify::{run_verify, VerifyIds, VerifyOutcome};
     use crustcore_backend::{complete_task, PatchRef};
-    use crustcore_policy::SandboxExecCap;
+    use crustcore_kernel::EventKind;
+    use crustcore_policy::{PolicySnapshot, RiskProfile};
+    use crustcore_receipts::join::{verify_against_log, FrameRef};
     use crustcore_receipts::{MacKey, ReceiptChain};
     use crustcore_sandbox::SandboxProfile;
     use crustcore_types::hash::sha256;
-    use crustcore_types::{EventSeq, JobId, ScopeId, TaskId, ToolCallId};
+    use crustcore_types::{EventSeq, JobId, ScopeId, ToolCallId};
     use crustcore_worktree::WorktreeManager;
 
     // Resolve the verify spec up front (before any side effect): explicit program+args,
@@ -227,23 +560,47 @@ fn run_one_task(
         Ok(s) => s,
         Err(e) => return format!("⛔ {e}"),
     };
+    if matches!(spec.backend, TaskBackend::Native) && !goal.trim().is_empty() {
+        return "⛔ native is verify-only; configure codex, claude, or cmd for coding tasks."
+            .to_string();
+    }
+    if let Some(target) = &spec.pr {
+        if let Err(error) = validate_pr_target(target) {
+            return format!("⛔ invalid PR configuration: {error}");
+        }
+    }
 
-    let task = TaskId(1);
+    let task = next_task_id();
+    let job = JobId(task.0);
+    let mut audit = TaskAudit::new(task);
+    audit.append(1, EventKind::TaskCreated, task, None, b"task created");
+    audit.append(2, EventKind::JobQueued, task, Some(job), b"job queued");
+    let key = match MacKey::load_or_create(&task_state_root().join("receipt.key")) {
+        Ok(key) => key,
+        Err(error) => return format!("⛔ receipt key unavailable: {error}"),
+    };
     let manager = WorktreeManager::new(&spec.repo_root);
     let worktree = match manager.create_for(task) {
         Ok(w) => w,
-        Err(e) => return format!("❌ could not create worktree: {e}"),
+        Err(e) => {
+            audit.append(3, EventKind::TaskFailed, task, None, b"task failed");
+            let _ = audit.log.store_atomic(&audit.path);
+            return format!("❌ could not create worktree: {e}");
+        }
     };
+    audit.append(3, EventKind::JobLeased, task, Some(job), b"job leased");
     let _ = tx.send("📂 worktree ready…".to_string());
 
-    let cap = SandboxExecCap {
-        profile: ScopeId(1),
-        scope: ScopeId(1),
-    };
     let profile = SandboxProfile::default_sandboxed();
+    let cap = PolicySnapshot::new(RiskProfile::Supervised)
+        .authorize_reversible(ScopeId(1))
+        .expect("supervised policy permits sandboxed task execution")
+        .sandbox_exec(profile.id);
 
     // Cancel before producing the patch — cheapest abort point (worktree only).
     if cancel.load(Ordering::SeqCst) {
+        audit.append(4, EventKind::TaskKilled, task, None, b"task cancelled");
+        let _ = audit.log.store_atomic(&audit.path);
         let _ = manager.remove(&worktree);
         return "⛔ CANCELLED before work started.".to_string();
     }
@@ -252,7 +609,7 @@ fn run_one_task(
     // repo is untouched). A worker runs sandboxed with no secrets; CrustCore re-derives
     // the real diff and takes only the (unverified) patch reference — the worker's
     // self-claim is never authority (invariants 6, 7).
-    let patch: PatchRef = match &spec.backend {
+    let mut patch: PatchRef = match &spec.backend {
         TaskBackend::Native => {
             let head = manager.head_commit(&worktree).unwrap_or_default();
             PatchRef {
@@ -267,6 +624,8 @@ fn run_one_task(
             match run_external_worker(coding.as_ref(), &input, &worktree, &cap, &profile) {
                 Ok(product) => product.patch.0,
                 Err(e) => {
+                    audit.append(4, EventKind::TaskFailed, task, Some(job), b"task failed");
+                    let _ = audit.log.store_atomic(&audit.path);
                     let _ = manager.remove(&worktree);
                     return format!("❌ WORKER REJECTED: {}", bound_tail(&e.to_string()));
                 }
@@ -274,20 +633,60 @@ fn run_one_task(
         }
     };
 
+    let prepared_branch = if let Some(cap) = pr_cap {
+        let prefix = cap.value().branch_prefix().0.as_str();
+        let branch = format!("{prefix}/chat-{:032x}", task.0);
+        match prepare_pr_commit(&worktree) {
+            Ok(committed) => patch = committed,
+            Err(error) => {
+                audit.append(4, EventKind::TaskFailed, task, Some(job), b"commit failed");
+                let _ = audit.log.store_atomic(&audit.path);
+                let _ = manager.remove(&worktree);
+                return format!("⛔ PR candidate preparation failed: {error}");
+            }
+        }
+        Some(branch)
+    } else {
+        None
+    };
+
     // Cancel before the (expensive) verify run.
     if cancel.load(Ordering::SeqCst) {
+        audit.append(
+            4,
+            EventKind::PatchProposed,
+            task,
+            Some(job),
+            b"patch proposed",
+        );
+        audit.append(5, EventKind::TaskKilled, task, None, b"task cancelled");
+        let _ = audit.log.store_atomic(&audit.path);
         let _ = manager.remove(&worktree);
         return "⛔ CANCELLED before verify.".to_string();
     }
 
     let _ = tx.send(format!("🔬 verifying: {}…", verify_spec.display()));
 
-    let mut receipts = ReceiptChain::new(MacKey::new(run_key()));
+    audit.append(
+        4,
+        EventKind::PatchProposed,
+        task,
+        Some(job),
+        b"patch proposed",
+    );
+    audit.append(
+        5,
+        EventKind::ToolCallStarted,
+        task,
+        Some(job),
+        b"verify started",
+    );
+    let mut receipts = ReceiptChain::new(key);
     let ids = VerifyIds {
         task_id: task,
-        job_id: JobId(1),
+        job_id: job,
         tool_call_id: ToolCallId(1),
-        event_seq: EventSeq(1),
+        event_seq: EventSeq(6),
         now: now_ts(),
     };
 
@@ -305,15 +704,89 @@ fn run_one_task(
 
     let summary = match outcome {
         VerifyOutcome::Verified(verified) => {
-            // A verifier-minted patch (invariant 13). Two terminal paths:
-            //  - PR mode (an approved cap): mint a *draft* PR intent from the verifier
-            //    evidence under the human-approved capability (invariant 14). The intent
-            //    is the completion for this task; the actual git push + GitHub REST POST
-            //    are the reduced live socket (`TODO(P10-net-live)`).
-            //  - otherwise: complete the task from the evidence (the original behavior).
+            let receipt = verified.receipt().clone();
+            audit.append(
+                6,
+                EventKind::ToolCallCompleted,
+                task,
+                Some(job),
+                &receipt.to_bytes(),
+            );
+            audit.append(
+                7,
+                EventKind::PatchVerified,
+                task,
+                Some(job),
+                b"patch verified",
+            );
+            let frames: Vec<FrameRef> = audit
+                .log
+                .iter()
+                .map(|decoded| FrameRef {
+                    seq: decoded.frame.seq,
+                    tool_completed: decoded.frame.kind == EventKind::ToolCallCompleted,
+                    task_id: decoded.frame.task_id,
+                    job_id: decoded.frame.job_id,
+                })
+                .collect();
+            if !receipts.verify(std::slice::from_ref(&receipt)).is_intact()
+                || !verify_against_log(&[receipt], &frames).is_joined()
+            {
+                let _ = manager.remove(&worktree);
+                return "⛔ audit receipt/event-log join failed; task not completed.".to_string();
+            }
+            if let Err(error) = audit.log.store_atomic(&audit.path) {
+                let _ = manager.remove(&worktree);
+                return format!("⛔ audit persistence failed; task not completed: {error}");
+            }
             match pr_cap {
-                Some(cap) => open_draft_pr(cap, *verified, spec, &verify_spec),
+                Some(cap) => {
+                    let branch = prepared_branch
+                        .as_deref()
+                        .expect("PR authority always prepares a branch before verify");
+                    match open_draft_pr(cap, *verified, spec, &verify_spec, &worktree, branch, task)
+                    {
+                        Ok(message) => {
+                            audit.append(
+                                8,
+                                EventKind::GitHubOperationCompleted,
+                                task,
+                                Some(job),
+                                b"draft PR opened",
+                            );
+                            audit.append(
+                                9,
+                                EventKind::TaskCompleted,
+                                task,
+                                None,
+                                b"task completed",
+                            );
+                            if let Err(error) = audit.log.store_atomic(&audit.path) {
+                                format!(
+                                    "⛔ draft PR opened but final audit persistence failed: {error}"
+                                )
+                            } else {
+                                message
+                            }
+                        }
+                        Err(error) => {
+                            audit.append(
+                                8,
+                                EventKind::TaskFailed,
+                                task,
+                                None,
+                                b"integration failed",
+                            );
+                            let _ = audit.log.store_atomic(&audit.path);
+                            format!("⛔ verified, but draft PR integration failed: {error}")
+                        }
+                    }
+                }
                 None => {
+                    audit.append(8, EventKind::TaskCompleted, task, None, b"task completed");
+                    if let Err(error) = audit.log.store_atomic(&audit.path) {
+                        return format!("⛔ audit persistence failed; task not completed: {error}");
+                    }
                     let _completion = complete_task(*verified);
                     format!(
                         "✅ VERIFIED — '{}' passed; task completed.",
@@ -323,12 +796,30 @@ fn run_one_task(
             }
         }
         VerifyOutcome::Failed { status, output } => {
+            audit.append(
+                6,
+                EventKind::CommandCompleted,
+                task,
+                Some(job),
+                b"verify failed",
+            );
+            audit.append(
+                7,
+                EventKind::PatchRejected,
+                task,
+                Some(job),
+                b"patch rejected",
+            );
+            audit.append(8, EventKind::TaskFailed, task, None, b"task failed");
+            let _ = audit.log.store_atomic(&audit.path);
             format!(
                 "❌ VERIFY FAILED ({status:?}): {}",
                 bound_tail(output.as_str())
             )
         }
         VerifyOutcome::Refused(reason) => {
+            audit.append(6, EventKind::TaskFailed, task, None, b"verify refused");
+            let _ = audit.log.store_atomic(&audit.path);
             format!("⛔ VERIFY REFUSED: {}", bound_tail(&reason))
         }
     };
@@ -338,41 +829,33 @@ fn run_one_task(
     summary
 }
 
-/// Opens a **draft** PR intent from a verifier-minted [`VerifiedPatch`] under the
-/// human-approved `GitHubWriteCap` (invariants 13 + 14). The head branch is confined to
-/// the cap's branch prefix; [`open_pr`](crustcore_backend::integrate::open_pr) re-checks
-/// that and the approval expiry (defense-in-depth). The returned line reports the prepared
-/// draft PR (title + branches); the actual git push of the head branch and the GitHub REST
-/// `create_pull` are the reduced live socket (`TODO(P10-net-live)`) — they need real
-/// credentials and a pushed branch, so they cannot run in CI.
+/// Consumes verifier evidence, pushes the exact committed candidate through the
+/// confined credential helper, and opens a real draft PR. No raw token enters the
+/// sandbox, worktree, argv, environment, log, or returned status.
 fn open_draft_pr(
     cap: &Approved<GitHubWriteCap>,
     verified: crustcore_backend::VerifiedPatch,
     spec: &TaskSpec,
     verify_spec: &crustcore_backend::verify::VerifySpec,
-) -> String {
+    worktree: &crustcore_path::WorktreeRoot,
+    head_branch: &str,
+    task: crustcore_types::TaskId,
+) -> Result<String, String> {
     use crustcore_backend::integrate::open_pr;
 
-    // Head branch is confined under the approved cap's prefix (open_pr re-checks it).
-    let prefix = cap.value().branch_prefix.0.as_str();
-    let head_branch = format!("{prefix}/chat-task");
-    let base_branch = spec
+    let target = spec
         .pr
         .as_ref()
-        .map(|p| p.base_branch.clone())
-        .unwrap_or_else(|| "main".to_string());
-
-    match open_pr(cap, verified, &head_branch, &base_branch, now_ts()) {
-        Ok(intent) => format!(
-            "✅ VERIFIED — '{}' passed. 📝 Draft PR prepared: {} → {} (\"{}\"). \
-             The push + GitHub REST open is the live socket.",
-            verify_spec.display(),
-            intent.head_branch,
-            intent.base_branch,
-            intent.title
-        ),
-        Err(e) => format!("⛔ verified, but PR refused: {e}"),
-    }
+        .ok_or_else(|| "PR target disappeared before integration".to_string())?;
+    let intent = open_pr(cap, verified, head_branch, &target.base_branch, now_ts())
+        .map_err(|error| format!("PR policy refused: {error}"))?;
+    let created = push_and_create_pr(cap, &intent, worktree, target, task)?;
+    Ok(format!(
+        "✅ VERIFIED — '{}' passed. Draft PR #{} opened: {}",
+        verify_spec.display(),
+        created.number,
+        bound_tail(&created.html_url)
+    ))
 }
 
 /// Resolves the verify spec for a task: explicit program + literal args (no shell —
@@ -400,23 +883,6 @@ fn backend_for(b: &TaskBackend) -> Box<dyn crustcore_backend::worker::CodingBack
         TaskBackend::Cmd(p, a) => Box::new(ExternalCommandBackend::new(p.clone(), a.clone())),
         TaskBackend::Native => Box::new(ExternalCommandBackend::new("true".to_string(), vec![])),
     }
-}
-
-/// A fresh per-run MAC key for the receipt chain. CrustCore holds this key; the model
-/// never does, so receipts are unforgeable (invariant 10). Drawn from the OS RNG with a
-/// clearly-marked dev fallback (mirrors `crustcore run`).
-fn run_key() -> [u8; 32] {
-    use std::io::Read as _;
-    let mut key = [0u8; 32];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        if f.read_exact(&mut key).is_ok() {
-            return key;
-        }
-    }
-    for (i, b) in key.iter_mut().enumerate() {
-        *b = 0xC0u8 ^ (i as u8);
-    }
-    key
 }
 
 /// Wall-clock timestamp for stamping the verify run. Time enters at the adapter layer,
@@ -575,6 +1041,87 @@ mod tests {
         assert_ne!(TaskBackend::Native, TaskBackend::Codex);
     }
 
+    #[test]
+    fn pr_candidate_is_committed_before_verification() {
+        let dir = std::env::temp_dir().join(format!("cc-pr-commit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&dir)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(git(&["init", "-q"]));
+        std::fs::write(dir.join("file.txt"), b"before\n").unwrap();
+        assert!(git(&["add", "."]));
+        assert!(git(&[
+            "-c",
+            "user.name=ci",
+            "-c",
+            "user.email=ci@localhost",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ]));
+        std::fs::write(dir.join("file.txt"), b"after\n").unwrap();
+        let root = crustcore_path::WorktreeRoot::open(&dir).unwrap();
+        let patch = prepare_pr_commit(&root).unwrap();
+        assert_ne!(patch.diff_hash, [0u8; 32]);
+        let status = trusted_git(&root)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        assert!(status.stdout.is_empty(), "committed tree must be clean");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn token_file_must_be_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = std::env::temp_dir().join(format!("cc-token-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("token");
+        std::fs::write(&path, b"github_pat_TEST").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_owner_only_token(&path).is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_owner_only_token(&path).unwrap().as_str(),
+            "github_pat_TEST"
+        );
+        std::fs::write(&path, b" github_pat_TEST\n").unwrap();
+        assert!(read_owner_only_token(&path).is_err());
+        std::fs::write(&path, b"github_pat_TEST\nextra\n").unwrap();
+        assert!(read_owner_only_token(&path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pr_configuration_rejects_slug_and_ref_injection() {
+        assert!(valid_repo_slug("owner/name"));
+        assert!(!valid_repo_slug("owner/name\nTOKEN"));
+        assert!(!valid_repo_slug("owner/name/extra"));
+        assert!(valid_git_branch("release/next"));
+        assert!(!valid_git_branch("main\ncredential.helper=evil"));
+        assert!(!valid_git_branch("refs/../main"));
+        let target = PrTarget {
+            repo: "owner/name".to_string(),
+            base_branch: "main".to_string(),
+            branch_prefix: "crustcore".to_string(),
+            credential_file: "/tmp/token".into(),
+        };
+        assert!(validate_pr_target(&target).is_ok());
+    }
+
     // The real `run_one_task` needs a sandbox backend + a git repo worktree; it is
     // `#[ignore]`d (the reduced live seam). The threading core above is the CI-tested
     // part; this asserts the verified flow end to end on a host with a sandbox backend.
@@ -593,7 +1140,7 @@ mod tests {
             backend: TaskBackend::Native,
             pr: None,
         };
-        let line = run_one_task(&pass, "goal", &cancel, &tx, None);
+        let line = run_one_task(&pass, "", &cancel, &tx, None);
         assert!(line.starts_with("✅ VERIFIED"), "got: {line}");
 
         let fail = TaskSpec {
@@ -602,7 +1149,7 @@ mod tests {
             backend: TaskBackend::Native,
             pr: None,
         };
-        let line = run_one_task(&fail, "goal", &cancel, &tx, None);
+        let line = run_one_task(&fail, "", &cancel, &tx, None);
         assert!(line.starts_with("❌ VERIFY FAILED"), "got: {line}");
     }
 }

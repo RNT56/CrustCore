@@ -61,10 +61,11 @@ the only one that is a *release blocker* via invariant 19. The platform of recor
 for the hard target is **Linux x86_64** ([`ROADMAP.md` §22](../ROADMAP.md) DoD #1).
 
 **Current measured baseline (v0.1, full trusted core).** The std-only nano binary
-(`cargo xtask size-check`) builds at **~412 KiB stripped** — about **52% of the
+(`cargo xtask size-check`) builds at **444.6 KiB stripped** on the current macOS
+validation host — about **56% of the
 800 KiB budget** — with the whole trusted core linked and reachable via `crustcore
 run`/`doctor` (kernel, event log, receipts, path confinement, runner, sandbox,
-worktree, verify loop). The ~388 KiB of remaining headroom is deliberate slack
+worktree, verify loop). The ~355 KiB of remaining headroom is deliberate slack
 against future growth. Watch it shrink-or-hold on every PR via the gate; a sudden
 jump means a heavy dependency or a layering leak slipped in.
 

@@ -10,6 +10,7 @@ description = "Typed secret handles and non-exfiltratable secret material for Cr
 
 [dependencies]
 crustcore-types = { workspace = true }
+crustcore-zeroize = { workspace = true }
 
 # Encrypted-file vault backend (P8-store), behind the `vault-file` feature ONLY —
 # so the nano build (which links this crate for the trust types + InMemoryStore)
@@ -19,11 +20,12 @@ crustcore-types = { workspace = true }
 aes-gcm = { version = "0.10", optional = true }
 scrypt = { version = "0.11", default-features = false, optional = true }
 getrandom = { version = "0.2", optional = true }
+zeroize = { version = "1.9", features = ["alloc"], optional = true }
 
 [features]
 # Enables the encrypted-file vault `SecretStore` backend ([`store`]). Off by
 # default; the nano build never enables it, so nano links no crypto.
-vault-file = ["dep:aes-gcm", "dep:scrypt", "dep:getrandom"]
+vault-file = ["dep:aes-gcm", "dep:scrypt", "dep:getrandom", "dep:zeroize"]
 
 # OS keychain loaders (P8-store), behind their own features. Dependency-free: they
 # shell out to the system tool (`security` on macOS, `secret-tool` on Linux) and load

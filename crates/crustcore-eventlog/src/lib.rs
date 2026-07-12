@@ -376,6 +376,52 @@ impl EventLog {
         &self.bytes
     }
 
+    /// Atomically persists an intact log with owner-only permissions.
+    ///
+    /// The temporary file is created beside the destination, synced, then renamed,
+    /// so a crash cannot expose a partially-written final log. A broken in-memory
+    /// chain is refused rather than copied to durable state.
+    pub fn store_atomic(&self, path: &std::path::Path) -> std::io::Result<()> {
+        use std::io::Write as _;
+
+        if !self.verify().is_intact() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "refusing to persist a broken event log",
+            ));
+        }
+        let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("events.cclog");
+        let temp = parent.join(format!(".{name}.tmp-{}", std::process::id()));
+        let _ = std::fs::remove_file(&temp);
+
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let result = (|| {
+            let mut file = options.open(&temp)?;
+            file.write_all(&self.bytes)?;
+            file.sync_all()?;
+            std::fs::rename(&temp, path)?;
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+        result
+    }
+
     /// Number of frames appended.
     #[must_use]
     pub fn len(&self) -> u64 {
@@ -827,6 +873,28 @@ mod tests {
             .task(TaskId(1))
             .actor(Actor::Adapter)
             .timestamp(Timestamp::from_millis(seq * 1000))
+    }
+
+    #[test]
+    fn atomic_store_roundtrips_an_intact_log() {
+        let dir = std::env::temp_dir().join(format!("cc-eventlog-store-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("run.cclog");
+        let mut log = EventLog::new();
+        log.append(&meta(1, EventKind::TaskCreated), b"created");
+        log.store_atomic(&path).unwrap();
+        let loaded = EventLog::from_bytes(std::fs::read(&path).unwrap());
+        assert_eq!(loaded.bytes(), log.bytes());
+        assert!(loaded.verify().is_intact());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn sample_log() -> EventLog {

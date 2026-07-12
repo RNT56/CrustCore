@@ -789,19 +789,15 @@ mod tests {
         use super::*;
 
         fn executor(worker_cmd: Option<(String, Vec<String>)>) -> WorktreeSubagentExecutor {
-            use crustcore_policy::SandboxExecCap;
+            use crustcore_policy::{PolicySnapshot, RiskProfile};
             use crustcore_sandbox::SandboxProfile;
             use crustcore_types::ScopeId;
-            WorktreeSubagentExecutor::new(
-                ".",
-                SandboxExecCap {
-                    profile: ScopeId(1),
-                    scope: ScopeId(1),
-                },
-                SandboxProfile::default_sandboxed(),
-                [0x5a; 32],
-                worker_cmd,
-            )
+            let profile = SandboxProfile::default_sandboxed();
+            let cap = PolicySnapshot::new(RiskProfile::Supervised)
+                .authorize_reversible(ScopeId(1))
+                .expect("supervised policy permits sandboxed test execution")
+                .sandbox_exec(profile.id);
+            WorktreeSubagentExecutor::new(".", cap, profile, [0x5a; 32], worker_cmd)
         }
 
         #[test]

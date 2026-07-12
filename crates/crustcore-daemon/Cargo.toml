@@ -37,6 +37,8 @@ crustcore-worktree = { workspace = true, optional = true }
 crustcore-sandbox = { workspace = true, optional = true }
 crustcore-receipts = { workspace = true, optional = true }
 crustcore-path = { workspace = true, optional = true }
+crustcore-eventlog = { workspace = true, optional = true }
+zeroize = "1.9"
 
 [features]
 # Default: mock-driven, no live transports. CI builds/tests this — green, no network,
@@ -62,6 +64,7 @@ live = [
     "dep:crustcore-sandbox",
     "dep:crustcore-receipts",
     "dep:crustcore-path",
+    "dep:crustcore-eventlog",
     "crustcore-net/live",
     "crustcore-net/github-app",
 ]

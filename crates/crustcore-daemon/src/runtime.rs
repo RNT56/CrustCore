@@ -45,12 +45,12 @@ pub fn budget_for_route(route: ChatRoute) -> AgentBudget {
         ChatRoute::QuickFix => AgentBudget {
             max_wall_ms: 5 * 60 * 1000,
             max_output_bytes: 256 * 1024,
-            max_tokens: u64::MAX,
+            max_tokens: 100_000,
         },
         ChatRoute::Feature | ChatRoute::Continue => AgentBudget {
             max_wall_ms: 15 * 60 * 1000,
             max_output_bytes: 512 * 1024,
-            max_tokens: u64::MAX,
+            max_tokens: 500_000,
         },
         // A whole-project build gets the generous default tier.
         ChatRoute::Project => default_task_budget(),
@@ -75,15 +75,17 @@ pub fn mint_github_write_cap(
     expires_at: Timestamp,
 ) -> Option<Approved<GitHubWriteCap>> {
     let user = allowlist.authorized_user(chat)?;
-    let cap = GitHubWriteCap {
-        repo: RepoRef(BoundedText::truncated(repo, BoundedText::DEFAULT_MAX)),
-        branch_prefix: BranchPrefix(BoundedText::truncated(
+    let (_, approval) = user.approve_github_write(
+        RepoRef(BoundedText::truncated(repo, BoundedText::DEFAULT_MAX)),
+        BranchPrefix(BoundedText::truncated(
             branch_prefix,
             BoundedText::DEFAULT_MAX,
         )),
-        scope: ScopeId(1),
-    };
-    Some(user.approve(cap, ApprovalId(approval_id), expires_at))
+        ScopeId(1),
+        ApprovalId(approval_id),
+        expires_at,
+    );
+    Some(approval)
 }
 
 /// If `event` is an approve/deny resolution for `approval_id` — a button callback or the
@@ -1379,6 +1381,9 @@ mod tests {
         assert!(quick.max_wall_ms < feature.max_wall_ms);
         assert!(feature.max_wall_ms < project.max_wall_ms);
         assert!(quick.max_output_bytes < project.max_output_bytes);
+        assert!(quick.max_tokens < feature.max_tokens);
+        assert!(feature.max_tokens < project.max_tokens);
+        assert_ne!(project.max_tokens, u64::MAX);
         // Continue maps to the Feature tier (true resumption is a separate seam).
         assert_eq!(
             budget_for_route(ChatRoute::Continue).max_wall_ms,
@@ -1508,8 +1513,8 @@ mod tests {
             Timestamp::from_millis(10_000),
         )
         .expect("an allowlisted chat mints a cap");
-        assert_eq!(cap.value().repo.0.as_str(), "owner/repo");
-        assert_eq!(cap.value().branch_prefix.0.as_str(), "crustcore");
+        assert_eq!(cap.value().repo().0.as_str(), "owner/repo");
+        assert_eq!(cap.value().branch_prefix().0.as_str(), "crustcore");
         assert!(cap.is_valid_at(Timestamp::from_millis(1000)));
         // A non-allowlisted chat gets NO GitHub write authority (invariant 4).
         assert!(mint_github_write_cap(

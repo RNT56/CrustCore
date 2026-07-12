@@ -1,25 +1,36 @@
 # CrustCore code owners.
 #
-# Contract files (CLAUDE.md §7.3, ROADMAP.md §20.2) are the trust boundary:
-# changes are serialized and require maintainer review. Listing them here makes
-# that review a required, automated gate rather than a convention.
+# Contract files and trust-boundary implementations are serialized and require
+# maintainer review. Branch protection must require code-owner approval for this
+# file to become an enforced server-side gate.
 
 # Default owner for everything.
-*                                   @RNT56
+* @RNT56
 
-# Contract files — never edit in parallel; maintainer review required.
-/CLAUDE.md                          @RNT56
-/AGENTS.md                          @RNT56
-/INVARIANTS.md                      @RNT56
-/THREAT_MODEL.md                    @RNT56
-/SECURITY.md                        @RNT56
-/Cargo.toml                         @RNT56
-/Cargo.lock                         @RNT56
-/docs/policy.md                     @RNT56
-/docs/secrets.md                    @RNT56
-/docs/sandbox.md                    @RNT56
-/docs/backend-contract.md           @RNT56
-/crates/crustcore-kernel/src/event.rs   @RNT56
-/crates/crustcore-kernel/src/action.rs  @RNT56
+# Repository contracts and release/security metadata.
+/CLAUDE.md @RNT56
+/AGENTS.md @RNT56
+/INVARIANTS.md @RNT56
+/THREAT_MODEL.md @RNT56
+/SECURITY.md @RNT56
+/Cargo.toml @RNT56
+/Cargo.lock @RNT56
+/.github/workflows/ @RNT56
+
+# Public trust contracts.
+/docs/policy.md @RNT56
+/docs/secrets.md @RNT56
+/docs/sandbox.md @RNT56
+/docs/backend-contract.md @RNT56
+
+# Code-level trust boundaries.
+/crates/crustcore-kernel/src/event.rs @RNT56
+/crates/crustcore-kernel/src/action.rs @RNT56
+/crates/crustcore-kernel/src/state.rs @RNT56
 /crates/crustcore-policy/src/decision.rs @RNT56
-/crates/crustcore-secrets/src/lib.rs     @RNT56
+/crates/crustcore-policy/src/caps.rs @RNT56
+/crates/crustcore-backend/src/lib.rs @RNT56
+/crates/crustcore-backend/src/integrate.rs @RNT56
+/crates/crustcore-secrets/ @RNT56
+/crates/crustcore-zeroize/ @RNT56
+/crates/crustcore-sandbox/ @RNT56

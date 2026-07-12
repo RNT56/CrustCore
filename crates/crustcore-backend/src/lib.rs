@@ -118,7 +118,17 @@ impl VerifierName {
 /// A patch the verifier has confirmed in a clean sandbox. **Only** the verifier
 /// constructs this (no `From<UnverifiedPatch>`); it is the only thing that may
 /// integrate, complete, or open a PR (invariant 13).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// It is deliberately not `Clone`: consuming an attestation at completion or
+/// integration cannot silently duplicate the authority it conveys.
+///
+/// ```compile_fail
+/// use crustcore_backend::VerifiedPatch;
+/// fn duplicate(patch: VerifiedPatch) {
+///     let _copy = patch.clone();
+/// }
+/// ```
+#[derive(Debug, PartialEq, Eq)]
 pub struct VerifiedPatch {
     patch: PatchRef,
     verifier: VerifierName,
@@ -184,7 +194,7 @@ impl VerifiedPatch {
 /// A completed task: proof that a task finished because the verifier passed.
 /// Constructed only by [`complete_task`], which accepts a [`VerifiedPatch`] *by
 /// value* — so a task can only complete from verifier evidence (invariant 13).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Completion {
     /// The verified patch that completed the task.
     pub patch: VerifiedPatch,

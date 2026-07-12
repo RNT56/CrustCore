@@ -269,7 +269,7 @@ impl Default for SupervisorBudgetProfile {
         SupervisorBudgetProfile {
             max_wall_ms: 30 * 60 * 1000,
             max_output_bytes: 1 << 20,
-            max_tokens: u64::MAX,
+            max_tokens: 1_000_000,
             repair_attempts: 2,
         }
     }

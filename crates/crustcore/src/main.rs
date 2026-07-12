@@ -22,10 +22,10 @@ use crustcore_eventlog::{ChainStatus, EventLog, FrameMeta};
 use crustcore_kernel::{Actor, Event, EventKind, Kernel, Visibility};
 use crustcore_policy::{PolicySnapshot, RiskProfile, SandboxExecCap};
 use crustcore_receipts::join::{verify_against_log, FrameRef};
-use crustcore_receipts::{MacKey, ReceiptChain, ReceiptParams};
+use crustcore_receipts::{MacKey, ReceiptChain, ReceiptParams, ReceiptStatus, ToolReceipt};
 use crustcore_sandbox::SandboxProfile;
 use crustcore_types::hash::sha256;
-use crustcore_types::{EventSeq, JobId, ScopeId, TaskId, Timestamp, ToolCallId};
+use crustcore_types::{Budget, EventSeq, JobId, ScopeId, TaskId, Timestamp, ToolCallId};
 use crustcore_worktree::WorktreeManager;
 
 fn main() -> ExitCode {
@@ -106,9 +106,7 @@ fn doctor() -> ExitCode {
     });
 
     // state dir — a writable scratch directory for worktrees/logs.
-    let state = std::env::var_os("CRUSTCORE_STATE")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
+    let state = state_root();
     report.push(match probe_writable(&state) {
         Ok(()) => DoctorCheck::new(
             "state-dir",
@@ -167,6 +165,73 @@ fn probe_writable(dir: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn state_root() -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os("CRUSTCORE_STATE") {
+        return path.into();
+    }
+    if let Some(path) = std::env::var_os("XDG_STATE_HOME") {
+        return std::path::PathBuf::from(path).join("crustcore");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return std::path::PathBuf::from(home).join(".local/state/crustcore");
+    }
+    std::env::temp_dir().join("crustcore-state")
+}
+
+struct RunAudit {
+    log: EventLog,
+    path: std::path::PathBuf,
+}
+
+impl RunAudit {
+    fn new(root: &std::path::Path) -> Self {
+        let name = format!("run-{}-{}.cclog", now_ts().as_millis(), std::process::id());
+        RunAudit {
+            log: EventLog::new(),
+            path: root.join("runs").join(name),
+        }
+    }
+
+    fn append(
+        &mut self,
+        seq: u64,
+        kind: EventKind,
+        actor: Actor,
+        task: TaskId,
+        job: Option<JobId>,
+        payload: &[u8],
+    ) {
+        let mut meta = FrameMeta::new(seq, kind)
+            .actor(actor)
+            .visibility(Visibility::Internal)
+            .timestamp(now_ts())
+            .task(task);
+        if let Some(job) = job {
+            meta = meta.job(job);
+        }
+        self.log.append(&meta, payload);
+    }
+
+    fn persist(&self) -> std::io::Result<()> {
+        self.log.store_atomic(&self.path)
+    }
+}
+
+fn load_or_create_receipt_key(root: &std::path::Path) -> std::io::Result<MacKey> {
+    MacKey::load_or_create(&root.join("receipt.key"))
+}
+
+fn frame_refs(log: &EventLog) -> Vec<FrameRef> {
+    log.iter()
+        .map(|decoded| FrameRef {
+            seq: decoded.frame.seq,
+            tool_completed: decoded.frame.kind == EventKind::ToolCallCompleted,
+            task_id: decoded.frame.task_id,
+            job_id: decoded.frame.job_id,
+        })
+        .collect()
+}
+
 /// `crustcore run -dir <repo> -goal <text> -verify <command>` — create a
 /// disposable worktree, rerun the verify command in a clean sandbox, and complete
 /// the task only if it passes (invariant 13). On failure or a missing sandbox
@@ -208,62 +273,263 @@ fn run_task(run_args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if matches!(backend, Backend::Native)
+        && parsed
+            .goal
+            .as_deref()
+            .is_some_and(|goal| !goal.trim().is_empty())
+    {
+        eprintln!(
+            "crustcore run: -backend native is verify-only and cannot satisfy a coding goal; \
+             choose codex, claude, or cmd"
+        );
+        return ExitCode::from(2);
+    }
+
+    let state = state_root();
+    let key = match load_or_create_receipt_key(&state) {
+        Ok(key) => key,
+        Err(error) => {
+            eprintln!("crustcore run: cannot load/create the receipt key: {error}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let task = TaskId(1);
+    let job = JobId(1);
+    let mut kernel = Kernel::new(PolicySnapshot::new(RiskProfile::Supervised));
+    let mut audit = RunAudit::new(&state);
+    kernel.step(Event::task_created(
+        EventSeq(1),
+        Actor::Adapter,
+        task,
+        Budget::standard_task(),
+    ));
+    audit.append(
+        1,
+        EventKind::TaskCreated,
+        Actor::Adapter,
+        task,
+        None,
+        b"task created",
+    );
+    kernel.step(
+        Event::inbound(EventKind::JobQueued, EventSeq(2), Actor::Adapter)
+            .with_task(task)
+            .with_job(job),
+    );
+    audit.append(
+        2,
+        EventKind::JobQueued,
+        Actor::Adapter,
+        task,
+        Some(job),
+        b"job queued",
+    );
 
     if let Some(goal) = parsed.goal.as_deref() {
         println!("goal: {goal}");
     }
     println!("backend: {}", backend.label());
     println!("verify: {}", spec.display());
+    println!("audit-log: {}", audit.path.display());
 
-    // One task per `run` (the autonomous, multi-task supervisor is later phases).
-    let task = TaskId(1);
     let manager = WorktreeManager::new(&repo_root);
     let worktree = match manager.create_for(task) {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("crustcore run: could not create worktree: {e}");
+        Ok(worktree) => worktree,
+        Err(error) => {
+            eprintln!("crustcore run: could not create worktree: {error}");
+            kernel.step(
+                Event::inbound(EventKind::TaskFailed, EventSeq(3), Actor::Adapter).with_task(task),
+            );
+            audit.append(
+                3,
+                EventKind::TaskFailed,
+                Actor::Adapter,
+                task,
+                None,
+                b"task failed",
+            );
+            let _ = audit.persist();
             return ExitCode::from(1);
         }
     };
     println!("worktree: {}", worktree.as_path().display());
+    kernel.step(
+        Event::inbound(EventKind::JobLeased, EventSeq(3), Actor::Adapter)
+            .with_task(task)
+            .with_job(job)
+            .with_lease_owner(crustcore_types::LeaseOwner(1)),
+    );
+    audit.append(
+        3,
+        EventKind::JobLeased,
+        Actor::Adapter,
+        task,
+        Some(job),
+        b"job leased",
+    );
 
-    let cap = SandboxExecCap {
-        profile: ScopeId(1),
-        scope: ScopeId(1),
-    };
     let profile = SandboxProfile::default_sandboxed();
+    let cap = PolicySnapshot::new(RiskProfile::Supervised)
+        .authorize_reversible(ScopeId(1))
+        .expect("supervised policy permits sandboxed verification")
+        .sandbox_exec(profile.id);
 
-    // Produce a candidate change. The native path verifies the worktree as-is and
-    // references the verified state by HEAD. An external worker (codex/claude/cmd)
-    // runs sandboxed with no secrets, then CrustCore re-derives the real diff from
-    // the worktree and rejects any out-of-root write — the patch a worker produces
-    // is an *unverified* proposal (invariants 6/7). Either way the verifier below is
-    // the only thing that can complete the task (invariant 13).
     let patch = match produce_patch(&backend, &parsed, &manager, &worktree, &cap, &profile) {
-        Ok(p) => p,
+        Ok(patch) => patch,
         Err(code) => {
+            kernel.step(
+                Event::inbound(EventKind::TaskFailed, EventSeq(4), Actor::Adapter).with_task(task),
+            );
+            audit.append(
+                4,
+                EventKind::TaskFailed,
+                Actor::Adapter,
+                task,
+                Some(job),
+                b"task failed",
+            );
+            let _ = audit.persist();
             let _ = manager.remove(&worktree);
             return code;
         }
     };
+    kernel.step(
+        Event::inbound(EventKind::PatchProposed, EventSeq(4), Actor::ExternalWorker)
+            .with_task(task)
+            .with_job(job),
+    );
+    audit.append(
+        4,
+        EventKind::PatchProposed,
+        Actor::ExternalWorker,
+        task,
+        Some(job),
+        b"patch proposed",
+    );
+    kernel.step(
+        Event::inbound(EventKind::ToolCallStarted, EventSeq(5), Actor::Adapter)
+            .with_task(task)
+            .with_job(job)
+            .with_lease_owner(crustcore_types::LeaseOwner(1)),
+    );
+    audit.append(
+        5,
+        EventKind::ToolCallStarted,
+        Actor::Adapter,
+        task,
+        Some(job),
+        b"verify started",
+    );
 
-    let mut receipts = ReceiptChain::new(MacKey::new(run_key()));
+    let mut receipts = ReceiptChain::new(key);
     let ids = VerifyIds {
         task_id: task,
-        job_id: JobId(1),
+        job_id: job,
         tool_call_id: ToolCallId(1),
-        event_seq: EventSeq(1),
+        event_seq: EventSeq(6),
         now: now_ts(),
     };
-
     let outcome = run_verify(&cap, &profile, &worktree, &spec, patch, &mut receipts, &ids);
+
     let code = match outcome {
         VerifyOutcome::Verified(verified) => {
-            let _completion = complete_task(*verified);
-            println!("VERIFIED: '{}' passed — task completed.", spec.display());
-            ExitCode::SUCCESS
+            let receipt = verified.receipt().clone();
+            audit.append(
+                6,
+                EventKind::ToolCallCompleted,
+                Actor::Adapter,
+                task,
+                Some(job),
+                &receipt.to_bytes(),
+            );
+            kernel.step(
+                Event::inbound(EventKind::ToolCallCompleted, EventSeq(6), Actor::Adapter)
+                    .with_task(task)
+                    .with_job(job)
+                    .with_lease_owner(crustcore_types::LeaseOwner(1)),
+            );
+            kernel.step(
+                Event::inbound(EventKind::PatchVerified, EventSeq(7), Actor::Adapter)
+                    .with_task(task),
+            );
+            audit.append(
+                7,
+                EventKind::PatchVerified,
+                Actor::Adapter,
+                task,
+                Some(job),
+                b"patch verified",
+            );
+            audit.append(
+                8,
+                EventKind::TaskCompleted,
+                Actor::Adapter,
+                task,
+                None,
+                b"task completed",
+            );
+
+            let receipt_ok = receipts.verify(std::slice::from_ref(&receipt));
+            let join_ok = verify_against_log(&[receipt], &frame_refs(&audit.log));
+            if !matches!(receipt_ok, ReceiptStatus::Intact { .. }) || !join_ok.is_joined() {
+                eprintln!("AUDIT REFUSED: receipt verification or event-log join failed; task NOT completed.");
+                ExitCode::from(1)
+            } else if let Err(error) = audit.persist() {
+                eprintln!("AUDIT REFUSED: could not persist verifier evidence: {error}");
+                ExitCode::from(1)
+            } else {
+                kernel.step(
+                    Event::inbound(EventKind::TaskCompleted, EventSeq(8), Actor::Adapter)
+                        .with_task(task),
+                );
+                let _completion = complete_task(*verified);
+                println!("VERIFIED: '{}' passed — task completed.", spec.display());
+                ExitCode::SUCCESS
+            }
         }
         VerifyOutcome::Failed { status, output } => {
+            kernel.step(
+                Event::inbound(EventKind::CommandCompleted, EventSeq(6), Actor::Adapter)
+                    .with_task(task)
+                    .with_job(job)
+                    .with_lease_owner(crustcore_types::LeaseOwner(1)),
+            );
+            kernel.step(
+                Event::inbound(EventKind::PatchRejected, EventSeq(7), Actor::Adapter)
+                    .with_task(task),
+            );
+            kernel.step(
+                Event::inbound(EventKind::TaskFailed, EventSeq(8), Actor::Adapter).with_task(task),
+            );
+            audit.append(
+                6,
+                EventKind::CommandCompleted,
+                Actor::Adapter,
+                task,
+                Some(job),
+                b"verify failed",
+            );
+            audit.append(
+                7,
+                EventKind::PatchRejected,
+                Actor::Adapter,
+                task,
+                Some(job),
+                b"patch rejected",
+            );
+            audit.append(
+                8,
+                EventKind::TaskFailed,
+                Actor::Adapter,
+                task,
+                None,
+                b"task failed",
+            );
+            if let Err(error) = audit.persist() {
+                eprintln!("crustcore run: could not persist failure audit: {error}");
+            }
             eprintln!("VERIFY FAILED ({status:?}) — task NOT completed.");
             if !output.as_str().is_empty() {
                 eprintln!("--- verify output (bounded) ---");
@@ -275,16 +541,29 @@ fn run_task(run_args: &[String]) -> ExitCode {
             ExitCode::from(1)
         }
         VerifyOutcome::Refused(reason) => {
+            kernel.step(
+                Event::inbound(EventKind::TaskFailed, EventSeq(6), Actor::Adapter).with_task(task),
+            );
+            audit.append(
+                6,
+                EventKind::TaskFailed,
+                Actor::Adapter,
+                task,
+                None,
+                b"verify refused",
+            );
+            if let Err(error) = audit.persist() {
+                eprintln!("crustcore run: could not persist refusal audit: {error}");
+            }
             eprintln!("VERIFY REFUSED: {reason}");
             eprintln!(
-                "execution requires a sandbox backend (Linux bubblewrap); \
-                 see docs/sandbox.md. Nothing is completed without sandboxed verifier evidence."
+                "execution requires a sandbox backend; see docs/sandbox.md. \
+                 Nothing is completed without sandboxed verifier evidence."
             );
             ExitCode::from(1)
         }
     };
 
-    // Tear down the disposable worktree on every path (best-effort).
     let _ = manager.remove(&worktree);
     code
 }
@@ -443,27 +722,6 @@ fn resolve_verify_spec(
     }
 }
 
-/// A per-run MAC key for the receipt chain. CrustCore holds this key; the model
-/// never does, so receipts are unforgeable (invariant 10). Persistent key
-/// management arrives with the runtime; for a single local run we draw a fresh
-/// random key (falling back to a fixed dev key if the OS RNG is unavailable).
-fn run_key() -> [u8; 32] {
-    use std::io::Read as _;
-    let mut key = [0u8; 32];
-    // Read exactly 32 bytes — `/dev/urandom` never reaches EOF, so a bounded
-    // `read_exact` is required (a plain read-to-end would never return).
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        if f.read_exact(&mut key).is_ok() {
-            return key;
-        }
-    }
-    // Deterministic fallback (no OS RNG): clearly-marked dev key.
-    for (i, b) in key.iter_mut().enumerate() {
-        *b = 0xC0u8 ^ (i as u8);
-    }
-    key
-}
-
 /// Wall-clock timestamp for stamping the verify run. Time is supplied by the
 /// adapter layer (here, the CLI), never read inside the kernel.
 fn now_ts() -> Timestamp {
@@ -499,9 +757,50 @@ fn inspect(path: Option<&str>) -> ExitCode {
     let report = log.inspect();
     print!("{report}");
     match report.status {
-        ChainStatus::Intact { .. } => ExitCode::SUCCESS,
+        ChainStatus::Intact { .. } => match verify_persisted_receipts(&log) {
+            Ok(count) => {
+                if count > 0 {
+                    println!("receipts: {count} authenticated and joined");
+                }
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("crustcore: receipt audit failed: {error}");
+                ExitCode::from(1)
+            }
+        },
         ChainStatus::Broken { .. } => ExitCode::from(1),
     }
+}
+
+fn verify_persisted_receipts(log: &EventLog) -> Result<usize, String> {
+    let mut receipts = Vec::new();
+    for decoded in log.iter() {
+        if decoded.frame.kind == EventKind::ToolCallCompleted
+            && decoded.payload.starts_with(b"CCR1")
+        {
+            receipts.push(
+                ToolReceipt::from_bytes(decoded.payload)
+                    .map_err(|error| format!("invalid receipt payload: {error:?}"))?,
+            );
+        }
+    }
+    if receipts.is_empty() {
+        return Ok(0);
+    }
+    let chain = ReceiptChain::new(
+        load_or_create_receipt_key(&state_root())
+            .map_err(|error| format!("receipt key unavailable: {error}"))?,
+    );
+    let status = chain.verify(&receipts);
+    if !status.is_intact() {
+        return Err(format!("receipt MAC/chain broken: {status:?}"));
+    }
+    let join = verify_against_log(&receipts, &frame_refs(log));
+    if !join.is_joined() {
+        return Err(format!("receipt/event-log join broken: {join:?}"));
+    }
+    Ok(receipts.len())
 }
 
 /// `crustcore export <log>` — render the log as JSONL on stdout. The export is
@@ -617,8 +916,8 @@ fn net_subcommand(args: &[String]) -> ExitCode {
 /// the chat pack before it reaches the terminal (CLAUDE.md §16 — the CLI front door is
 /// a typed, redacted control plane, not a raw model pipe).
 #[cfg(feature = "chat")]
-fn chat_subcommand(_args: &[String]) -> ExitCode {
-    use crustcore_chat::{run_terminal, ChatConfig, OperatorSteering, Persona};
+fn chat_subcommand(args: &[String]) -> ExitCode {
+    use crustcore_chat::{run_terminal_with_tasks, ChatConfig, OperatorSteering, Persona};
     use crustcore_secrets::Redactor;
 
     let helper =
@@ -645,8 +944,33 @@ fn chat_subcommand(_args: &[String]) -> ExitCode {
     // broker's pre-loaded redactor instead so stored secrets are scrubbed.
     let redactor = Redactor::new();
 
-    println!("crustcore chat — type a message; `!text` steers, `/cancel` aborts, Ctrl-D exits.");
-    match run_terminal(&helper, &[], &redactor, config) {
+    let mut run_args = args.to_vec();
+    if crustcore_cli::parse_run(&run_args).is_err() {
+        eprintln!(
+            "usage: crustcore chat [-dir <repo>] [-verify <command>] \
+             [-backend native|codex|claude|cmd] [-worker-cmd <command>]"
+        );
+        return ExitCode::from(2);
+    }
+    if !run_args.iter().any(|arg| arg == "-dir" || arg == "--dir") {
+        run_args.extend(["-dir".to_string(), ".".to_string()]);
+    }
+    let mut dispatch = move |_route: &str, prompt: &str| {
+        let mut task_args = run_args.clone();
+        task_args.extend(["-goal".to_string(), prompt.to_string()]);
+        match run_task(&task_args) {
+            code if code == ExitCode::SUCCESS => {
+                "crustcore task> verified task completed; audit path printed above".to_string()
+            }
+            _ => "crustcore task> task stopped; not completed".to_string(),
+        }
+    };
+
+    println!(
+        "crustcore chat — task-shaped turns run through the kernel; \
+         `!text` steers, `/cancel` aborts, Ctrl-D exits."
+    );
+    match run_terminal_with_tasks(&helper, &[], &redactor, config, &mut dispatch) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("crustcore chat: {e}");
@@ -788,9 +1112,31 @@ mod tests {
     }
 
     #[test]
-    fn run_key_returns_nonzero_key() {
-        // Either the OS RNG (normal) or the deterministic fallback yields a
-        // non-zero 32-byte key; an all-zero key would be a bug.
-        assert_ne!(run_key(), [0u8; 32]);
+    fn receipt_key_is_persistent_and_owner_only() {
+        let dir = std::env::temp_dir().join(format!("cc-key-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut first = ReceiptChain::new(load_or_create_receipt_key(&dir).unwrap());
+        let receipt = first.mint(&ReceiptParams {
+            task_id: TaskId(1),
+            job_id: JobId(1),
+            tool_call_id: ToolCallId(1),
+            tool_name: b"verify",
+            args: b"test",
+            result: b"ok",
+            artifacts: &[],
+            event_seq: EventSeq(1),
+        });
+        let second = ReceiptChain::new(load_or_create_receipt_key(&dir).unwrap());
+        assert!(second.verify(&[receipt]).is_intact());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(dir.join("receipt.key"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

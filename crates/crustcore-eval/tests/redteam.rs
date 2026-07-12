@@ -23,8 +23,7 @@ fn redteam_scenarios_are_enumerated() {
 #[test]
 fn git_config_and_hooks_do_not_execute() {
     use crustcore_path::WorktreeRoot;
-    use crustcore_policy::FsReadCap;
-    use crustcore_policy::FsWriteCap;
+    use crustcore_policy::{FsReadCap, FsWriteCap, PolicySnapshot, RiskProfile};
     use crustcore_types::ScopeId;
     use crustcore_worktree::{git_apply, git_diff, git_log, git_status};
 
@@ -92,10 +91,10 @@ fn git_config_and_hooks_do_not_execute() {
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    let cap = FsReadCap {
-        root: WorktreeRoot::open(&dir).unwrap(),
-        scope: ScopeId(1),
-    };
+    let issuer = PolicySnapshot::new(RiskProfile::Supervised)
+        .authorize_reversible(ScopeId(1))
+        .expect("supervised test policy should authorize worktree access");
+    let cap: FsReadCap = issuer.fs_read(WorktreeRoot::open(&dir).unwrap());
 
     // Also plant a clean/smudge filter driver mapped by a committed
     // .gitattributes — this is the git_apply (smudge) / git_diff (clean) RCE.
@@ -129,10 +128,7 @@ fn git_config_and_hooks_do_not_execute() {
     let _ = git_status(&cap);
     let _ = git_diff(&cap);
     let _ = git_log(&cap, 10);
-    let wcap = FsWriteCap {
-        root: WorktreeRoot::open(&dir).unwrap(),
-        scope: ScopeId(1),
-    };
+    let wcap: FsWriteCap = issuer.fs_write(WorktreeRoot::open(&dir).unwrap());
     let patch = concat!(
         "--- a/a.rs\n",
         "+++ b/a.rs\n",

@@ -153,6 +153,9 @@ Each threat below names the **asset at risk**, the **mitigation**, and the
   bytes, rejects absolute writes, normalizes, resolves the deepest existing
   ancestor, rejects symlink escape, and uses no-follow semantics
   ([`ROADMAP.md` §8.2](./ROADMAP.md), [`docs/sandbox.md`](./docs/sandbox.md)).
+  Execution backends independently deny host reads/writes by default: Linux uses
+  namespace mounts and macOS Seatbelt reopens only system runtime, narrow toolchain,
+  worktree, and per-run private-scratch roots.
 - **Invariants:** **8** (policy), and the typed-path enforcement behind it.
 
 ### 5.4 Sandbox escape

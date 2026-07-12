@@ -104,9 +104,11 @@ path and is never logged.
 
 ## 5.2 Chat → draft PR (opt-in, approval-gated)
 
-Add `--open-pr --repo <owner/name> [--base main] [--branch-prefix crustcore]` to have a
-verified chat task open a **draft** PR. Opening a PR is irreversible (invariant 14), so the
-flow is **approve-first**:
+Add `--open-pr --repo <owner/name> --github-token-file <path> [--base main]
+[--branch-prefix crustcore]` to have a verified chat task push its exact verified
+commit and open a **draft** PR. The credential file must be a small regular,
+owner-only (`0600`) file containing one fine-grained PAT or short-lived App token.
+Opening a PR is irreversible (invariant 14), so the flow is **approve-first**:
 
 1. You ask for work ("add a `--json` flag"). The bot replies with the operation and the
    **✅ approve / 🚫 deny** buttons — it has *not* started yet.
@@ -119,9 +121,11 @@ flow is **approve-first**:
 
 Approving *before* the run means the `VerifiedPatch` never has to outlive the approval — the
 capability (plain data) moves into the task thread, where the patch is produced and consumed
-in one place. The git push of the head branch and the GitHub REST `create_pull` are the
-reduced live socket (`TODO(P10-net-live)`); everything up to the verifier-evidenced
-`PrIntent` is exercised in CI.
+in one place. After the verifier passes, the daemon persists and joins the receipt, pushes
+the exact committed candidate through its confined credential helper, then calls GitHub's
+draft-PR endpoint. The token is read only by the trusted daemon and helper; it never enters
+the worker/verifier sandbox, worktree, argv, environment, event log, or status output. The
+real GitHub socket remains a manual/live validation gate because CI has no repository token.
 
 ## 6. Reasoning streaming
 

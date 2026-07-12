@@ -385,7 +385,7 @@ mod tests {
 
     // ---- Golden task: "fix failing test" (P5.6) ----
 
-    use crustcore_policy::SandboxExecCap;
+    use crustcore_policy::{PolicySnapshot, RiskProfile, SandboxExecCap};
     use crustcore_receipts::MacKey;
     use crustcore_sandbox::SandboxProfile;
     use crustcore_types::{EventSeq, JobId, ScopeId, TaskId, Timestamp, ToolCallId};
@@ -414,10 +414,10 @@ mod tests {
     }
 
     fn cap() -> SandboxExecCap {
-        SandboxExecCap {
-            profile: ScopeId(1),
-            scope: ScopeId(1),
-        }
+        PolicySnapshot::new(RiskProfile::Supervised)
+            .authorize_reversible(ScopeId(1))
+            .expect("supervised test policy should authorize sandbox execution")
+            .sandbox_exec(ScopeId(1))
     }
 
     /// The verifier-owned-completion gate (P5.4–P5.6, invariant 13): a task with a
@@ -518,8 +518,11 @@ mod tests {
                 VerifyOutcome::Verified(verified) => {
                     let completion = crate::complete_task(*verified);
                     assert!(
-                        completion.patch.receipt().result_matches(b""),
-                        "verify of `test -f FIXED` emits no output, so the receipt binds to empty"
+                        completion
+                            .patch
+                            .receipt()
+                            .args_matches(failing_spec.display().as_bytes()),
+                        "the completion receipt must bind to the verifier command"
                     );
                 }
                 other => panic!("after the fix, verify must mint a VerifiedPatch, got {other:?}"),

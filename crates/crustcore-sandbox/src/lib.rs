@@ -45,6 +45,9 @@ pub enum NetworkPosture {
 /// A sandbox execution profile.
 #[derive(Debug, Clone)]
 pub struct SandboxProfile {
+    /// Stable identifier bound into [`SandboxExecCap`]. A capability minted for
+    /// one profile cannot be replayed against a more permissive profile.
+    pub id: crustcore_types::ScopeId,
     /// The execution tier this profile grants.
     pub tier: ExecutionTier,
     /// The network posture (deny-all by default).
@@ -60,6 +63,7 @@ impl SandboxProfile {
     #[must_use]
     pub fn default_sandboxed() -> Self {
         SandboxProfile {
+            id: crustcore_types::ScopeId(1),
             tier: ExecutionTier::Sandboxed,
             network: NetworkPosture::DenyAll,
             stripped_env: default_stripped_env(),
@@ -205,6 +209,8 @@ impl std::error::Error for SandboxError {}
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use crustcore_policy::SandboxExecCap;
 use crustcore_runner::run;
@@ -490,15 +496,14 @@ fn sbpl_escape(s: &str) -> String {
 }
 
 /// Builds the Seatbelt (SBPL) profile string that confines a run: deny-all
-/// network egress and writes confined to the worktree + temp dirs. Pure (no I/O),
-/// so the deterministic profile-shape test runs on every platform.
+/// network egress, a read barrier over the operator's home/shared temp trees,
+/// and writes confined to the worktree + one private temp directory. Pure (no
+/// I/O), so the deterministic profile-shape test runs on every platform.
 ///
-/// `worktree` and `tmpdir` MUST already be **canonical** (real, symlink-resolved)
-/// absolute paths — SBPL `subpath` matches the kernel's resolved path, and macOS
-/// symlinks `/tmp`→`/private/tmp`, `/var`→`/private/var`, and worktrees under
-/// `/var/folders/...`. Embedding an unresolved path would either fail open (a
-/// rule that never matches) or block legitimate worktree writes. Canonicalization
-/// (and the fail-closed-on-error policy) happens in [`SeatbeltBackend::profile_for`].
+/// Every supplied path MUST already be **canonical** (real, symlink-resolved).
+/// `cargo_home` / `rustup_home` are narrow read-only exceptions inside the home
+/// barrier so Rust builds can use downloaded sources/toolchains. Cargo credential
+/// files are denied again after that exception.
 ///
 /// The recipe is "allow-all, then deny the two load-bearing classes, then
 /// re-allow the writable surface" (later SBPL rules override earlier ones):
@@ -510,29 +515,121 @@ fn sbpl_escape(s: &str) -> String {
 /// release build where nothing references it.
 #[cfg(any(target_os = "macos", test))]
 #[must_use]
-fn build_seatbelt_profile(worktree: &Path, tmpdir: &Path) -> String {
+fn build_seatbelt_profile(
+    worktree: &Path,
+    tmpdir: &Path,
+    _home: &Path,
+    cargo_home: Option<&Path>,
+    rustup_home: Option<&Path>,
+) -> String {
     let wt = sbpl_escape(&worktree.to_string_lossy());
     let tmp = sbpl_escape(&tmpdir.to_string_lossy());
-    format!(
+    let mut profile = format!(
         "(version 1)\n\
          (allow default)\n\
          (deny network*)\n\
          (deny file-write*)\n\
-         (allow file-write*\n\
+         (deny file-read*)\n\
+         (allow file-read*\n\
+         \x20   (literal \"/\") (literal \"/etc\") (literal \"/tmp\") (literal \"/var\")\n\
+         \x20   (subpath \"/System\") (subpath \"/usr\") (subpath \"/bin\")\n\
+         \x20   (subpath \"/sbin\") (subpath \"/private/etc\") (subpath \"/etc\")\n\
+         \x20   (subpath \"/private/var/db/dyld\") (subpath \"/private/var/db/timezone\")\n\
+         \x20   (literal \"/private/var/db/DarwinDirectory/local/recordStore.data\")\n\
+         \x20   (literal \"/private/var/db/eligibilityd/eligibility.plist\")\n\
+         \x20   (subpath \"/Library/Apple\") (subpath \"/Library/Developer\")\n\
+         \x20   (subpath \"/Library/Filesystems/NetFSPlugins\")\n\
+         \x20   (subpath \"/Library/Preferences/Logging\")\n\
+         \x20   (subpath \"/Applications/Xcode.app\") (subpath \"/opt\")\n\
+         \x20   (subpath \"/dev\") (subpath \"{wt}\") (subpath \"{tmp}\"))\n"
+    );
+    if let Some(path) = cargo_home {
+        let cargo = sbpl_escape(&path.to_string_lossy());
+        profile.push_str(&format!("(allow file-read* (subpath \"{cargo}\"))\n"));
+        for name in ["credentials", "credentials.toml"] {
+            let secret = sbpl_escape(&path.join(name).to_string_lossy());
+            profile.push_str(&format!("(deny file-read* (literal \"{secret}\"))\n"));
+        }
+    }
+    if let Some(path) = rustup_home {
+        let rustup = sbpl_escape(&path.to_string_lossy());
+        profile.push_str(&format!("(allow file-read* (subpath \"{rustup}\"))\n"));
+    }
+    profile.push_str(&format!(
+        "(allow file-write*\n\
          \x20   (subpath \"{wt}\")\n\
          \x20   (subpath \"{tmp}\")\n\
-         \x20   (subpath \"/private/tmp\")\n\
-         \x20   (subpath \"/private/var/tmp\")\n\
          \x20   (literal \"/dev/null\") (literal \"/dev/zero\")\n\
          \x20   (literal \"/dev/stdout\") (literal \"/dev/stderr\") (literal \"/dev/tty\")\n\
          \x20   (literal \"/dev/dtracehelper\") (literal \"/dev/urandom\"))\n"
-    )
+    ));
+    profile
+}
+
+#[cfg(target_os = "macos")]
+static PRIVATE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Per-run scratch storage. It prevents a sandboxed task from reading or
+/// clobbering another process's files in the shared macOS temp trees.
+#[cfg(target_os = "macos")]
+struct PrivateTempDir(PathBuf);
+
+#[cfg(target_os = "macos")]
+impl PrivateTempDir {
+    fn create() -> Result<Self, SandboxError> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let base = std::env::temp_dir();
+        for _ in 0..32 {
+            let id = PRIVATE_TMP_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+            let path = base.join(format!("crustcore-sandbox-{}-{id}", std::process::id()));
+            match std::fs::create_dir(&path) {
+                Ok(()) => {
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                        .map_err(|e| {
+                            SandboxError::Setup(format!(
+                                "cannot secure private sandbox temp '{}': {e}",
+                                path.display()
+                            ))
+                        })?;
+                    let canonical = path.canonicalize().map_err(|e| {
+                        SandboxError::Setup(format!(
+                            "cannot canonicalize private sandbox temp '{}': {e}",
+                            path.display()
+                        ))
+                    })?;
+                    return Ok(PrivateTempDir(canonical));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => {
+                    return Err(SandboxError::Setup(format!(
+                        "cannot create private sandbox temp under '{}': {e}",
+                        base.display()
+                    )))
+                }
+            }
+        }
+        Err(SandboxError::Setup(
+            "could not allocate a unique private sandbox temp directory".to_string(),
+        ))
+    }
+
+    fn as_path(&self) -> &Path {
+        &self.0
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for PrivateTempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// The macOS `sandbox-exec` (Seatbelt) backend (`docs/sandbox.md` §3 "macOS"):
 /// wraps the command under an SBPL profile that **denies all network egress** and
-/// **confines writes to the worktree** (plus the system temp dirs and a few
-/// harmless `/dev` nodes), matching the bubblewrap backend's security posture
+/// **confines reads away from the operator home** and writes to the worktree plus
+/// a per-run private temp dir, matching the bubblewrap backend's security posture
 /// (Tier 2). Like bubblewrap, network is never re-enabled here in v1 — an
 /// `Allowlist` profile is **refused** by [`run_command`] rather than granting raw
 /// unproxied host networking.
@@ -559,27 +656,48 @@ impl SeatbeltBackend {
         find_executable("sandbox-exec").map(|sandbox_exec| SeatbeltBackend { sandbox_exec })
     }
 
-    /// Resolves the canonical worktree + TMPDIR and builds the SBPL profile for a
-    /// run rooted at `cwd`. **Fail-closed:** if a path cannot be canonicalized we
+    /// Resolves the canonical worktree, private TMPDIR, operator home, and narrow
+    /// Rust toolchain/cache exceptions. **Fail-closed:** if a required path cannot
+    /// be canonicalized we
     /// return [`SandboxError::Setup`] rather than embedding an unresolved path
     /// (which would either fail open or block legitimate worktree writes — see
-    /// [`build_seatbelt_profile`]). The TMPDIR is taken from the *sanitized* env
-    /// when present, else the process `TMPDIR`, else `/private/tmp`.
+    /// [`build_seatbelt_profile`]). TMPDIR must be provisioned by the backend.
     fn profile_for(cwd: &str, env: &BTreeMap<String, String>) -> Result<String, SandboxError> {
         let worktree = std::fs::canonicalize(cwd).map_err(|e| {
             SandboxError::Setup(format!("cannot canonicalize worktree '{cwd}': {e}"))
         })?;
-        // Prefer the sanitized env's TMPDIR (what the child will actually see),
-        // then the ambient one, then the macOS default.
         let tmp_raw = env
             .get("TMPDIR")
             .cloned()
-            .or_else(|| std::env::var("TMPDIR").ok())
-            .unwrap_or_else(|| "/private/tmp".to_string());
+            .ok_or_else(|| SandboxError::Setup("private TMPDIR was not provisioned".into()))?;
         let tmpdir = std::fs::canonicalize(&tmp_raw).map_err(|e| {
             SandboxError::Setup(format!("cannot canonicalize TMPDIR '{tmp_raw}': {e}"))
         })?;
-        Ok(build_seatbelt_profile(&worktree, &tmpdir))
+        let home_raw = std::env::var("HOME").map_err(|_| {
+            SandboxError::Setup("HOME is required for the macOS read barrier".into())
+        })?;
+        let home = std::fs::canonicalize(&home_raw).map_err(|e| {
+            SandboxError::Setup(format!("cannot canonicalize HOME '{home_raw}': {e}"))
+        })?;
+        let canonical_optional =
+            |value: Option<String>| value.and_then(|path| std::fs::canonicalize(path).ok());
+        let cargo_home = canonical_optional(
+            std::env::var("CARGO_HOME")
+                .ok()
+                .or_else(|| Some(home.join(".cargo").to_string_lossy().into_owned())),
+        );
+        let rustup_home = canonical_optional(
+            std::env::var("RUSTUP_HOME")
+                .ok()
+                .or_else(|| Some(home.join(".rustup").to_string_lossy().into_owned())),
+        );
+        Ok(build_seatbelt_profile(
+            &worktree,
+            &tmpdir,
+            &home,
+            cargo_home.as_deref(),
+            rustup_home.as_deref(),
+        ))
     }
 
     /// Builds the `sandbox-exec`-wrapped [`CommandSpec`] for `inner` under
@@ -617,8 +735,12 @@ impl SeatbeltBackend {
         let cwd = inner.cwd.as_deref().ok_or_else(|| {
             SandboxError::Setup("seatbelt backend requires a worktree cwd".to_string())
         })?;
-        let profile_str = Self::profile_for(cwd, &inner.env)?;
-        Ok(self.wrap(inner, &profile_str))
+        // Inspection-only path: use the worktree as TMPDIR so the returned spec
+        // never references a private directory whose guard has already dropped.
+        let mut inspect = inner.clone();
+        inspect.env.insert("TMPDIR".to_string(), cwd.to_string());
+        let profile_str = Self::profile_for(cwd, &inspect.env)?;
+        Ok(self.wrap(&inspect, &profile_str))
     }
 }
 
@@ -635,12 +757,19 @@ impl SandboxBackend for SeatbeltBackend {
         let cwd = spec.cwd.clone().ok_or_else(|| {
             SandboxError::Setup("seatbelt backend requires a worktree cwd".to_string())
         })?;
-        let env = sanitize_env(&spec.env, profile, worktree.as_deref())?;
+        let mut env = sanitize_env(&spec.env, profile, worktree.as_deref())?;
+        let private_tmp = PrivateTempDir::create()?;
+        env.insert(
+            "TMPDIR".to_string(),
+            private_tmp.as_path().to_string_lossy().into_owned(),
+        );
         // Build the SBPL confinement from the canonical worktree + (sanitized)
         // TMPDIR; fail closed if either cannot be resolved.
         let profile_str = Self::profile_for(&cwd, &env)?;
         let wrapped = self.wrap(&CommandSpec { env, ..spec }, &profile_str);
-        run(&wrapped).map_err(|e| SandboxError::Setup(e.to_string()))
+        let result = run(&wrapped).map_err(|e| SandboxError::Setup(e.to_string()));
+        drop(private_tmp);
+        result
     }
 }
 
@@ -885,10 +1014,17 @@ impl SandboxBackend for WindowsBackend {
 /// [`SandboxError::NoBackend`] if no backend can run the tier on this host;
 /// [`SandboxError::Setup`] on env/path validation failure or a non-executing tier.
 pub fn run_command(
-    _cap: &SandboxExecCap,
+    cap: &SandboxExecCap,
     profile: &SandboxProfile,
     spec: CommandSpec,
 ) -> Result<CommandResult, SandboxError> {
+    if cap.profile() != profile.id {
+        return Err(SandboxError::Setup(format!(
+            "sandbox capability profile {:?} does not authorize profile {:?}",
+            cap.profile(),
+            profile.id
+        )));
+    }
     match profile.tier {
         ExecutionTier::None | ExecutionTier::StructuredHost => {
             return Err(SandboxError::Setup(
@@ -950,6 +1086,14 @@ pub fn run_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crustcore_policy::{PolicySnapshot, RiskProfile};
+
+    fn sandbox_cap(profile: ScopeId) -> SandboxExecCap {
+        PolicySnapshot::new(RiskProfile::Supervised)
+            .authorize_reversible(ScopeId(1))
+            .expect("supervised test policy should authorize sandbox execution")
+            .sandbox_exec(profile)
+    }
     use crustcore_types::ScopeId;
 
     fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -1114,7 +1258,10 @@ mod tests {
         // (canonical) worktree, and NOT grant write to an arbitrary outside path.
         let worktree = Path::new("/private/tmp/cc-worktree-abc");
         let tmpdir = Path::new("/private/var/folders/xx/cc-tmp");
-        let profile = build_seatbelt_profile(worktree, tmpdir);
+        let home = Path::new("/Users/someone");
+        let cargo = Path::new("/Users/someone/.cargo");
+        let rustup = Path::new("/Users/someone/.rustup");
+        let profile = build_seatbelt_profile(worktree, tmpdir, home, Some(cargo), Some(rustup));
 
         // Deny-all egress (mirrors bwrap --unshare-all).
         assert!(
@@ -1143,6 +1290,23 @@ mod tests {
         let deny_at = profile.find("(deny file-write*)").unwrap();
         let allow_at = profile.find("(allow file-write*").unwrap();
         assert!(deny_at < allow_at, "deny must precede the re-allow");
+        let writable_rules = &profile[allow_at..];
+        assert!(
+            !writable_rules.contains("(subpath \"/private/tmp\")"),
+            "shared /private/tmp must never be writable"
+        );
+
+        // Read confinement: all host reads are denied first; only system runtime
+        // paths, the worktree/private temp, and narrow Rust caches are re-opened.
+        let read_deny = profile.find("(deny file-read*)").unwrap();
+        let worktree_read = profile
+            .find("(subpath \"/private/tmp/cc-worktree-abc\")")
+            .unwrap();
+        assert!(read_deny < worktree_read);
+        assert!(!profile.contains("(subpath \"/Users/someone\")"));
+        assert!(profile.contains("(allow file-read* (subpath \"/Users/someone/.cargo\"))"));
+        assert!(profile
+            .contains("(deny file-read* (literal \"/Users/someone/.cargo/credentials.toml\"))"));
     }
 
     #[test]
@@ -1151,7 +1315,8 @@ mod tests {
         // string literal — both are backslash-escaped.
         let worktree = Path::new("/tmp/a\"b\\c");
         let tmpdir = Path::new("/private/tmp");
-        let profile = build_seatbelt_profile(worktree, tmpdir);
+        let profile =
+            build_seatbelt_profile(worktree, tmpdir, Path::new("/Users/a\"b\\c"), None, None);
         assert!(
             profile.contains("(subpath \"/tmp/a\\\"b\\\\c\")"),
             "quote and backslash must be escaped in the embedded path: {profile}"
@@ -1162,11 +1327,9 @@ mod tests {
     fn allowlist_profile_is_refused_until_proxy_exists() {
         // Until the trusted egress proxy is built, an allowlist profile must be
         // refused rather than granting raw, unproxied host networking.
-        let cap = SandboxExecCap {
-            profile: ScopeId(1),
-            scope: ScopeId(1),
-        };
+        let cap = sandbox_cap(ScopeId(1));
         let profile = SandboxProfile {
+            id: ScopeId(1),
             tier: ExecutionTier::Sandboxed,
             network: NetworkPosture::Allowlist,
             stripped_env: default_stripped_env(),
@@ -1178,13 +1341,22 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_capability_is_bound_to_the_exact_profile() {
+        let cap = sandbox_cap(ScopeId(7));
+        let profile = SandboxProfile::default_sandboxed();
+        let err = run_command(&cap, &profile, CommandSpec::new("/bin/true")).unwrap_err();
+        assert!(
+            matches!(err, SandboxError::Setup(ref message) if message.contains("does not authorize")),
+            "a capability for another profile must fail before backend selection: {err}"
+        );
+    }
+
+    #[test]
     fn non_executing_tiers_refuse() {
-        let cap = SandboxExecCap {
-            profile: ScopeId(1),
-            scope: ScopeId(1),
-        };
+        let cap = sandbox_cap(ScopeId(1));
         for tier in [ExecutionTier::None, ExecutionTier::StructuredHost] {
             let profile = SandboxProfile {
+                id: ScopeId(1),
                 tier,
                 network: NetworkPosture::DenyAll,
                 stripped_env: default_stripped_env(),
@@ -1215,10 +1387,7 @@ mod tests {
         if any_real_backend_available() {
             return;
         }
-        let cap = SandboxExecCap {
-            profile: ScopeId(1),
-            scope: ScopeId(1),
-        };
+        let cap = sandbox_cap(ScopeId(1));
         let profile = SandboxProfile::default_sandboxed();
         let err = run_command(&cap, &profile, CommandSpec::new("/bin/echo")).unwrap_err();
         assert!(matches!(err, SandboxError::NoBackend));
@@ -1235,11 +1404,9 @@ mod tests {
         if FirecrackerBackend::detect().is_some() {
             return;
         }
-        let cap = SandboxExecCap {
-            profile: ScopeId(1),
-            scope: ScopeId(1),
-        };
+        let cap = sandbox_cap(ScopeId(1));
         let profile = SandboxProfile {
+            id: ScopeId(1),
             tier: ExecutionTier::Hostile,
             network: NetworkPosture::DenyAll,
             stripped_env: default_stripped_env(),
@@ -1432,6 +1599,7 @@ mod tests {
             // an exec vector → env sanitation rejects it before the live TODO.
             let backend = fake_firecracker();
             let profile = SandboxProfile {
+                id: ScopeId(1),
                 tier: ExecutionTier::Hostile,
                 network: NetworkPosture::DenyAll,
                 stripped_env: default_stripped_env(),
@@ -1608,6 +1776,71 @@ mod tests {
             );
 
             std::fs::remove_file(&escape_path).ok();
+            std::fs::remove_dir_all(&tmp).ok();
+        }
+
+        #[test]
+        fn read_outside_worktree_is_denied() {
+            if SeatbeltBackend::detect().is_none() {
+                return;
+            }
+            let tmp = std::env::temp_dir().join(format!("cc-sbx-read-{}", std::process::id()));
+            std::fs::create_dir_all(&tmp).unwrap();
+            let canon = std::fs::canonicalize(&tmp).unwrap();
+            let home = PathBuf::from(std::env::var("HOME").expect("HOME"));
+            let sentinel = home.join(format!(".crustcore-read-sentinel-{}", std::process::id()));
+            std::fs::write(&sentinel, b"must-not-be-readable").unwrap();
+
+            let script = format!("cat '{}'", sentinel.display());
+            let r = run_in_seatbelt(&canon, &script, &[]);
+            assert!(
+                !r.is_success(),
+                "a sandboxed command must not read the operator home: {r:?}"
+            );
+            assert!(!String::from_utf8_lossy(&r.stdout).contains("must-not-be-readable"));
+
+            std::fs::remove_file(&sentinel).ok();
+            std::fs::remove_dir_all(&tmp).ok();
+        }
+
+        #[test]
+        fn shared_temp_write_is_denied_and_private_tmp_is_cleaned() {
+            if SeatbeltBackend::detect().is_none() {
+                return;
+            }
+            let tmp = std::env::temp_dir().join(format!("cc-sbx-tmp-{}", std::process::id()));
+            std::fs::create_dir_all(&tmp).unwrap();
+            let canon = std::fs::canonicalize(&tmp).unwrap();
+            let shared = PathBuf::from(format!(
+                "/private/tmp/crustcore-shared-temp-{}",
+                std::process::id()
+            ));
+            std::fs::remove_file(&shared).ok();
+
+            let denied =
+                run_in_seatbelt(&canon, &format!("echo pwned > '{}'", shared.display()), &[]);
+            assert!(
+                !denied.is_success(),
+                "shared temp write must be denied: {denied:?}"
+            );
+            assert!(!shared.exists());
+
+            let private = run_in_seatbelt(
+                &canon,
+                "echo ok > \"$TMPDIR/probe\" && printf '%s' \"$TMPDIR\"",
+                &[],
+            );
+            assert!(
+                private.is_success(),
+                "private TMPDIR must be writable: {private:?}"
+            );
+            let private_path = PathBuf::from(String::from_utf8(private.stdout).unwrap());
+            assert!(
+                !private_path.exists(),
+                "the per-run private TMPDIR must be removed after the command"
+            );
+
+            std::fs::remove_file(&shared).ok();
             std::fs::remove_dir_all(&tmp).ok();
         }
 

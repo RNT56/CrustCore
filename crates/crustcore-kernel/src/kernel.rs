@@ -109,8 +109,9 @@ impl Kernel {
         if event.kind == EventKind::TaskCreated {
             if let Some(tid) = event.task_id {
                 if self.task_index(tid).is_none() {
-                    let budget = event.budget.unwrap_or_else(Budget::unlimited);
-                    self.tasks.push(TaskEntry::new(tid, budget, event.seq));
+                    if let Some(budget) = event.budget.filter(Budget::is_fully_bounded) {
+                        self.tasks.push(TaskEntry::new(tid, budget, event.seq));
+                    }
                 }
             }
             return;
@@ -495,11 +496,12 @@ mod tests {
         let mut k = kernel();
         let tid = TaskId(1);
         let mut seq = 1u64;
-        let mut created =
-            Event::inbound(EventKind::TaskCreated, EventSeq(seq), Actor::Adapter).with_task(tid);
-        if let Some(b) = seed_budget {
-            created = created.with_budget(b);
-        }
+        let created = Event::task_created(
+            EventSeq(seq),
+            Actor::Adapter,
+            tid,
+            seed_budget.unwrap_or_default(),
+        );
         k.step(created);
         seq += 1;
         let jid = JobId(1);
@@ -560,6 +562,36 @@ mod tests {
         assert_eq!(k.next_seq(), before.next());
     }
 
+    #[test]
+    fn task_creation_requires_a_finite_budget_on_every_axis() {
+        let mut k = kernel();
+
+        k.step(
+            Event::inbound(EventKind::TaskCreated, EventSeq(1), Actor::Adapter)
+                .with_task(TaskId(1)),
+        );
+        assert_eq!(k.task_status(TaskId(1)), None, "missing budget must refuse");
+
+        k.step(
+            Event::inbound(EventKind::TaskCreated, EventSeq(2), Actor::Adapter)
+                .with_task(TaskId(2))
+                .with_budget(Budget::unlimited()),
+        );
+        assert_eq!(
+            k.task_status(TaskId(2)),
+            None,
+            "any unlimited axis must refuse"
+        );
+
+        k.step(Event::task_created(
+            EventSeq(3),
+            Actor::Adapter,
+            TaskId(3),
+            Budget::standard_task(),
+        ));
+        assert_eq!(k.task_status(TaskId(3)), Some(TaskStatus::Created));
+    }
+
     // AC2: a terminal task absorbs every event and emits no tool actions.
     #[test]
     fn terminal_tasks_emit_no_tool_actions() {
@@ -596,10 +628,12 @@ mod tests {
             for reversibility in [Reversibility::Irreversible, Reversibility::Destructive] {
                 let mut k = Kernel::new(PolicySnapshot::new(profile));
                 let tid = TaskId(1);
-                k.step(
-                    Event::inbound(EventKind::TaskCreated, EventSeq(1), Actor::Adapter)
-                        .with_task(tid),
-                );
+                k.step(Event::task_created(
+                    EventSeq(1),
+                    Actor::Adapter,
+                    tid,
+                    Budget::standard_task(),
+                ));
                 k.step(
                     Event::inbound(EventKind::JobQueued, EventSeq(2), Actor::Adapter)
                         .with_task(tid)
@@ -809,7 +843,7 @@ mod tests {
     #[test]
     fn budget_exhaustion_blocks_then_resumes() {
         for axis in BudgetAxis::ALL {
-            let budget = Budget::unlimited().with_limit(axis, 10);
+            let budget = Budget::standard_task().with_limit(axis, 10);
             let (mut k, tid, mut seq) = running_task(Some(budget));
             let actions = k.step(
                 Event::inbound(
@@ -850,7 +884,7 @@ mod tests {
     // subsequent request until a user steer resumes it (the critical fix).
     #[test]
     fn budget_pause_is_durable() {
-        let budget = Budget::unlimited().with_limit(BudgetAxis::Tokens, 10);
+        let budget = Budget::standard_task().with_limit(BudgetAxis::Tokens, 10);
         let (mut k, tid, mut seq) = running_task(Some(budget));
         k.step(
             Event::inbound(
@@ -909,7 +943,7 @@ mod tests {
     // An untrusted request cannot silently clear a block by re-classifying.
     #[test]
     fn request_does_not_clear_a_block() {
-        let budget = Budget::unlimited().with_limit(BudgetAxis::Tokens, 10);
+        let budget = Budget::standard_task().with_limit(BudgetAxis::Tokens, 10);
         let (mut k, tid, mut seq) = running_task(Some(budget));
         k.step(
             Event::inbound(
@@ -977,7 +1011,12 @@ mod tests {
     fn policy_deny_blocks_the_task() {
         let mut k = Kernel::new(PolicySnapshot::new(RiskProfile::ReadOnly));
         let tid = TaskId(1);
-        k.step(Event::inbound(EventKind::TaskCreated, EventSeq(1), Actor::Adapter).with_task(tid));
+        k.step(Event::task_created(
+            EventSeq(1),
+            Actor::Adapter,
+            tid,
+            Budget::standard_task(),
+        ));
         k.step(
             Event::inbound(EventKind::JobQueued, EventSeq(2), Actor::Adapter)
                 .with_task(tid)
@@ -1032,9 +1071,12 @@ mod tests {
         ] {
             let mut k = kernel();
             let tid = TaskId(1);
-            k.step(
-                Event::inbound(EventKind::TaskCreated, EventSeq(1), Actor::Adapter).with_task(tid),
-            );
+            k.step(Event::task_created(
+                EventSeq(1),
+                Actor::Adapter,
+                tid,
+                Budget::standard_task(),
+            ));
             for (i, jid) in [JobId(1), JobId(2)].into_iter().enumerate() {
                 let base = 2 + (i as u64) * 2;
                 k.step(
@@ -1071,7 +1113,7 @@ mod tests {
             let tid = TaskId(1);
             let jid = JobId(1);
             let events = [
-                Event::inbound(EventKind::TaskCreated, EventSeq(1), Actor::Adapter).with_task(tid),
+                Event::task_created(EventSeq(1), Actor::Adapter, tid, Budget::standard_task()),
                 Event::inbound(EventKind::JobQueued, EventSeq(2), Actor::Adapter)
                     .with_task(tid)
                     .with_job(jid),
@@ -1178,7 +1220,7 @@ mod tests {
     #[test]
     fn paused_task_does_not_drive_the_model() {
         // (a) budget-Blocked task: leasing a second job emits no RequestModel.
-        let budget = Budget::unlimited().with_limit(BudgetAxis::Tokens, 10);
+        let budget = Budget::standard_task().with_limit(BudgetAxis::Tokens, 10);
         let (mut k, tid, mut seq) = running_task(Some(budget));
         k.step(
             Event::inbound(
@@ -1265,7 +1307,12 @@ mod tests {
     fn block_reason_is_cleared_when_leaving_blocked() {
         let mut k = Kernel::new(PolicySnapshot::new(RiskProfile::ReadOnly));
         let tid = TaskId(1);
-        k.step(Event::inbound(EventKind::TaskCreated, EventSeq(1), Actor::Adapter).with_task(tid));
+        k.step(Event::task_created(
+            EventSeq(1),
+            Actor::Adapter,
+            tid,
+            Budget::standard_task(),
+        ));
         k.step(
             Event::inbound(EventKind::JobQueued, EventSeq(2), Actor::Adapter)
                 .with_task(tid)
@@ -1379,7 +1426,7 @@ mod tests {
                     Actor::Adapter,
                 )
                 .with_task(TaskId(t))
-                .with_budget(Budget::unlimited().with_limit(BudgetAxis::Tokens, 1_000)),
+                .with_budget(Budget::standard_task().with_limit(BudgetAxis::Tokens, 1_000)),
             );
         }
         let mut lcg: u64 = 0x1234_5678_9abc_def0;

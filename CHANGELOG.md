@@ -378,6 +378,23 @@ agent/PR/role/size/invariant audit trail.
 
 ### Fixed
 
+- **End-to-end trust-boundary hardening.** macOS Seatbelt now denies host reads and
+  writes by default, uses a private per-run temp directory, and binds every sandbox
+  capability to the exact profile it authorizes. Capability fields are sealed behind
+  policy-issued constructors; task creation refuses missing or partially unlimited
+  budgets (including finite daemon token ceilings); verifier attestations are
+  non-cloneable; concurrent daemon tasks receive unique durable ids and worktrees.
+- **Durable verifier evidence.** `crustcore run` and live daemon tasks now persist
+  owner-only atomic event logs, embed the authenticated receipt in the matching
+  `ToolCallCompleted` frame, verify the receipt-to-log join before completion, and use
+  an owner-only persistent receipt key. `crustcore inspect` authenticates and joins
+  persisted receipts instead of checking only frame hashes.
+- **Verified draft-PR execution.** The live daemon now validates repo/ref configuration,
+  commits and verifies the exact candidate, persists its authenticated evidence before
+  integration, pushes through an owner-only ephemeral credential-helper lease, and opens
+  a real draft PR through the GitHub REST adapter. No-op workers are refused even when
+  they claim completion, and native mode refuses coding goals it cannot implement.
+
 - **Final-polish audit (multi-agent) — fixed 5 union-merge + hygiene defects.** A
   comprehensive end-to-end audit (6 finder dimensions; every finding adversarially
   verified to reject churn) surfaced, and this fixes: a missing untrusted-input bound on
@@ -391,6 +408,18 @@ agent/PR/role/size/invariant audit trail.
   token-stream). Non-nano + docs; one new bound test; `cargo xtask verify` green.
 
 ### Changed
+
+- **Supply-chain baseline hardened.** GitHub App RS256 signing moved from the
+  RustCrypto `rsa` crate with its unpatched timing advisory to `jsonwebtoken` backed
+  by AWS-LC. Sidecar secret values use `zeroize`; nano secret bytes and receipt MAC
+  keys use the tiny audited first-party `crustcore-zeroize` primitive, preserving
+  the zero-third-party nano graph. CI runs
+  `cargo audit --deny warnings`; workflow actions are immutable-SHA pinned at their
+  maintained Node 24 majors; Dependabot
+  and CODEOWNERS cover dependencies, workflows, contracts, secrets, and sandbox code.
+  Feature branches validate once through `pull_request`; `push` CI is reserved for
+  `main`, eliminating duplicate PR-branch runs without weakening post-merge coverage.
+  The minimum supported Rust version is now 1.88.
 
 - **Consolidated the duplicated security primitives into `crustcore-types::hash`.** The
   constant-time 32-byte compare (`ct_eq`) and the hex decoders (`hex_val`, `hex32_decode`)
@@ -411,6 +440,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-07-12 | end-to-end-hardening | Sandbox/capability/budget seals; non-cloneable verifier evidence; durable event-log + receipt join; real confined verified-patch-to-draft-PR path; unique daemon task ids; AWS-LC JWT migration; supply-chain policy | `codex/end-to-end-hardening` | Codex (Supervisor/Implementer) | +16.5 KiB local macOS nano (444.6 KiB total, 55.6%) | Enforces 1-3, 6-14, 18-20; completion now requires persisted joined evidence |
 | 2026-06-28 | v0.6/E.1 | Cockpit view core: `build_cockpit` composes TaskDetail/EvidenceSummary(refs-only)/ApprovalForm(op-hash-bound) from the read-model, bounded; renders evidence, mints nothing. Completes Phase E + all of v0.6 | `claude/v06-e1-cockpit` | Claude (Implementer) | 0 kB (crustcore-dev) | Enforces 2, 5, 11, 13, 14; read-model only, op-bound approvals, no minting |
 | 2026-06-28 | v0.6/E.3 | `slack::SlackAllowlist` + `normalize_message` mirroring Telegram (same RuntimeEvent stream + gates, deny-all empty) + redacted `render_to_slack`; live API `#[ignore]`d | `claude/v06-e3-slack` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 1-5, 7, 8, 11, 15, 16; opt-in, redacted, same dispatch as Telegram |
 | 2026-06-28 | v0.6/F.1 | `snapshot_all`/`adopt_from_snapshot` cross-process recovery: stable ids, re-leased under new owner, Pending-resume-from-log, carried-usage re-charge, over-budget→terminal. Completes Phase F | `claude/v06-f1-recovery` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 11, 12, 13; recovery restores supervision, never completion |

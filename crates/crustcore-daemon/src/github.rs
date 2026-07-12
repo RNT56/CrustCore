@@ -110,9 +110,9 @@ impl RepoRegistry {
         }
     }
 
-    /// Registers `cap.repo` with its write capability.
+    /// Registers `cap.repo()` with its write capability.
     pub fn register(&mut self, cap: GitHubWriteCap) {
-        self.repos.insert(cap.repo.0.as_str().to_string(), cap);
+        self.repos.insert(cap.repo().0.as_str().to_string(), cap);
     }
 
     /// The write capability for a repo, if registered.
@@ -294,10 +294,10 @@ pub fn validate_push(cap: &GitHubWriteCap, req: &PushRequest) -> Result<(), Push
     if !ALLOWED_HOSTS.contains(&req.host.as_str()) {
         return Err(PushDenied::Host(req.host.clone()));
     }
-    if req.repo != cap.repo.0.as_str() {
+    if req.repo != cap.repo().0.as_str() {
         return Err(PushDenied::RepoMismatch {
             requested: req.repo.clone(),
-            allowed: cap.repo.0.as_str().to_string(),
+            allowed: cap.repo().0.as_str().to_string(),
         });
     }
     // Force is the explicit flag the helper parsed (covers every `--force…`
@@ -325,7 +325,7 @@ pub fn validate_push(cap: &GitHubWriteCap, req: &PushRequest) -> Result<(), Push
         if branch == "main" || branch == "master" || branch == "HEAD" {
             return Err(PushDenied::ProtectedBranch(branch.to_string()));
         }
-        if !branch_under_prefix(branch, cap.branch_prefix.0.as_str()) {
+        if !branch_under_prefix(branch, cap.branch_prefix().0.as_str()) {
             return Err(PushDenied::BranchOutsidePrefix(branch.to_string()));
         }
     }
@@ -768,11 +768,15 @@ mod tests {
     }
 
     fn cap() -> GitHubWriteCap {
-        GitHubWriteCap {
-            repo: RepoRef(BoundedText::truncated("RNT56/CrustCore", 64)),
-            branch_prefix: BranchPrefix(BoundedText::truncated("crustcore/", 64)),
-            scope: ScopeId(1),
-        }
+        AuthorizedUser::bind(1)
+            .approve_github_write(
+                RepoRef(BoundedText::truncated("RNT56/CrustCore", 64)),
+                BranchPrefix(BoundedText::truncated("crustcore/", 64)),
+                ScopeId(1),
+                ApprovalId(1),
+                Timestamp::from_millis(1),
+            )
+            .0
     }
 
     fn push(repo: &str, host: &str, refspec: &str) -> PushRequest {
