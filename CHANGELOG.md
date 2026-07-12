@@ -414,7 +414,8 @@ agent/PR/role/size/invariant audit trail.
   by AWS-LC. Sidecar secret values use `zeroize`; nano secret bytes and receipt MAC
   keys use the tiny audited first-party `crustcore-zeroize` primitive, preserving
   the zero-third-party nano graph. CI runs
-  `cargo audit --deny warnings`; workflow actions are immutable-SHA pinned; Dependabot
+  `cargo audit --deny warnings`; workflow actions are immutable-SHA pinned at their
+  maintained Node 24 majors; Dependabot
   and CODEOWNERS cover dependencies, workflows, contracts, secrets, and sandbox code.
   Feature branches validate once through `pull_request`; `push` CI is reserved for
   `main`, eliminating duplicate PR-branch runs without weakening post-merge coverage.
