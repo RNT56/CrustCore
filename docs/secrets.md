@@ -47,7 +47,7 @@ pub struct SecretHandle {
 
 /// The actual secret bytes. Never model-visible.
 pub struct SecretMaterial {
-    bytes: Zeroizing<Vec<u8>>, // zeroized on drop
+    bytes: crustcore_zeroize::ZeroizingVec, // volatile-zeroized on drop
 }
 ```
 

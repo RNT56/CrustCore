@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! InstallRedirect (untrusted)              -- invariant 7: validated, never trusted as-is
-//!   -> cap_from_redirect  -> GitHubWriteCap   (scoped to repo + "crustcore/" prefix)
+//!   -> scope_from_redirect -> inert validated scope data
 //!   -> RepoRegistry::register                 -- the repo becomes push-validatable (A.2)
 //!   -> AuthorizedUser::approve                 -- mints Approved<GitHubWriteCap> (inv. 4/14)
 //!   -> RepoProfile::parse(crustcore.yml)       -- bounds the untrusted config (existing parser)
@@ -41,7 +41,7 @@ pub const MAX_REPO_SLUG: usize = 256;
 
 /// The parameters GitHub appends to the post-install redirect (`installation_id`,
 /// the `setup_action` id, and the repo the App was installed on). This is
-/// **untrusted input** (invariant 7): [`cap_from_redirect`] validates it before it
+/// **untrusted input** (invariant 7): [`scope_from_redirect`] validates it before it
 /// can register anything.
 #[derive(Debug, Clone)]
 pub struct InstallRedirect {
@@ -122,17 +122,17 @@ fn validate_repo_slug(slug: &str) -> Result<(), OnboardingError> {
     Ok(())
 }
 
-/// Validates an [`InstallRedirect`] and builds the scoped [`GitHubWriteCap`].
+/// Validates an [`InstallRedirect`] and builds inert GitHub write scope data.
 /// Pure — no network. Rejects a malformed slug or an absent installation id so a
 /// bogus redirect can never register a writable repo (invariant 7).
 ///
 /// # Errors
 /// [`OnboardingError::MissingInstallationId`] / [`OnboardingError::InvalidRepo`] /
 /// [`OnboardingError::RepoSlugTooLong`].
-pub fn cap_from_redirect(
+pub fn scope_from_redirect(
     redirect: &InstallRedirect,
     scope: ScopeId,
-) -> Result<GitHubWriteCap, OnboardingError> {
+) -> Result<(RepoRef, BranchPrefix, ScopeId), OnboardingError> {
     if redirect.installation_id == 0 {
         return Err(OnboardingError::MissingInstallationId);
     }
@@ -144,11 +144,7 @@ pub fn cap_from_redirect(
     let branch_prefix = BranchPrefix(
         BoundedText::new(DEFAULT_BRANCH_PREFIX).expect("static branch prefix is within bounds"),
     );
-    Ok(GitHubWriteCap {
-        repo,
-        branch_prefix,
-        scope,
-    })
+    Ok((repo, branch_prefix, scope))
 }
 
 /// The result of onboarding a repo: the write approval bound to the onboarding
@@ -168,12 +164,12 @@ pub struct Onboarded {
 /// boundary**: `operator` is the [`AuthorizedUser`] who installed the App, bound
 /// out-of-band — never derived from model/worker/comment data (invariant 4).
 ///
-/// Builds the capability twice (once for the registry's push validator, once
-/// wrapped in the `Approved` for PR authorization) because a `GitHubWriteCap` is
-/// intentionally non-`Clone`: capabilities are not silently duplicated.
+/// Raw capability construction remains inside `crustcore-policy`; this layer
+/// only validates inert redirect data and asks the authorized operator to issue
+/// the registry + approved grants.
 ///
 /// # Errors
-/// Propagates [`cap_from_redirect`] validation failures (the redirect is untrusted).
+/// Propagates [`scope_from_redirect`] validation failures (the redirect is untrusted).
 pub fn onboard(
     registry: &mut RepoRegistry,
     operator: AuthorizedUser,
@@ -183,10 +179,10 @@ pub fn onboard(
     approval_expires_at: Timestamp,
 ) -> Result<Onboarded, OnboardingError> {
     // Validate once up front so a bad redirect registers nothing.
-    let cap_for_registry = cap_from_redirect(redirect, scope)?;
-    let cap_for_approval = cap_from_redirect(redirect, scope)?;
+    let (repo, branch_prefix, scope) = scope_from_redirect(redirect, scope)?;
+    let (cap_for_registry, approval) =
+        operator.approve_github_write(repo, branch_prefix, scope, approval_id, approval_expires_at);
     registry.register(cap_for_registry);
-    let approval = operator.approve(cap_for_approval, approval_id, approval_expires_at);
     Ok(Onboarded {
         approval,
         installation_id: redirect.installation_id,
@@ -244,10 +240,12 @@ mod tests {
     }
 
     #[test]
-    fn cap_from_a_good_redirect_is_scoped_to_repo_and_prefix() {
-        let cap = cap_from_redirect(&redirect("RNT56/CrustCore"), ScopeId(1)).unwrap();
-        assert_eq!(cap.repo.0.as_str(), "RNT56/CrustCore");
-        assert_eq!(cap.branch_prefix.0.as_str(), DEFAULT_BRANCH_PREFIX);
+    fn scope_from_a_good_redirect_is_scoped_to_repo_and_prefix() {
+        let (repo, prefix, scope) =
+            scope_from_redirect(&redirect("RNT56/CrustCore"), ScopeId(1)).unwrap();
+        assert_eq!(repo.0.as_str(), "RNT56/CrustCore");
+        assert_eq!(prefix.0.as_str(), DEFAULT_BRANCH_PREFIX);
+        assert_eq!(scope, ScopeId(1));
     }
 
     #[test]
@@ -255,7 +253,7 @@ mod tests {
         let mut r = redirect("RNT56/CrustCore");
         r.installation_id = 0;
         assert_eq!(
-            cap_from_redirect(&r, ScopeId(1)).unwrap_err(),
+            scope_from_redirect(&r, ScopeId(1)).unwrap_err(),
             OnboardingError::MissingInstallationId
         );
     }
@@ -276,7 +274,7 @@ mod tests {
             "RNT56/.",
         ] {
             assert_eq!(
-                cap_from_redirect(&redirect(bad), ScopeId(1)).unwrap_err(),
+                scope_from_redirect(&redirect(bad), ScopeId(1)).unwrap_err(),
                 OnboardingError::InvalidRepo,
                 "slug {bad:?} should be rejected"
             );
@@ -287,7 +285,7 @@ mod tests {
     fn an_overlong_slug_is_refused() {
         let big = format!("owner/{}", "n".repeat(MAX_REPO_SLUG));
         assert_eq!(
-            cap_from_redirect(&redirect(&big), ScopeId(1)).unwrap_err(),
+            scope_from_redirect(&redirect(&big), ScopeId(1)).unwrap_err(),
             OnboardingError::RepoSlugTooLong
         );
     }

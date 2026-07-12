@@ -119,14 +119,16 @@ pub enum SecretAvailability {
 /// let _: crustcore_secrets::ModelVisibleText = m.into();
 /// ```
 pub struct SecretMaterial {
-    bytes: Vec<u8>,
+    bytes: crustcore_zeroize::ZeroizingVec,
 }
 
 impl SecretMaterial {
     /// Wraps raw bytes. Constructed only by trusted store/broker code.
     #[must_use]
     pub fn new(bytes: Vec<u8>) -> Self {
-        SecretMaterial { bytes }
+        SecretMaterial {
+            bytes: crustcore_zeroize::ZeroizingVec::new(bytes),
+        }
     }
 
     /// Length in bytes (non-sensitive metadata).
@@ -149,26 +151,6 @@ impl SecretMaterial {
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
-}
-
-impl Drop for SecretMaterial {
-    fn drop(&mut self) {
-        scrub(&mut self.bytes);
-    }
-}
-
-/// Best-effort zeroization without `unsafe` or an external crate: zero the bytes,
-/// then force the optimizer to treat the buffer as observed so the dead store is
-/// not elided (`black_box` is std + stable). A `zeroize`-backed
-/// `Zeroizing<Vec<u8>>` (volatile writes + fences) is the out-of-nano hardening
-/// (`docs/secrets.md` §2.1); nano keeps this dep-free, no-`unsafe` best-effort
-/// version. Used by every type that holds secret bytes ([`SecretMaterial`],
-/// [`Redactor`]).
-fn scrub(bytes: &mut [u8]) {
-    for b in bytes.iter_mut() {
-        *b = 0;
-    }
-    std::hint::black_box(bytes);
 }
 
 // ---------------------------------------------------------------------------
@@ -219,7 +201,7 @@ pub struct Redactor {
     // (label, secret-value-bytes) pairs, longest-first. The bytes are a second copy
     // of each secret (redaction is impossible without the value); they are zeroized
     // on drop and never exposed.
-    needles: Vec<(String, Vec<u8>)>,
+    needles: Vec<(String, crustcore_zeroize::ZeroizingVec)>,
 }
 
 impl Redactor {
@@ -239,7 +221,10 @@ impl Redactor {
         if value.is_empty() {
             return;
         }
-        self.needles.push((label.to_string(), value.to_vec()));
+        self.needles.push((
+            label.to_string(),
+            crustcore_zeroize::ZeroizingVec::new(value.to_vec()),
+        ));
         self.needles
             .sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
     }
@@ -352,14 +337,6 @@ impl Redactor {
         self.needles
             .iter()
             .any(|(_, v)| std::str::from_utf8(v).is_ok_and(|s| !s.is_empty() && text.contains(s)))
-    }
-}
-
-impl Drop for Redactor {
-    fn drop(&mut self) {
-        for (_, v) in &mut self.needles {
-            scrub(v);
-        }
     }
 }
 

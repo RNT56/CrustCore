@@ -6,7 +6,9 @@
 //! [`PolicySnapshot`] and asks it to classify a proposed action into a
 //! [`PolicyDecision`]; the kernel never performs the side effect itself.
 
-use crustcore_types::Reversibility;
+use crustcore_types::{Reversibility, ScopeId};
+
+use crate::caps::CapabilityIssuer;
 
 /// A coding-adapted risk profile (`ROADMAP.md` §1.3 ZeroClaw lesson, adapted).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
@@ -77,6 +79,16 @@ impl PolicySnapshot {
             }
         }
     }
+
+    /// Produces a capability issuer only when this policy explicitly allows a
+    /// reversible side effect. Read-only policy and approval-requiring actions
+    /// return their original decision and mint no authority.
+    pub fn authorize_reversible(&self, scope: ScopeId) -> Result<CapabilityIssuer, PolicyDecision> {
+        match self.classify(Reversibility::Reversible) {
+            PolicyDecision::Allow => Ok(CapabilityIssuer { scope }),
+            other => Err(other),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -100,5 +112,16 @@ mod tests {
             p.classify(Reversibility::Irreversible),
             PolicyDecision::RequireApproval { .. }
         ));
+    }
+
+    #[test]
+    fn only_allowing_policy_can_mint_a_capability_issuer() {
+        let readonly = PolicySnapshot::new(RiskProfile::ReadOnly);
+        assert!(readonly.authorize_reversible(ScopeId(1)).is_err());
+        let supervised = PolicySnapshot::new(RiskProfile::Supervised);
+        let issuer = supervised
+            .authorize_reversible(ScopeId(7))
+            .expect("supervised reversible authority");
+        assert_eq!(issuer.sandbox_exec(ScopeId(3)).scope(), ScopeId(7));
     }
 }

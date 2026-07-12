@@ -131,10 +131,10 @@ invariant 1). Git operations inside a sandboxed task authenticate through a
 **local credential-helper proxy**:
 
 ```text
-git in sandbox
-  -> local credential helper proxy   (trusted process, outside sandbox)
+trusted daemon, after sandboxed verification
+  -> confined git push + local credential helper (trusted process)
   -> validates repo / branch / refspec against the task's GitHubWriteCap
-  -> mints / injects a short-lived installation token
+  -> injects an owner-provided fine-grained PAT or short-lived installation token
   -> GitHub
   -> proxy returns only the operation result; token never lands in sandbox env
 ```
@@ -152,8 +152,10 @@ Why a proxy instead of `GITHUB_TOKEN` in the environment:
   force-push, not a protected branch) unless an `Approved<T>` is presented. A
   request to push to `main` or force-push is rejected at the proxy even if the
   in-sandbox git command tries it.
-- **Tokens are short-lived.** The proxy mints per-operation installation tokens
-  and lets them expire, minimizing the value of any leak.
+- **Short-lived tokens are preferred.** The operational CLI accepts an owner-only
+  token file so either a short-lived App installation token or a fine-grained PAT
+  can be used. The file must be regular, non-symlinked, `0600`, bounded, and contain
+  exactly one token; the bytes are zeroized after push/REST use.
 
 This is the GitHub instantiation of the secret model's preferred injection order
 (credential proxy / git credential-helper proxy first; environment variable only
@@ -297,7 +299,7 @@ Cannot force-push by default.            -> §3.1, §4
 CI failure can create a repair task.     -> §7
 ```
 
-**Status (Phase 10 decision cores + P10-net wire layer).** The *decisions* are
+**Status (operational verified-patch → draft-PR path).** The *decisions* are
 implemented and tested: `crustcore-backend::integrate::open_pr` (the type-13 gate —
 only a `VerifiedPatch` + `Approved<GitHubWriteCap>` yields a draft `PrIntent`;
 `format_pr_body` from verifier evidence), and `crustcore-daemon::github`
@@ -311,9 +313,12 @@ the `live`-gated `UreqClient`. It takes **primitive** inputs (the daemon maps a
 `PrIntent` onto a `CreatePrRequest`), keeping the sidecar dependency-light; a GitHub
 response is **untrusted data** (only the fields we need are read, a non-2xx never
 fabricates a success), and the token is resolved per call via the credential proxy and
-never appears in output or a routed error. **What remains** (`live`-gated, never CI):
-the daemon driving the helper over the protocol to open a *real* PR end-to-end (which
-un-defers the `golden_issue_to_pr_flow` golden) + the `#[ignore]`d `gh_live` test.
+never appears in output or a routed error. The live daemon now drives this path end to
+end: it validates the configured repo/ref scope, commits the candidate in the disposable
+worktree, verifies that exact commit, persists the authenticated receipt/log join, performs
+a non-force push through the confined helper, and calls `create_pull(draft=true)`. What
+remains outside CI is only the real GitHub network validation itself (`gh_live` and the
+full issue-to-PR live smoke), because those require an operator-owned repo and credential.
 
 ### 9.1 Testing notes
 

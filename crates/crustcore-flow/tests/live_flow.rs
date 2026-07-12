@@ -50,10 +50,10 @@ fn ids() -> VerifyIds {
 }
 
 fn cap() -> SandboxExecCap {
-    SandboxExecCap {
-        profile: ScopeId(1),
-        scope: ScopeId(1),
-    }
+    PolicySnapshot::new(RiskProfile::Supervised)
+        .authorize_reversible(ScopeId(1))
+        .expect("supervised test policy should authorize sandbox execution")
+        .sandbox_exec(ScopeId(1))
 }
 
 /// A single `verify` flow over a real, sandboxed `run_verify`. Mirrors the backend

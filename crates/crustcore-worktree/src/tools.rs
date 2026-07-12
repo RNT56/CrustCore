@@ -103,7 +103,7 @@ pub fn read_file(
     path: &ConfinedReadPath<'_>,
     max_bytes: usize,
 ) -> Result<Vec<u8>, ToolError> {
-    if !roots_match(&cap.root, path.root()) {
+    if !roots_match(cap.root(), path.root()) {
         return Err(ToolError::CapRootMismatch);
     }
     let file = std::fs::File::open(path.to_path()).map_err(io)?;
@@ -124,7 +124,7 @@ pub fn write_file(
     path: &ConfinedWritePath<'_>,
     bytes: &[u8],
 ) -> Result<(), ToolError> {
-    if !roots_match(&cap.root, path.root()) {
+    if !roots_match(cap.root(), path.root()) {
         return Err(ToolError::CapRootMismatch);
     }
     // The git metadata dir is off-limits to structured writes (so the model can
@@ -139,7 +139,7 @@ pub fn write_file(
     // `.git`) would let `link/config` slip past the component check. Resolve the
     // real on-disk location of the deepest existing ancestor and refuse if it
     // lands inside `<root>/.git`.
-    refuse_real_git_dir(&cap.root, &target)?;
+    refuse_real_git_dir(cap.root(), &target)?;
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(io)?;
     }
@@ -167,7 +167,7 @@ pub fn search(cap: &FsReadCap, needle: &str, max_hits: usize) -> Result<Vec<Sear
     // Canonicalize the cap root before walking: a cap built from a non-canonical
     // (`WorktreeRoot::new`) symlinked root would otherwise make `read_dir` follow
     // the root symlink and enumerate files outside the intended worktree.
-    let root = cap.root.as_path().canonicalize().map_err(io)?;
+    let root = cap.root().as_path().canonicalize().map_err(io)?;
     let mut hits = Vec::new();
     let mut stack = vec![root.clone()];
     while let Some(dir) = stack.pop() {
@@ -415,8 +415,8 @@ pub(crate) fn neutralize_attribute_drivers(worktree: &Path) -> Result<(), ToolEr
 /// # Errors
 /// [`ToolError::Git`] if git fails, [`ToolError::Io`] if it cannot be spawned.
 pub fn git_status(cap: &FsReadCap) -> Result<String, ToolError> {
-    neutralize_attribute_drivers(cap.root.as_path())?;
-    let mut c = hardened_git(cap.root.as_path());
+    neutralize_attribute_drivers(cap.root().as_path())?;
+    let mut c = hardened_git(cap.root().as_path());
     c.args(["status", "--porcelain"]);
     run_git(c, None)
 }
@@ -438,8 +438,8 @@ pub fn git_status(cap: &FsReadCap) -> Result<String, ToolError> {
 /// # Errors
 /// As [`git_status`].
 pub fn git_status_all(cap: &FsReadCap) -> Result<String, ToolError> {
-    neutralize_attribute_drivers(cap.root.as_path())?;
-    let mut c = hardened_git(cap.root.as_path());
+    neutralize_attribute_drivers(cap.root().as_path())?;
+    let mut c = hardened_git(cap.root().as_path());
     c.args([
         "status",
         "--porcelain",
@@ -467,13 +467,13 @@ pub fn git_status_all(cap: &FsReadCap) -> Result<String, ToolError> {
 /// # Errors
 /// As [`git_status`] (e.g. an unborn `HEAD`).
 pub fn git_worktree_diff(cap: &FsReadCap) -> Result<String, ToolError> {
-    neutralize_attribute_drivers(cap.root.as_path())?;
+    neutralize_attribute_drivers(cap.root().as_path())?;
     // Mark untracked files intent-to-add so they appear in `git diff HEAD`.
     // Best-effort: if there is nothing to add, the diff still runs.
-    let mut add = hardened_git(cap.root.as_path());
+    let mut add = hardened_git(cap.root().as_path());
     add.args(["add", "--intent-to-add", "--", "."]);
     let _ = run_git(add, None);
-    let mut c = hardened_git(cap.root.as_path());
+    let mut c = hardened_git(cap.root().as_path());
     c.args([
         "diff",
         "HEAD",
@@ -491,8 +491,8 @@ pub fn git_worktree_diff(cap: &FsReadCap) -> Result<String, ToolError> {
 pub fn git_diff(cap: &FsReadCap) -> Result<String, ToolError> {
     // Neutralize attribute drivers (filter.clean would otherwise run during diff),
     // plus belt-and-braces flags against textconv/external-diff.
-    neutralize_attribute_drivers(cap.root.as_path())?;
-    let mut c = hardened_git(cap.root.as_path());
+    neutralize_attribute_drivers(cap.root().as_path())?;
+    let mut c = hardened_git(cap.root().as_path());
     c.args(["diff", "--no-color", "--no-ext-diff", "--no-textconv"]);
     run_git(c, None)
 }
@@ -502,7 +502,7 @@ pub fn git_diff(cap: &FsReadCap) -> Result<String, ToolError> {
 /// # Errors
 /// As [`git_status`].
 pub fn git_log(cap: &FsReadCap, max_entries: u32) -> Result<String, ToolError> {
-    let mut c = hardened_git(cap.root.as_path());
+    let mut c = hardened_git(cap.root().as_path());
     c.args([
         "log",
         "--oneline",
@@ -533,8 +533,8 @@ pub fn git_apply(cap: &FsWriteCap, patch: &[u8]) -> Result<(), ToolError> {
     }
     // Critical: `git apply` runs the smudge filter on the working tree. Neutralize
     // attribute-driven filter/diff drivers before applying.
-    neutralize_attribute_drivers(cap.root.as_path())?;
-    let mut c = hardened_git(cap.root.as_path());
+    neutralize_attribute_drivers(cap.root().as_path())?;
+    let mut c = hardened_git(cap.root().as_path());
     c.args(["apply", "--whitespace=nowarn"]);
     run_git(c, Some(patch)).map(|_| ())
 }
@@ -557,7 +557,22 @@ fn patch_creates_symlink(patch: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crustcore_policy::{PolicySnapshot, RiskProfile};
     use crustcore_types::ScopeId;
+
+    fn read_cap(root: WorktreeRoot) -> FsReadCap {
+        PolicySnapshot::new(RiskProfile::Supervised)
+            .authorize_reversible(ScopeId(1))
+            .expect("supervised test policy should authorize reversible reads")
+            .fs_read(root)
+    }
+
+    fn write_cap(root: WorktreeRoot) -> FsWriteCap {
+        PolicySnapshot::new(RiskProfile::Supervised)
+            .authorize_reversible(ScopeId(1))
+            .expect("supervised test policy should authorize reversible writes")
+            .fs_write(root)
+    }
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
@@ -578,14 +593,8 @@ mod tests {
     fn write_then_read_roundtrips() {
         let dir = temp_dir("rw");
         let root = WorktreeRoot::open(&dir).unwrap();
-        let rcap = FsReadCap {
-            root: WorktreeRoot::open(&dir).unwrap(),
-            scope: ScopeId(1),
-        };
-        let wcap = FsWriteCap {
-            root: WorktreeRoot::open(&dir).unwrap(),
-            scope: ScopeId(1),
-        };
+        let rcap = read_cap(WorktreeRoot::open(&dir).unwrap());
+        let wcap = write_cap(WorktreeRoot::open(&dir).unwrap());
         let wpath = root.confine_write("src/lib.rs").unwrap();
         write_file(&wcap, &wpath, b"fn main() {}").unwrap();
         let rpath = root.confine_read("src/lib.rs").unwrap();
@@ -598,10 +607,7 @@ mod tests {
     fn write_into_dot_git_is_refused() {
         let dir = temp_dir("gitdir");
         let root = WorktreeRoot::open(&dir).unwrap();
-        let wcap = FsWriteCap {
-            root: WorktreeRoot::open(&dir).unwrap(),
-            scope: ScopeId(1),
-        };
+        let wcap = write_cap(WorktreeRoot::open(&dir).unwrap());
         let wpath = root.confine_write(".git/hooks/pre-commit").unwrap();
         assert!(matches!(
             write_file(&wcap, &wpath, b"#!/bin/sh\nevil").unwrap_err(),
@@ -625,10 +631,7 @@ mod tests {
         std::fs::create_dir_all(dir.join(".git")).unwrap();
         std::os::unix::fs::symlink(dir.join(".git"), dir.join("link")).unwrap();
         let root = WorktreeRoot::open(&dir).unwrap();
-        let wcap = FsWriteCap {
-            root: WorktreeRoot::open(&dir).unwrap(),
-            scope: ScopeId(1),
-        };
+        let wcap = write_cap(WorktreeRoot::open(&dir).unwrap());
         // `link/config` is lexically clean but really resolves into `.git`.
         let wpath = root.confine_write("link/config").unwrap();
         assert!(matches!(
@@ -645,10 +648,7 @@ mod tests {
         let outside = temp_dir("search-outside");
         std::fs::write(outside.join("secret.txt"), b"NEEDLE outside\n").unwrap();
         std::os::unix::fs::symlink(&outside, dir.join("escape")).unwrap();
-        let rcap = FsReadCap {
-            root: WorktreeRoot::open(&dir).unwrap(),
-            scope: ScopeId(1),
-        };
+        let rcap = read_cap(WorktreeRoot::open(&dir).unwrap());
         let hits = search(&rcap, "NEEDLE", 10).unwrap();
         assert!(
             hits.is_empty(),
@@ -661,10 +661,7 @@ mod tests {
     #[test]
     fn git_apply_rejects_symlink_creating_patch() {
         let dir = temp_dir("apply-sym");
-        let wcap = FsWriteCap {
-            root: WorktreeRoot::open(&dir).unwrap(),
-            scope: ScopeId(1),
-        };
+        let wcap = write_cap(WorktreeRoot::open(&dir).unwrap());
         let patch = concat!(
             "diff --git a/link b/link\n",
             "new file mode 120000\n",
@@ -686,10 +683,7 @@ mod tests {
         let dir_a = temp_dir("root-a");
         let dir_b = temp_dir("root-b");
         let root_a = WorktreeRoot::open(&dir_a).unwrap();
-        let wcap_b = FsWriteCap {
-            root: WorktreeRoot::open(&dir_b).unwrap(),
-            scope: ScopeId(1),
-        };
+        let wcap_b = write_cap(WorktreeRoot::open(&dir_b).unwrap());
         let path_in_a = root_a.confine_write("x.txt").unwrap();
         assert!(matches!(
             write_file(&wcap_b, &path_in_a, b"nope").unwrap_err(),
@@ -703,14 +697,8 @@ mod tests {
     fn search_finds_matches_and_skips_git() {
         let dir = temp_dir("search");
         let root = WorktreeRoot::open(&dir).unwrap();
-        let wcap = FsWriteCap {
-            root: WorktreeRoot::open(&dir).unwrap(),
-            scope: ScopeId(1),
-        };
-        let rcap = FsReadCap {
-            root: WorktreeRoot::open(&dir).unwrap(),
-            scope: ScopeId(1),
-        };
+        let wcap = write_cap(WorktreeRoot::open(&dir).unwrap());
+        let rcap = read_cap(WorktreeRoot::open(&dir).unwrap());
         write_file(
             &wcap,
             &root.confine_write("a.txt").unwrap(),
@@ -766,10 +754,7 @@ mod tests {
             return;
         };
         let (rroot, _) = caps(&dir);
-        let rcap = FsReadCap {
-            root: rroot,
-            scope: ScopeId(1),
-        };
+        let rcap = read_cap(rroot);
         // Clean tree.
         assert_eq!(git_status(&rcap).unwrap().trim(), "");
         // Modify a tracked file -> status + diff reflect it.
@@ -801,10 +786,7 @@ mod tests {
         // Give the diff something to render.
         std::fs::write(dir.join("README.md"), b"hello\nchanged\n").unwrap();
 
-        let rcap = FsReadCap {
-            root: WorktreeRoot::open(&dir).unwrap(),
-            scope: ScopeId(1),
-        };
+        let rcap = read_cap(WorktreeRoot::open(&dir).unwrap());
         let _ = git_diff(&rcap).unwrap();
         assert!(
             !marker.exists(),
@@ -857,10 +839,7 @@ mod tests {
         // git_diff: clean must not run.
         std::fs::write(dir.join("a.rs"), b"y\n").unwrap();
         let _ = std::fs::remove_file(&clean_marker);
-        let rcap = FsReadCap {
-            root: WorktreeRoot::open(&dir).unwrap(),
-            scope: ScopeId(1),
-        };
+        let rcap = read_cap(WorktreeRoot::open(&dir).unwrap());
         let _ = git_diff(&rcap);
         assert!(
             !clean_marker.exists(),
@@ -873,10 +852,7 @@ mod tests {
             .status()
             .ok();
         let _ = std::fs::remove_file(&smudge_marker);
-        let wcap = FsWriteCap {
-            root: WorktreeRoot::open(&dir).unwrap(),
-            scope: ScopeId(1),
-        };
+        let wcap = write_cap(WorktreeRoot::open(&dir).unwrap());
         let patch = concat!(
             "--- a/a.rs\n",
             "+++ b/a.rs\n",
@@ -909,10 +885,7 @@ mod tests {
         let _ = std::fs::remove_file(&attrs);
         std::os::unix::fs::symlink(&victim, &attrs).unwrap();
 
-        let rcap = FsReadCap {
-            root: WorktreeRoot::open(&dir).unwrap(),
-            scope: ScopeId(1),
-        };
+        let rcap = read_cap(WorktreeRoot::open(&dir).unwrap());
         // The wrapper refuses rather than following the symlink.
         assert!(matches!(git_status(&rcap), Err(ToolError::Git(_))));
         // The out-of-tree victim is untouched.
@@ -930,10 +903,7 @@ mod tests {
             eprintln!("skipping: git unavailable");
             return;
         };
-        let wcap = FsWriteCap {
-            root: WorktreeRoot::open(&dir).unwrap(),
-            scope: ScopeId(1),
-        };
+        let wcap = write_cap(WorktreeRoot::open(&dir).unwrap());
         // Note: context/added lines must keep their leading " "/"+"; avoid string
         // line-continuations (which strip leading whitespace).
         let patch = concat!(
@@ -972,10 +942,7 @@ mod tests {
         };
         std::fs::write(dir.join("with space.pem"), b"x\n").unwrap();
         std::fs::write(dir.join("café.txt"), b"y\n").unwrap();
-        let rcap = FsReadCap {
-            root: WorktreeRoot::open(&dir).unwrap(),
-            scope: ScopeId(1),
-        };
+        let rcap = read_cap(WorktreeRoot::open(&dir).unwrap());
         let out = git_status_all(&rcap).unwrap();
         // Verbatim (unquoted) paths, NUL-separated.
         assert!(
@@ -1000,10 +967,7 @@ mod tests {
             return;
         };
         std::fs::write(dir.join("feature.rs"), b"pub fn feature() -> u32 { 42 }\n").unwrap();
-        let rcap = FsReadCap {
-            root: WorktreeRoot::open(&dir).unwrap(),
-            scope: ScopeId(1),
-        };
+        let rcap = read_cap(WorktreeRoot::open(&dir).unwrap());
         // Plain `git diff` (working-vs-index) omits the untracked file entirely —
         // check this BEFORE git_worktree_diff, whose intent-to-add would otherwise
         // make the file visible to a later plain diff too.

@@ -69,9 +69,8 @@ Notes:
 ## 3. Backend order per OS
 
 The launcher selects the strongest available backend for the OS
-([`ROADMAP.md` §10.2`](../ROADMAP.md)). v0.1 ships the Linux backend v1
-(Phase 4); macOS/Windows and Firecracker come later
-([`ROADMAP.md` §2.3, §21`](../ROADMAP.md)).
+([`ROADMAP.md` §10.2`](../ROADMAP.md)). Linux bubblewrap and macOS Seatbelt are
+implemented; hostile Tier-3 execution still requires Firecracker.
 
 **Linux:**
 
@@ -112,33 +111,41 @@ ships on every macOS); a host without it **refuses** rather than degrading to
 unsandboxed execution. Like bubblewrap, allowlisted egress is not granted here in
 v1 — an `Allowlist` profile is refused until the trusted egress proxy exists.
 
-The generated profile uses an "allow-all, then deny the two load-bearing classes,
-then re-allow the writable surface" recipe (later SBPL rules override earlier
-ones), so a toolchain keeps its read access while the two guarantees are enforced:
+The generated profile keeps process services available, then denies network,
+filesystem reads, and filesystem writes before reopening only explicit runtime,
+toolchain, worktree, and private-scratch roots:
 
 ```scheme
 (version 1)
 (allow default)
 (deny network*)            ; deny-all egress — mirrors bubblewrap --unshare-all
-(deny file-write*)         ; then re-allow only the writable surface below
+(deny file-read*)          ; reopen only system runtime + toolchain + task roots
+(deny file-write*)         ; reopen only the worktree and per-run private scratch
+(allow file-read*
+    (subpath "/System") (subpath "/usr")
+    (subpath "/private/etc") (subpath "/Library/Developer")
+    (subpath "<CANONICAL_WORKTREE>")
+    (subpath "<PRIVATE_TMPDIR>")
+    (subpath "<CARGO_HOME_WITH_CREDENTIAL_FILES_RE-DENIED>")
+    (subpath "<RUSTUP_HOME>"))
 (allow file-write*
     (subpath "<CANONICAL_WORKTREE>")
-    (subpath "<CANONICAL_TMPDIR>")
-    (subpath "/private/tmp")
-    (subpath "/private/var/tmp")
+    (subpath "<PRIVATE_TMPDIR>")
     (literal "/dev/null") (literal "/dev/zero")
     (literal "/dev/stdout") (literal "/dev/stderr") (literal "/dev/tty")
     (literal "/dev/dtracehelper") (literal "/dev/urandom"))
 ```
 
-- `(deny network*)` is the deny-all-egress guarantee; `(deny file-write*)`
-  followed by re-allowing only the worktree + temp dirs is the write-confinement
-  guarantee. Both are verified by live confinement tests on macOS.
+- `(deny network*)` is the deny-all-egress guarantee. Read and write denial are
+  both default-closed. Shared `/private/tmp` and `/private/var/tmp` are not reopened;
+  each run gets a mode-0700 scratch directory that is removed after execution.
+  Live tests prove outside reads, outside writes, shared-temp writes, and network
+  access are refused.
 - **Paths are canonicalized.** macOS symlinks `/tmp`→`/private/tmp`,
   `/var`→`/private/var`, and worktrees under `/var/folders/...`; SBPL `subpath`
   matches the kernel's **resolved** path. The backend therefore
-  `canonicalize`s the worktree and the (sanitized) `TMPDIR` before embedding them
-  (falling back to `/private/tmp` when `TMPDIR` is unset). If a path cannot be
+  `canonicalize`s the worktree and provisioned private `TMPDIR` before embedding
+  them. If a path cannot be
   canonicalized the backend **fails closed** (`SandboxError::Setup`) rather than
   embedding an unresolved path that would either fail open or block legitimate
   worktree writes. Embedded paths are escaped (`"` and `\`) to prevent breaking

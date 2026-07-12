@@ -19,7 +19,7 @@
 
 use std::io::{BufRead, Write};
 
-use crustcore_netproto::{CompleteRequest, NetHelper, SpawnedHelper};
+use crustcore_netproto::{BoundedText, CompleteRequest, NetHelper, SpawnedHelper, MAX_TEXT_BYTES};
 use crustcore_secrets::Redactor;
 
 use crate::session::{ChatConfig, ChatSession, ConsultFn, Turn};
@@ -53,6 +53,24 @@ pub fn run_repl<In: BufRead, Out: Write>(
     input: &mut In,
     output: &mut Out,
     model: &mut ConsultFn<'_>,
+) -> std::io::Result<()> {
+    let mut handoff = |route: &str, prompt: &str| {
+        format!("[route: {route} — hand off to the kernel task flow: {prompt}]")
+    };
+    run_repl_with_tasks(redactor, config, input, output, model, &mut handoff)
+}
+
+/// The same redacted REPL with a real task dispatcher. The dispatcher is called only
+/// for an authorized operator turn classified as [`Turn::StartTask`]; its return value
+/// is rendered as a bounded status line. This keeps routing in `crustcore-chat` while
+/// execution remains in the kernel/backend-owning binary.
+pub fn run_repl_with_tasks<In: BufRead, Out: Write>(
+    redactor: &Redactor,
+    config: ChatConfig,
+    input: &mut In,
+    output: &mut Out,
+    model: &mut ConsultFn<'_>,
+    task: &mut dyn FnMut(&str, &str) -> String,
 ) -> std::io::Result<()> {
     let mut session = ChatSession::new(redactor, config);
     let mut line = String::new();
@@ -95,12 +113,11 @@ pub fn run_repl<In: BufRead, Out: Write>(
             match session.handle(&turn_text, &mut *model) {
                 Turn::Answer(a) => writeln!(output, "crustcore> {}", a.as_str())?,
                 Turn::Notice(n) => writeln!(output, "crustcore: {}", n.as_str())?,
-                Turn::StartTask { route, prompt } => writeln!(
-                    output,
-                    "[route: {} — hand off to the kernel task flow: {}]",
-                    route.as_str(),
-                    prompt
-                )?,
+                Turn::StartTask { route, prompt } => {
+                    let status = task(route.as_str(), prompt.as_str());
+                    let status = BoundedText::truncated(status, MAX_TEXT_BYTES);
+                    writeln!(output, "{}", status.as_str())?;
+                }
             }
         }
     }
@@ -127,6 +144,23 @@ pub fn run_terminal(
     let mut output = stdout.lock();
     let mut model = |req: &CompleteRequest| complete_text(spawned.helper(), req);
     run_repl(redactor, config, &mut input, &mut output, &mut model)
+}
+
+/// Runs the live terminal front door with a caller-owned task dispatcher.
+pub fn run_terminal_with_tasks(
+    program: &str,
+    args: &[&str],
+    redactor: &Redactor,
+    config: ChatConfig,
+    task: &mut dyn FnMut(&str, &str) -> String,
+) -> std::io::Result<()> {
+    let mut spawned = SpawnedHelper::spawn(program, args)?;
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    let mut model = |req: &CompleteRequest| complete_text(spawned.helper(), req);
+    run_repl_with_tasks(redactor, config, &mut input, &mut output, &mut model, task)
 }
 
 #[cfg(test)]
@@ -204,6 +238,35 @@ mod tests {
         assert!(out.contains("crustcore> A sub-800kB verifier kernel."));
         assert!(out.contains("hand off to the kernel task flow: rename the foo variable"));
         assert!(out.contains("(run cancelled)"));
+    }
+
+    #[test]
+    fn repl_dispatches_task_turns_to_the_kernel_callback() {
+        let broker = SecretBroker::new(InMemoryStore::new());
+        let mut input = BufReader::new(Cursor::new(b"rename the foo variable\n".to_vec()));
+        let mut output = Vec::new();
+        let mut model = |_req: &CompleteRequest| None;
+        let mut calls = Vec::new();
+        let mut task = |route: &str, prompt: &str| {
+            calls.push((route.to_string(), prompt.to_string()));
+            "crustcore task> verified".to_string()
+        };
+
+        run_repl_with_tasks(
+            broker.redactor(),
+            ChatConfig::default(),
+            &mut input,
+            &mut output,
+            &mut model,
+            &mut task,
+        )
+        .unwrap();
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, "rename the foo variable");
+        assert!(String::from_utf8(output)
+            .unwrap()
+            .contains("crustcore task> verified"));
     }
 
     #[test]

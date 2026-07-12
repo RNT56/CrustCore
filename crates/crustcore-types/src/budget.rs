@@ -185,9 +185,10 @@ impl BudgetCheck {
 
 /// A task's budget: one [`Meter`] per [`BudgetAxis`] (invariant 11).
 ///
-/// Constructed unlimited and tightened per-axis by the adapter that creates the
-/// task. The kernel only ever *reads* limits and *folds* deltas — it never sets a
-/// limit from model-controlled input.
+/// Constructed with finite limits on every axis by the trusted adapter that creates
+/// the task. The kernel only ever *reads* limits and *folds* deltas — it never sets a
+/// limit from model-controlled input. [`Budget::unlimited`] remains available for
+/// isolated meter calculations, but the kernel rejects it as a task seed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
     meters: [Meter; BUDGET_AXIS_COUNT],
@@ -195,17 +196,43 @@ pub struct Budget {
 
 impl Default for Budget {
     fn default() -> Self {
-        Budget::unlimited()
+        Budget::standard_task()
     }
 }
 
 impl Budget {
+    /// A conservative, finite baseline for an interactive coding task.
+    ///
+    /// Adapters may tighten any axis before submitting `TaskCreated`, but must not
+    /// loosen an axis to `u64::MAX`: the kernel accepts only fully bounded seeds.
+    #[must_use]
+    pub const fn standard_task() -> Self {
+        Budget {
+            meters: [
+                Meter::with_limit(3_600_000),     // wall: 1 hour
+                Meter::with_limit(3_600_000),     // CPU: 1 hour
+                Meter::with_limit(4_294_967_296), // memory: 4 GiB peak
+                Meter::with_limit(2_147_483_648), // disk writes: 2 GiB
+                Meter::with_limit(268_435_456),   // captured output: 256 MiB
+                Meter::with_limit(1_000_000),     // model tokens
+                Meter::with_limit(100_000_000),   // model cost: 100 base units
+                Meter::with_limit(8),             // subagents
+            ],
+        }
+    }
+
     /// A budget with no limit on any axis.
     #[must_use]
     pub const fn unlimited() -> Self {
         Budget {
             meters: [Meter::UNLIMITED; BUDGET_AXIS_COUNT],
         }
+    }
+
+    /// Whether every resource axis has a real finite ceiling.
+    #[must_use]
+    pub fn is_fully_bounded(&self) -> bool {
+        self.meters.iter().all(|meter| meter.limit != u64::MAX)
     }
 
     /// The meter for `axis`.
@@ -262,6 +289,15 @@ mod tests {
         assert_eq!(b.check(), BudgetCheck::WithinBudget);
         let check = b.record(&BudgetDelta::of(BudgetAxis::Tokens, u64::MAX));
         assert_eq!(check, BudgetCheck::WithinBudget);
+    }
+
+    #[test]
+    fn default_task_budget_is_finite_on_every_axis() {
+        let budget = Budget::default();
+        assert!(budget.is_fully_bounded());
+        for axis in BudgetAxis::ALL {
+            assert_ne!(budget.meter(axis).limit, u64::MAX, "axis {axis:?}");
+        }
     }
 
     #[test]

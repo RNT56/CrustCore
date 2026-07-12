@@ -36,6 +36,13 @@ pub struct AuthHeader {
     pub value: String,
 }
 
+impl Drop for AuthHeader {
+    fn drop(&mut self) {
+        use zeroize::Zeroize as _;
+        self.value.zeroize();
+    }
+}
+
 impl fmt::Debug for AuthHeader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Never print the secret-bearing value (invariant 2).
@@ -71,7 +78,7 @@ pub trait CredentialSource {
 /// so they are not printed.
 #[derive(Default)]
 pub struct StaticCredentials {
-    keys: std::collections::BTreeMap<String, String>,
+    keys: std::collections::BTreeMap<String, zeroize::Zeroizing<String>>,
 }
 
 impl fmt::Debug for StaticCredentials {
@@ -92,7 +99,8 @@ impl StaticCredentials {
     /// an assembled header in [`CredentialSource::header_for`].
     #[must_use]
     pub fn with(mut self, label: &str, key: &str) -> Self {
-        self.keys.insert(label.to_string(), key.to_string());
+        self.keys
+            .insert(label.to_string(), zeroize::Zeroizing::new(key.to_string()));
         self
     }
 }
@@ -103,18 +111,18 @@ impl CredentialSource for StaticCredentials {
         Some(match style {
             AuthStyle::Bearer => AuthHeader {
                 name: "Authorization",
-                value: format!("Bearer {key}"),
+                value: format!("Bearer {}", key.as_str()),
             },
             AuthStyle::XApiKey => AuthHeader {
                 name: "x-api-key",
-                value: key.clone(),
+                value: key.as_str().to_owned(),
             },
         })
     }
 
     fn bot_token(&self, label: &str) -> Option<String> {
         // The same key store backs the Telegram bot token (URL-path credential).
-        self.keys.get(label).cloned()
+        self.keys.get(label).map(|key| key.as_str().to_owned())
     }
 }
 

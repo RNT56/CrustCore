@@ -14,47 +14,154 @@ use crustcore_types::{
 #[derive(Debug)]
 pub struct FsReadCap {
     /// The worktree this capability is scoped to.
-    pub root: WorktreeRoot,
+    root: WorktreeRoot,
     /// The policy scope that issued it.
-    pub scope: ScopeId,
+    scope: ScopeId,
 }
 
 /// Authority to write files within a worktree root.
 #[derive(Debug)]
 pub struct FsWriteCap {
     /// The worktree this capability is scoped to.
-    pub root: WorktreeRoot,
+    root: WorktreeRoot,
     /// The policy scope that issued it.
-    pub scope: ScopeId,
+    scope: ScopeId,
 }
 
 /// Authority to make network egress to an allowlisted set of domains.
 #[derive(Debug)]
 pub struct NetworkCap {
     /// Allowed domains; empty means deny-all (invariant 9; NullClaw lesson).
-    pub allowlist: DomainAllowlist,
+    allowlist: DomainAllowlist,
     /// The policy scope that issued it.
-    pub scope: ScopeId,
+    scope: ScopeId,
 }
 
 /// Authority to push/PR to a repository under a branch prefix.
 #[derive(Debug)]
 pub struct GitHubWriteCap {
     /// The repository this capability is scoped to.
-    pub repo: RepoRef,
+    repo: RepoRef,
     /// The branch prefix writes are confined to (e.g. `crustcore/`).
-    pub branch_prefix: BranchPrefix,
+    branch_prefix: BranchPrefix,
     /// The policy scope that issued it.
-    pub scope: ScopeId,
+    scope: ScopeId,
 }
 
 /// Authority to execute commands under a specific sandbox profile.
 #[derive(Debug)]
 pub struct SandboxExecCap {
     /// Identifier of the sandbox profile to run under (see `crustcore-sandbox`).
-    pub profile: ScopeId,
+    profile: ScopeId,
     /// The policy scope that issued it.
-    pub scope: ScopeId,
+    scope: ScopeId,
+}
+
+/// Policy-authorized capability factory. Its fields are private and it can only
+/// be created by [`crate::PolicySnapshot::authorize_reversible`], so capability
+/// structs are no longer forgeable with public literals in downstream crates.
+#[derive(Debug)]
+pub struct CapabilityIssuer {
+    pub(crate) scope: ScopeId,
+}
+
+impl CapabilityIssuer {
+    #[must_use]
+    pub fn fs_read(&self, root: WorktreeRoot) -> FsReadCap {
+        FsReadCap {
+            root,
+            scope: self.scope,
+        }
+    }
+
+    #[must_use]
+    pub fn fs_write(&self, root: WorktreeRoot) -> FsWriteCap {
+        FsWriteCap {
+            root,
+            scope: self.scope,
+        }
+    }
+
+    #[must_use]
+    pub fn network(&self, allowlist: DomainAllowlist) -> NetworkCap {
+        NetworkCap {
+            allowlist,
+            scope: self.scope,
+        }
+    }
+
+    #[must_use]
+    pub fn sandbox_exec(&self, profile: ScopeId) -> SandboxExecCap {
+        SandboxExecCap {
+            profile,
+            scope: self.scope,
+        }
+    }
+}
+
+impl FsReadCap {
+    #[must_use]
+    pub fn root(&self) -> &WorktreeRoot {
+        &self.root
+    }
+
+    #[must_use]
+    pub fn scope(&self) -> ScopeId {
+        self.scope
+    }
+}
+
+impl FsWriteCap {
+    #[must_use]
+    pub fn root(&self) -> &WorktreeRoot {
+        &self.root
+    }
+
+    #[must_use]
+    pub fn scope(&self) -> ScopeId {
+        self.scope
+    }
+}
+
+impl NetworkCap {
+    #[must_use]
+    pub fn allowlist(&self) -> &DomainAllowlist {
+        &self.allowlist
+    }
+
+    #[must_use]
+    pub fn scope(&self) -> ScopeId {
+        self.scope
+    }
+}
+
+impl GitHubWriteCap {
+    #[must_use]
+    pub fn repo(&self) -> &RepoRef {
+        &self.repo
+    }
+
+    #[must_use]
+    pub fn branch_prefix(&self) -> &BranchPrefix {
+        &self.branch_prefix
+    }
+
+    #[must_use]
+    pub fn scope(&self) -> ScopeId {
+        self.scope
+    }
+}
+
+impl SandboxExecCap {
+    #[must_use]
+    pub fn profile(&self) -> ScopeId {
+        self.profile
+    }
+
+    #[must_use]
+    pub fn scope(&self) -> ScopeId {
+        self.scope
+    }
 }
 
 /// A user authorized to grant approvals (e.g. an allowlisted Telegram chat).
@@ -104,6 +211,36 @@ impl AuthorizedUser {
         expires_at: Timestamp,
     ) -> Approved<T> {
         Approved::new(value, approval_id, *self, expires_at)
+    }
+
+    /// Issues the two GitHub write grants needed by trusted onboarding: one
+    /// registry capability for push validation and one approval-wrapped
+    /// capability for the irreversible draft-PR action. Constructing both here
+    /// keeps raw `GitHubWriteCap` minting inside the policy crate.
+    #[must_use]
+    pub fn approve_github_write(
+        &self,
+        repo: RepoRef,
+        branch_prefix: BranchPrefix,
+        scope: ScopeId,
+        approval_id: ApprovalId,
+        expires_at: Timestamp,
+    ) -> (GitHubWriteCap, Approved<GitHubWriteCap>) {
+        let registry = GitHubWriteCap {
+            repo: RepoRef(repo.0.clone()),
+            branch_prefix: BranchPrefix(branch_prefix.0.clone()),
+            scope,
+        };
+        let approved = self.approve(
+            GitHubWriteCap {
+                repo,
+                branch_prefix,
+                scope,
+            },
+            approval_id,
+            expires_at,
+        );
+        (registry, approved)
     }
 }
 

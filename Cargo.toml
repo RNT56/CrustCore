@@ -22,6 +22,7 @@ members = [
     "crates/crustcore",
     "crates/crustcore-kernel",
     "crates/crustcore-types",
+    "crates/crustcore-zeroize",
     "crates/crustcore-policy",
     "crates/crustcore-eventlog",
     "crates/crustcore-receipts",
@@ -53,7 +54,7 @@ members = [
 [workspace.package]
 version = "0.5.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "Apache-2.0"
 authors = ["The CrustCore Authors"]
 repository = "https://github.com/RNT56/CrustCore"
@@ -66,6 +67,7 @@ categories = ["development-tools", "command-line-utilities"]
 [workspace.dependencies]
 crustcore-kernel = { path = "crates/crustcore-kernel", version = "0.5.0" }
 crustcore-types = { path = "crates/crustcore-types", version = "0.5.0" }
+crustcore-zeroize = { path = "crates/crustcore-zeroize", version = "0.5.0" }
 crustcore-policy = { path = "crates/crustcore-policy", version = "0.5.0" }
 crustcore-eventlog = { path = "crates/crustcore-eventlog", version = "0.5.0" }
 crustcore-receipts = { path = "crates/crustcore-receipts", version = "0.5.0" }

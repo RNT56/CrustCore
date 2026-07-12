@@ -60,14 +60,15 @@ use crate::telegram::ChatId;
 /// interval so a slow tick never falsely expires a healthy task.
 pub const LEASE_TTL_MS: u64 = 60_000;
 
-/// The default per-task resource budget (invariant 11). Bounds wall time and streamed output
-/// so a runaway task is killed mid-run. Tokens are not metered for these worktree tasks.
+/// The default per-task resource budget (invariant 11). Every represented axis is
+/// finite, including tokens, so a newly admitted task never starts with implicit
+/// unlimited authority.
 #[must_use]
 pub fn default_task_budget() -> AgentBudget {
     AgentBudget {
         max_wall_ms: 30 * 60 * 1000, // 30 minutes
         max_output_bytes: 1 << 20,   // 1 MiB of streamed status
-        max_tokens: u64::MAX,
+        max_tokens: 1_000_000,
     }
 }
 

@@ -42,7 +42,7 @@ pub struct ToolReceipt {
     pub tool_name_hash: [u8; 32],
     pub args_hash: [u8; 32],
     pub result_hash: [u8; 32],
-    pub artifact_hashes: SmallVec<[[u8; 32]; 4]>,
+    pub artifact_hashes: Vec<ArtifactId>, // hard-capped at 256
     pub event_seq: EventSeq,
     pub prev_receipt_hash: [u8; 32],
     pub mac: [u8; 32],
@@ -63,9 +63,8 @@ pub struct ToolReceipt {
 | `mac` | a key the model never holds | makes receipts unforgeable by the model/worker (§6) |
 
 `args_hash`, `result_hash`, and `artifact_hashes` are content hashes; the receipt
-commits to *content* without re-embedding it. `SmallVec<[[u8;32]; 4]>` keeps the
-common small artifact count allocation-free, matching the kernel's allocation-light
-posture ([`architecture.md` §2](./architecture.md)).
+commits to *content* without re-embedding it. Artifact references are capped at 256
+before storage (invariant 11).
 
 ---
 
@@ -99,7 +98,14 @@ Receipts do not include secret values.
    with invariants 1–3). They carry *hashes* of args/results, not the raw bytes,
    so a receipt is safe to keep, export, and show. Secret-bearing args/results
    must already be redacted before hashing for any model-visible surface
-   ([`secrets.md`](./secrets.md), [`security-model.md`](./security-model.md)).
+([`secrets.md`](./secrets.md), [`security-model.md`](./security-model.md)).
+
+For real CLI and daemon tasks, the stable binary receipt record is the payload of
+the exact `ToolCallCompleted` frame named by `event_seq`. The owner-only MAC key is
+stored at `$CRUSTCORE_STATE/receipt.key` (or the XDG state fallback), and each run
+log is atomically persisted mode 0600 under `runs/`. Completion happens only after
+the MAC chain, event-log chain, and receipt-to-frame join all verify and the log is
+durable.
 
 ---
 

@@ -111,7 +111,7 @@ pub fn run<E: Exporter>(
     for (i, input) in frames.iter().take(config.batch_bound).enumerate() {
         report.frames_seen += 1;
         // Deterministic sampling on frame index (no clock, no RNG).
-        if (i as u64) % rate != 0 {
+        if !(i as u64).is_multiple_of(rate) {
             continue;
         }
         // Project (pre-redaction), then redact at the single chokepoint. Trusted

@@ -24,34 +24,80 @@ pub const GENESIS_RECEIPT_HASH: [u8; 32] = [0u8; 32];
 ///
 /// Its bytes are never printed (`Debug` is redacted), it is not `Serialize`, not
 /// `Clone` (so the key is not casually duplicated around memory), and it is
-/// best-effort zeroed on drop — consistent with the secret-handling discipline
+/// volatile-zeroed on drop — consistent with the secret-handling discipline
 /// (invariants 1–3).
-pub struct MacKey([u8; 32]);
+pub struct MacKey(crustcore_zeroize::ZeroizingArray<32>);
 
 impl MacKey {
     /// Wraps 32 bytes of key material.
     #[must_use]
     pub fn new(bytes: [u8; 32]) -> Self {
-        MacKey(bytes)
+        MacKey(crustcore_zeroize::ZeroizingArray::new(bytes))
+    }
+
+    /// Loads or atomically creates a 32-byte owner-only key file.
+    ///
+    /// Existing symlinks, non-regular files, wrong lengths, or group/world access
+    /// fail closed. Creation requires the OS random source; there is no fixed-key
+    /// fallback in a real run.
+    pub fn load_or_create(path: &std::path::Path) -> std::io::Result<Self> {
+        use std::io::{Read as _, Write as _};
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            if meta.file_type().is_symlink() || !meta.is_file() || meta.len() != 32 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "receipt key must be a 32-byte regular file, not a symlink",
+                ));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                if meta.permissions().mode() & 0o077 != 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "receipt key permissions must be owner-only (0600)",
+                    ));
+                }
+            }
+            let mut raw = crustcore_zeroize::ZeroizingArray::new([0u8; 32]);
+            std::fs::File::open(path)?.read_exact(&mut *raw)?;
+            return Ok(MacKey(raw));
+        }
+
+        let mut raw = crustcore_zeroize::ZeroizingArray::new([0u8; 32]);
+        std::fs::File::open("/dev/urandom")?.read_exact(&mut *raw)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        match options.open(path) {
+            Ok(mut file) => {
+                file.write_all(raw.as_ref())?;
+                file.sync_all()?;
+                Ok(MacKey(raw))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                MacKey::load_or_create(path)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn as_bytes(&self) -> &[u8] {
-        &self.0
+        &*self.0
     }
 }
 
 impl core::fmt::Debug for MacKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("MacKey(***)")
-    }
-}
-
-impl Drop for MacKey {
-    fn drop(&mut self) {
-        // Best-effort scrub so the key does not linger in freed memory. Without
-        // `unsafe`/`zeroize` (forbidden/avoided here) the optimizer *may* elide
-        // this; it is defense-in-depth, not a guarantee.
-        self.0.fill(0);
     }
 }
 
@@ -85,7 +131,113 @@ pub struct ToolReceipt {
     pub mac: [u8; 32],
 }
 
+/// Maximum artifact hashes carried by one receipt (bounded-everything invariant).
+pub const MAX_RECEIPT_ARTIFACTS: usize = 256;
+
+const RECEIPT_MAGIC: [u8; 4] = *b"CCR1";
+const RECEIPT_FIXED_BYTES: usize = 4 + 16 * 3 + 8 + 32 * 5 + 4;
+
+/// Why a persisted receipt record could not be decoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptDecodeError {
+    /// The record is shorter than the fixed receipt header.
+    Truncated,
+    /// The record has an unknown magic/version marker.
+    BadMagic,
+    /// The artifact count exceeds the hard receipt cap.
+    TooManyArtifacts,
+    /// The record length does not exactly match its artifact count.
+    InvalidLength,
+}
+
 impl ToolReceipt {
+    /// Encodes this secret-free receipt as a stable binary event-log payload.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let artifact_count = self.artifact_hashes.len().min(MAX_RECEIPT_ARTIFACTS);
+        let mut out = Vec::with_capacity(RECEIPT_FIXED_BYTES + artifact_count * 32);
+        out.extend_from_slice(&RECEIPT_MAGIC);
+        out.extend_from_slice(&self.task_id.0.to_le_bytes());
+        out.extend_from_slice(&self.job_id.0.to_le_bytes());
+        out.extend_from_slice(&self.tool_call_id.0.to_le_bytes());
+        out.extend_from_slice(&self.event_seq.0.to_le_bytes());
+        out.extend_from_slice(&self.tool_name_hash);
+        out.extend_from_slice(&self.args_hash);
+        out.extend_from_slice(&self.result_hash);
+        out.extend_from_slice(&self.prev_receipt_hash);
+        out.extend_from_slice(&self.mac);
+        out.extend_from_slice(&(artifact_count as u32).to_le_bytes());
+        for artifact in self.artifact_hashes.iter().take(artifact_count) {
+            out.extend_from_slice(&artifact.0);
+        }
+        out
+    }
+
+    /// Decodes a receipt persisted by [`ToolReceipt::to_bytes`].
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ReceiptDecodeError> {
+        if bytes.len() < RECEIPT_FIXED_BYTES {
+            return Err(ReceiptDecodeError::Truncated);
+        }
+        if bytes[..4] != RECEIPT_MAGIC {
+            return Err(ReceiptDecodeError::BadMagic);
+        }
+        let mut offset = 4usize;
+        let read_u128 = |input: &[u8], offset: &mut usize| {
+            let mut raw = [0u8; 16];
+            raw.copy_from_slice(&input[*offset..*offset + 16]);
+            *offset += 16;
+            u128::from_le_bytes(raw)
+        };
+        let read_u64 = |input: &[u8], offset: &mut usize| {
+            let mut raw = [0u8; 8];
+            raw.copy_from_slice(&input[*offset..*offset + 8]);
+            *offset += 8;
+            u64::from_le_bytes(raw)
+        };
+        let read_hash = |input: &[u8], offset: &mut usize| {
+            let mut raw = [0u8; 32];
+            raw.copy_from_slice(&input[*offset..*offset + 32]);
+            *offset += 32;
+            raw
+        };
+        let task_id = TaskId(read_u128(bytes, &mut offset));
+        let job_id = JobId(read_u128(bytes, &mut offset));
+        let tool_call_id = ToolCallId(read_u128(bytes, &mut offset));
+        let event_seq = EventSeq(read_u64(bytes, &mut offset));
+        let tool_name_hash = read_hash(bytes, &mut offset);
+        let args_hash = read_hash(bytes, &mut offset);
+        let result_hash = read_hash(bytes, &mut offset);
+        let prev_receipt_hash = read_hash(bytes, &mut offset);
+        let mac = read_hash(bytes, &mut offset);
+        let mut count_raw = [0u8; 4];
+        count_raw.copy_from_slice(&bytes[offset..offset + 4]);
+        offset += 4;
+        let artifact_count = u32::from_le_bytes(count_raw) as usize;
+        if artifact_count > MAX_RECEIPT_ARTIFACTS {
+            return Err(ReceiptDecodeError::TooManyArtifacts);
+        }
+        let expected = offset.saturating_add(artifact_count.saturating_mul(32));
+        if bytes.len() != expected {
+            return Err(ReceiptDecodeError::InvalidLength);
+        }
+        let mut artifact_hashes = Vec::with_capacity(artifact_count);
+        for _ in 0..artifact_count {
+            artifact_hashes.push(ArtifactId(read_hash(bytes, &mut offset)));
+        }
+        Ok(ToolReceipt {
+            task_id,
+            job_id,
+            tool_call_id,
+            tool_name_hash,
+            args_hash,
+            result_hash,
+            artifact_hashes,
+            event_seq,
+            prev_receipt_hash,
+            mac,
+        })
+    }
+
     /// Whether `result` hashes to this receipt's `result_hash` — i.e. the shown
     /// result is the one that was actually produced (`docs/receipts.md` §4). The
     /// model cannot show a different result without breaking this.
@@ -238,7 +390,12 @@ impl ReceiptChain {
             tool_name_hash: sha256(params.tool_name),
             args_hash: sha256(params.args),
             result_hash: sha256(params.result),
-            artifact_hashes: params.artifacts.to_vec(),
+            artifact_hashes: params
+                .artifacts
+                .iter()
+                .take(MAX_RECEIPT_ARTIFACTS)
+                .copied()
+                .collect(),
             event_seq: params.event_seq,
             prev_receipt_hash: self.head,
             mac: [0u8; 32],
@@ -353,6 +510,31 @@ mod tests {
             receipts.push(chain.mint(&params(i, b"ok")));
         }
         (chain, receipts)
+    }
+
+    #[test]
+    fn persisted_receipt_roundtrips_exactly() {
+        let (chain, receipts) = chain_of(1);
+        let encoded = receipts[0].to_bytes();
+        let decoded = ToolReceipt::from_bytes(&encoded).unwrap();
+        assert_eq!(decoded, receipts[0]);
+        assert!(chain.verify(&[decoded]).is_intact());
+    }
+
+    #[test]
+    fn persisted_receipt_rejects_truncation_and_trailing_bytes() {
+        let (_, receipts) = chain_of(1);
+        let encoded = receipts[0].to_bytes();
+        assert_eq!(
+            ToolReceipt::from_bytes(&encoded[..encoded.len() - 1]),
+            Err(ReceiptDecodeError::Truncated)
+        );
+        let mut trailing = encoded;
+        trailing.push(0);
+        assert_eq!(
+            ToolReceipt::from_bytes(&trailing),
+            Err(ReceiptDecodeError::InvalidLength)
+        );
     }
 
     #[test]

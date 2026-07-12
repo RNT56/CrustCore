@@ -11,6 +11,7 @@ description = "Network/provider sidecar for CrustCore (model transport, Telegram
 [dependencies]
 crustcore-types = { workspace = true }
 crustcore-netproto = { workspace = true }
+zeroize = "1.9"
 # JSON shaping/parsing for the live provider adapters. A normal (non-optional) dep:
 # the adapters' parse/map/stream logic is exercised in CI with a canned ReplayClient
 # (no network), so serde_json must always be available. This is a *sidecar* crate
@@ -31,14 +32,9 @@ ureq = { version = "2", optional = true }
 # RS256 JWT minting for GitHub App auth (P10/B2-gh-app), behind the `github-app`
 # feature ONLY — all three OPTIONAL so the default build (workspace + CI + the mock
 # helper + nano, which never links this crate at all) pulls none of them.
-# `rsa` (RSASSA-PKCS1-v1_5) + `sha2` (SHA-256) sign the JWT; `base64` does the
-# url-safe-no-pad JWS encoding. `forbidden-deps` asserts the default crustcore-net
-# build links no rsa/sha2/base64.
-rsa = { version = "0.9", optional = true }
-# The `oid` feature is required: RSASSA-PKCS1-v1_5 (RS256) prefixes the DigestInfo
-# OID of SHA-256, so `SigningKey::<Sha256>::new` needs `Sha256: AssociatedOid`.
-sha2 = { version = "0.10", features = ["oid"], optional = true }
-base64 = { version = "0.22", optional = true }
+# `jsonwebtoken` is pinned to its AWS-LC backend: constant-time, audited crypto
+# without the RustCrypto `rsa` crate's unpatched Marvin timing advisory.
+jsonwebtoken = { version = "10.4", default-features = false, features = ["aws_lc_rs", "use_pem"], optional = true }
 
 [features]
 # Enables the real network transport (`UreqClient`) + the `live_engine` builder, and
@@ -47,9 +43,9 @@ base64 = { version = "0.22", optional = true }
 live = ["dep:ureq"]
 
 # Enables GitHub App RS256 JWT minting + installation-token exchange (the `githubapp`
-# module). Pulls the rsa/sha2/base64 crypto crates — OFF by default, never nano.
+# module). Pulls the AWS-LC JWT stack — OFF by default, never nano.
 # Compose with `live` (`--features "live,github-app"`) for the real token exchange.
-github-app = ["dep:rsa", "dep:sha2", "dep:base64"]
+github-app = ["dep:jsonwebtoken"]
 
 # The sidecar helper binary nano spawns and talks to over the local protocol.
 [[bin]]

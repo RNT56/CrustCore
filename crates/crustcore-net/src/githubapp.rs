@@ -16,8 +16,8 @@
 //!    `POST /app/installations/<id>/access_tokens`, authenticating with
 //!    `Authorization: Bearer <jwt>` ([`AppTokenMinter::installation_token`]).
 //!
-//! **Feature-gated (`github-app`), never nano.** The RSA + SHA-256 + base64 crates
-//! this needs are *optional* dependencies behind the `github-app` feature, so the
+//! **Feature-gated (`github-app`), never nano.** The AWS-LC-backed JWT implementation
+//! is an *optional* dependency behind the `github-app` feature, so the
 //! default `crustcore-net` build (and the whole workspace/CI build, and the spawned
 //! mock helper) links none of them — `forbidden-deps` proves the default tree is
 //! HTTP/TLS- and crypto-clean.
@@ -32,11 +32,7 @@
 
 use std::rc::Rc;
 
-use rsa::pkcs1v15::SigningKey;
-use rsa::pkcs8::DecodePrivateKey;
-use rsa::signature::{SignatureEncoding, Signer};
-use rsa::RsaPrivateKey;
-use sha2::Sha256;
+use jsonwebtoken::{Algorithm, EncodingKey, Header};
 
 use crate::github::GitHubError;
 use crate::transport::HttpClient;
@@ -51,35 +47,23 @@ pub const JWT_TTL_SECS: u64 = 9 * 60;
 pub const JWT_IAT_BACKDATE_SECS: u64 = 30;
 
 /// A GitHub App's RSA private signing key, parsed from PEM. Holds the parsed
-/// [`SigningKey`] only — the PEM bytes are consumed by [`AppRsaKey::from_pem`] and not
+/// [`EncodingKey`] only — the PEM bytes are consumed by [`AppRsaKey::from_pem`] and not
 /// retained. Deliberately not `Debug`/`Clone`/`Serialize`: it is secret material
 /// (invariant 3) built just before signing and dropped.
 pub struct AppRsaKey {
-    signing_key: SigningKey<Sha256>,
+    signing_key: EncodingKey,
 }
 
 impl AppRsaKey {
-    /// Parses a PKCS#8 PEM RSA private key (GitHub Apps issue PKCS#1 `.pem`; callers
-    /// holding a PKCS#1 key can convert once at setup). The bytes are parsed and
-    /// dropped; only the signing key is retained.
+    /// Parses a PKCS#1 or PKCS#8 PEM RSA private key. The bytes are parsed and
+    /// dropped; only the AWS-LC-backed signing key is retained.
     ///
     /// # Errors
     /// [`JwtError::Key`] if the PEM is not a valid RSA private key. The error carries a
     /// fixed reason, **never** the key bytes.
     pub fn from_pem(pem: &str) -> Result<Self, JwtError> {
-        let key = RsaPrivateKey::from_pkcs8_pem(pem).map_err(|_| JwtError::Key)?;
-        Ok(AppRsaKey {
-            signing_key: SigningKey::<Sha256>::new(key),
-        })
-    }
-
-    /// Builds the parsed key directly from an [`RsaPrivateKey`] (used by tests that
-    /// generate an ephemeral keypair, and by callers that already hold a parsed key).
-    #[must_use]
-    pub fn from_rsa(key: RsaPrivateKey) -> Self {
-        AppRsaKey {
-            signing_key: SigningKey::<Sha256>::new(key),
-        }
+        let signing_key = EncodingKey::from_rsa_pem(pem.as_bytes()).map_err(|_| JwtError::Key)?;
+        Ok(AppRsaKey { signing_key })
     }
 }
 
@@ -88,6 +72,8 @@ impl AppRsaKey {
 pub enum JwtError {
     /// The provided PEM was not a valid RSA private key (no key bytes are carried).
     Key,
+    /// AWS-LC refused to sign the fixed RS256 token.
+    Sign,
 }
 
 impl core::fmt::Display for JwtError {
@@ -95,15 +81,9 @@ impl core::fmt::Display for JwtError {
         match self {
             // Fixed message — never the key material.
             JwtError::Key => write!(f, "invalid RSA private key"),
+            JwtError::Sign => write!(f, "RSA signing failed"),
         }
     }
-}
-
-/// URL-safe base64 **without** padding, the JWT (JWS) encoding (RFC 7515 §2).
-fn b64url(bytes: &[u8]) -> String {
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use base64::Engine as _;
-    URL_SAFE_NO_PAD.encode(bytes)
 }
 
 /// Mints a signed **RS256** GitHub App JWT for `app_id`, valid from `now_unix`
@@ -115,25 +95,13 @@ fn b64url(bytes: &[u8]) -> String {
 /// where the signature is `RSASSA-PKCS1-v1_5` over SHA-256 of the signing input. It is
 /// a **bearer credential** (it authenticates as the App) — pass it straight to the
 /// token exchange and drop it; never log it.
-#[must_use]
-pub fn mint_app_jwt(key: &AppRsaKey, app_id: &str, now_unix: u64) -> String {
+pub fn mint_app_jwt(key: &AppRsaKey, app_id: &str, now_unix: u64) -> Result<String, JwtError> {
     let iat = now_unix.saturating_sub(JWT_IAT_BACKDATE_SECS);
     let exp = iat.saturating_add(JWT_TTL_SECS);
 
-    // Compact, fixed-shape header/claims so the signing input is exactly what GitHub
-    // verifies. `iss` is the App id (a string, per GitHub's examples).
-    let header = serde_json::json!({ "alg": "RS256", "typ": "JWT" });
+    let header = Header::new(Algorithm::RS256);
     let claims = serde_json::json!({ "iat": iat, "exp": exp, "iss": app_id });
-
-    let header_b64 = b64url(&serde_json::to_vec(&header).unwrap_or_default());
-    let claims_b64 = b64url(&serde_json::to_vec(&claims).unwrap_or_default());
-    let signing_input = format!("{header_b64}.{claims_b64}");
-
-    // RS256 = RSASSA-PKCS1-v1_5 with SHA-256. The SigningKey<Sha256> hashes + signs.
-    let signature = key.signing_key.sign(signing_input.as_bytes());
-    let sig_b64 = b64url(&signature.to_bytes());
-
-    format!("{signing_input}.{sig_b64}")
+    jsonwebtoken::encode(&header, &claims, &key.signing_key).map_err(|_| JwtError::Sign)
 }
 
 /// Builds the body for `POST /app/installations/<id>/access_tokens`. GitHub accepts an
@@ -153,6 +121,13 @@ pub struct InstallationToken {
     pub token: String,
     /// GitHub's ISO-8601 `expires_at` (informational; the daemon refreshes before it).
     pub expires_at: String,
+}
+
+impl Drop for InstallationToken {
+    fn drop(&mut self) {
+        use zeroize::Zeroize as _;
+        self.token.zeroize();
+    }
 }
 
 /// Mints installation tokens for a GitHub App over an [`HttpClient`] transport. Build
@@ -195,7 +170,8 @@ impl AppTokenMinter {
         installation_id: u64,
         now_unix: u64,
     ) -> Result<InstallationToken, GitHubError> {
-        let jwt = mint_app_jwt(&self.key, &self.app_id, now_unix);
+        let jwt = mint_app_jwt(&self.key, &self.app_id, now_unix)
+            .map_err(|_| GitHubError::Unauthorized)?;
         let url = format!(
             "{}/app/installations/{installation_id}/access_tokens",
             self.base_url
@@ -249,50 +225,64 @@ fn map_token_status(status: u16) -> GitHubError {
 mod tests {
     use super::*;
     use crate::transport::{Canned, ReplayClient};
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use base64::Engine as _;
-    use rsa::pkcs1v15::VerifyingKey;
-    use rsa::signature::Verifier;
-    use rsa::RsaPublicKey;
+    use jsonwebtoken::{dangerous, decode, DecodingKey, Validation};
 
-    /// A small (1024-bit) RSA keypair generated fresh in the test — fast to generate,
-    /// never committed. Production keys are 2048-bit+, resolved via the broker.
-    fn test_keypair() -> (AppRsaKey, RsaPublicKey) {
-        let mut rng = rand_for_test();
-        let private = RsaPrivateKey::new(&mut rng, 1024).expect("generate test RSA key");
-        let public = RsaPublicKey::from(&private);
-        (AppRsaKey::from_rsa(private), public)
-    }
+    const TEST_RSA_KEY: &str = r#"-----BEGIN PRIVATE KEY-----
+MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCUlqZHa4Ow8v8a
+o+LneBZ4dbUNHGmvQ+GOe+bb9Co+gxOQ65zI3S5AgV4UItDVNVa2GbpFV+2vslCK
+L0zGslXtas5g/u8IEfTyiAc4mwi5ePkPWkHPltLu1AhEFkCM3ah7ArRdTXp2Uu67
+M3FAJpWZnhXRzD4GdMXVVTdML4U8CDerhZke1wx1RvLOSTlGaG2LD5Svc9+RtKjr
+bcPatiOcut7IfwRSi42kDmNf5qB/5cMiGzbA0ATh0bTDPzJ6U0kfGiRaUxyLlVcD
+W2a8TskP0UQGi9um1wk+OiFocm3O9UhdosdNFn2nirb4zo4BkMR9quEBMMaex7b9
+mPZNA/W/AgMBAAECggEAGLFMYrQIR4CqSjgP/h1jxpLxCoO9QGYMdsw6WjUiTA8m
+UkAFZw/ynr+g7cG3aKcbiNmPrfRlyHvejIg9vwtl4jWMpGvZN0McrK1UXeDNu1zS
+Lu3139SVqyDLWt1DzuULGZ4icRruDfnMOInc+ScwVz4BLEM/z3zaX5BwxxVik84c
+0U8K8axt8i2eUfmk+PO+qOh1bsW7+TVbDMm7Pd9dmtQVnjKjJWomdm4S+S1sgsMT
+6AWKNK5Rp0g5mwcs2sfQxDvSR6vY2fR78yNXceQfBetTQbZt+Wot7Pd2uMQwSPgq
+TjXLMeQSgYZCUq2hfO2n6Xwqg91r6d+6yRGC9ksVAQKBgQDQuh1ePxEW+oxMqhpJ
+21V1NTNLXL5u4YyQwzbHiSisF2nvFXO+JA+Lx5zdK8GzCN1gk3j8esyQp5ltFjui
+PQc+jKI8Y/k1ZISEFWf7fMU8Nn8ysA9dXdlMqOCn23TISfysM78F5Z5q4Huzu8K6
+ZhQjUPEm6Crrh/cYCdh1zIWggQKBgQC2Pbu3UdZf8hnb0HUBvReKDhhP1CaCIXIz
+m7oHZiccsL0HPtN8tqVJO+8tCnWbNt88AWy/N1ttg6F+cCOyyzVYcfhCJFNDFnyB
+a7kEZ9ALrza5/W5HnVlslxpwov6D2wnJQxvgoIjS1AQKAnKc5Ya3nom6eR2OAdUw
+Yuc3DSZ2PwKBgAOWDwcdgkeoylxO1+DI+fDnlxgGYec5zNZ35CsNejtqs5E+Bx0P
+NY0rQtCx/cP7tQIBxqRf37/kgUhUh3XEIqm6dNcgyJlYPsaeL4ksnZ7pOMpAKCNs
+h10/0YxQwvLmAoda5D9PsKcZcEaoRTI6qsHolBwdBQ/C6EXrdWKgvvMBAoGAPP1q
+Dk8ALLoMd2lLT1qmPxi6gDTi8lgZLTZnysQgQNTRXlRjWPCTXnAFepBujZSOnzlm
+2JPBMGSGLpd/Cv5BCymRSSl5CBHFd1bC47uOf+qSqSostyDs5Y+oVJvoC97JZqbj
+9IglYlF8TJFHJEUYkekn9NVF09m/LGNdOCpZfecCgYAJWSW+n1cZnMGm/2ivnnst
+0DD5CicHngCF0sGKLZGAk0Nm15SHKoYLbQ+v8I7rU//TH8hJxq/CT4jTCiFyRgt7
+0RMel1B6ixq6DhUE9Ze10aUi7jU0QX58s96t6bgmhD/lHy41I8casXppbZ5No7s+
+XverGQjJluKLrhI/yNqINA==
+-----END PRIVATE KEY-----"#;
 
-    // The `rsa` crate re-exports a compatible RNG via `rand_core`; generate with a
-    // seeded OS RNG so the test is self-contained.
-    fn rand_for_test() -> impl rsa::rand_core::CryptoRngCore {
-        rsa::rand_core::OsRng
-    }
+    const TEST_RSA_PUBLIC_KEY: &str = r#"-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAlJamR2uDsPL/GqPi53gW
+eHW1DRxpr0Phjnvm2/QqPoMTkOucyN0uQIFeFCLQ1TVWthm6RVftr7JQii9MxrJV
+7WrOYP7vCBH08ogHOJsIuXj5D1pBz5bS7tQIRBZAjN2oewK0XU16dlLuuzNxQCaV
+mZ4V0cw+BnTF1VU3TC+FPAg3q4WZHtcMdUbyzkk5Rmhtiw+Ur3PfkbSo623D2rYj
+nLreyH8EUouNpA5jX+agf+XDIhs2wNAE4dG0wz8yelNJHxokWlMci5VXA1tmvE7J
+D9FEBovbptcJPjohaHJtzvVIXaLHTRZ9p4q2+M6OAZDEfarhATDGnse2/Zj2TQP1
+vwIDAQAB
+-----END PUBLIC KEY-----"#;
 
-    fn split_jwt(jwt: &str) -> (String, String, Vec<u8>) {
-        let parts: Vec<&str> = jwt.split('.').collect();
-        assert_eq!(parts.len(), 3, "a JWT has three dot-separated parts");
-        let header = String::from_utf8(URL_SAFE_NO_PAD.decode(parts[0]).unwrap()).unwrap();
-        let claims = String::from_utf8(URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
-        let sig = URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
-        (header, claims, sig)
+    fn test_key() -> AppRsaKey {
+        AppRsaKey::from_pem(TEST_RSA_KEY).expect("parse committed test-only RSA key")
     }
 
     #[test]
     fn jwt_header_and_claims_are_rs256_and_within_the_cap() {
-        let (key, _pub) = test_keypair();
+        let key = test_key();
         let now = 1_700_000_000u64;
-        let jwt = mint_app_jwt(&key, "123456", now);
-        let (header, claims, _sig) = split_jwt(&jwt);
+        let jwt = mint_app_jwt(&key, "123456", now).unwrap();
+        let decoded = dangerous::insecure_decode::<serde_json::Value>(&jwt).unwrap();
 
         // Header: RS256 / JWT.
-        let h: serde_json::Value = serde_json::from_str(&header).unwrap();
-        assert_eq!(h["alg"], "RS256");
-        assert_eq!(h["typ"], "JWT");
+        assert_eq!(decoded.header.alg, Algorithm::RS256);
+        assert_eq!(decoded.header.typ.as_deref(), Some("JWT"));
 
         // Claims: iss == app_id, iat backdated, exp within GitHub's 10-minute cap.
-        let c: serde_json::Value = serde_json::from_str(&claims).unwrap();
+        let c = decoded.claims;
         assert_eq!(c["iss"], "123456");
         let iat = c["iat"].as_u64().unwrap();
         let exp = c["exp"].as_u64().unwrap();
@@ -309,43 +299,43 @@ mod tests {
         // The load-bearing crypto assertion: an independently-derived verifying key
         // (from the public half of the keypair) accepts the signature over the exact
         // signing input `base64url(header).base64url(claims)`.
-        let (key, public) = test_keypair();
-        let jwt = mint_app_jwt(&key, "987654", 1_700_000_000);
-
-        let parts: Vec<&str> = jwt.split('.').collect();
-        let signing_input = format!("{}.{}", parts[0], parts[1]);
-        let sig_bytes = URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
-
-        let verifying = VerifyingKey::<Sha256>::new(public);
-        let signature = rsa::pkcs1v15::Signature::try_from(sig_bytes.as_slice()).unwrap();
-        verifying
-            .verify(signing_input.as_bytes(), &signature)
-            .expect("the minted RS256 signature must verify against the App's public key");
+        let key = test_key();
+        let jwt = mint_app_jwt(&key, "987654", 1_700_000_000).unwrap();
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.validate_exp = false;
+        validation.required_spec_claims.clear();
+        decode::<serde_json::Value>(
+            &jwt,
+            &DecodingKey::from_rsa_pem(TEST_RSA_PUBLIC_KEY.as_bytes()).unwrap(),
+            &validation,
+        )
+        .expect("the minted RS256 signature must verify through AWS-LC");
     }
 
     #[test]
     fn a_tampered_signing_input_fails_verification() {
         // Flipping a claim must invalidate the signature (the signature binds header +
         // claims, so a forged `iss`/`exp` is rejected).
-        let (key, public) = test_keypair();
-        let jwt = mint_app_jwt(&key, "111", 1_700_000_000);
-        let parts: Vec<&str> = jwt.split('.').collect();
-        let sig_bytes = URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
-
-        let verifying = VerifyingKey::<Sha256>::new(public);
-        let signature = rsa::pkcs1v15::Signature::try_from(sig_bytes.as_slice()).unwrap();
-        // Tamper: claim a different App id in the signing input.
-        let forged_claims = b64url(
-            &serde_json::to_vec(
-                &serde_json::json!({ "iat": 0, "exp": 540, "iss": "999-attacker" }),
-            )
-            .unwrap(),
-        );
-        let forged_input = format!("{}.{forged_claims}", parts[0]);
+        let key = test_key();
+        let jwt = mint_app_jwt(&key, "111", 1_700_000_000).unwrap();
+        let mut forged = jwt.into_bytes();
+        let first_dot = forged.iter().position(|byte| *byte == b'.').unwrap();
+        let claim_byte = first_dot + 2;
+        forged[claim_byte] = if forged[claim_byte] == b'A' {
+            b'B'
+        } else {
+            b'A'
+        };
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.validate_exp = false;
+        validation.required_spec_claims.clear();
         assert!(
-            verifying
-                .verify(forged_input.as_bytes(), &signature)
-                .is_err(),
+            decode::<serde_json::Value>(
+                String::from_utf8(forged).unwrap(),
+                &DecodingKey::from_rsa_pem(TEST_RSA_PUBLIC_KEY.as_bytes()).unwrap(),
+                &validation,
+            )
+            .is_err(),
             "a tampered signing input must NOT verify"
         );
     }
@@ -368,7 +358,7 @@ mod tests {
 
     #[test]
     fn installation_token_parses_token_and_expiry() {
-        let (key, _pub) = test_keypair();
+        let key = test_key();
         let minter = AppTokenMinter::new(
             crate::github::GITHUB_API,
             "123456",
@@ -385,7 +375,7 @@ mod tests {
 
     #[test]
     fn installation_token_non_2xx_never_fabricates_a_token() {
-        let (key, _pub) = test_keypair();
+        let key = test_key();
         let minter = AppTokenMinter::new(
             crate::github::GITHUB_API,
             "123456",

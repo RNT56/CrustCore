@@ -262,6 +262,13 @@ acceptance criteria, a **task summary** and the **chain status** (intact vs firs
 break). It is a CLI surface — setup/admin/inspect/emergency only, not a chat
 channel (invariant 16; [`CLAUDE.md` §4](../CLAUDE.md)).
 
+Real `crustcore run` and live daemon tasks persist their logs atomically under the
+state directory's `runs/` tree with mode 0600. The writer verifies the in-memory
+chain, writes and syncs a same-directory temporary file, renames it over the final
+path, and syncs the parent directory. A successful verifier receipt is encoded in
+its `ToolCallCompleted` payload; `inspect` also authenticates that receipt and joins
+its task/job/sequence back to the frame before reporting success.
+
 **JSONL export** (task P2.5) renders the binary log as one JSON object per line
 for human reading and tooling — the readability win NilCore got from JSONL, kept
 as an *export* so nano's on-disk format stays compact binary ([`ROADMAP.md` §1.1](../ROADMAP.md)).

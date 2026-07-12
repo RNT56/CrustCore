@@ -171,8 +171,9 @@ pub struct Event {
     pub resolution: Option<ApprovalResolution>,
     /// What this event consumed, folded into the task budget (invariant 11).
     pub budget_delta: Option<BudgetDelta>,
-    /// The budget *limits* a task is seeded with (on `TaskCreated`; `None` =
-    /// unlimited). Distinct from `budget_delta`, which is consumption.
+    /// The finite budget limits a task is seeded with (required on `TaskCreated`).
+    /// Missing or partially unlimited budgets fail closed: no task is created.
+    /// Distinct from `budget_delta`, which is consumption.
     pub budget: Option<Budget>,
     /// The lease holder for a job event (on `JobLeased` it sets the owner; on a
     /// later job event a mismatch marks it stale — invariant 12).
@@ -193,6 +194,14 @@ impl Event {
     #[must_use]
     pub fn inbound(kind: EventKind, seq: EventSeq, actor: Actor) -> Self {
         Event::base(kind, actor, Visibility::ModelVisible).with_seq(seq)
+    }
+
+    /// Builds a well-formed task-creation event with an explicit trusted budget.
+    #[must_use]
+    pub fn task_created(seq: EventSeq, actor: Actor, task_id: TaskId, budget: Budget) -> Self {
+        Event::inbound(EventKind::TaskCreated, seq, actor)
+            .with_task(task_id)
+            .with_budget(budget)
     }
 
     fn base(kind: EventKind, actor: Actor, visibility: Visibility) -> Self {

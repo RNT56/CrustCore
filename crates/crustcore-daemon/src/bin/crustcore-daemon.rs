@@ -36,12 +36,91 @@ fn main() -> ExitCode {
             print!("{}", usage());
             ExitCode::SUCCESS
         }
+        DaemonCommand::CredentialHelper { config, operation } => {
+            credential_helper(&config, &operation)
+        }
         DaemonCommand::Unknown(cmd) => {
             eprintln!("crustcore-daemon: unknown command '{cmd}'\n");
             print!("{}", usage());
             ExitCode::from(2)
         }
     }
+}
+
+fn credential_helper(config_path: &str, operation: &str) -> ExitCode {
+    use std::io::{Read as _, Write as _};
+
+    if matches!(operation, "store" | "erase") {
+        return ExitCode::SUCCESS;
+    }
+    if operation != "get" {
+        return ExitCode::from(2);
+    }
+    let path = std::path::Path::new(config_path);
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(_) => return ExitCode::from(1),
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > 16 * 1024 {
+        return ExitCode::from(1);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if meta.permissions().mode() & 0o077 != 0 {
+            return ExitCode::from(1);
+        }
+    }
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => zeroize::Zeroizing::new(bytes),
+        Err(_) => return ExitCode::from(1),
+    };
+    let Some(rest) = bytes.strip_prefix(b"CCGH1\n") else {
+        return ExitCode::from(1);
+    };
+    let Some(split) = rest.iter().position(|byte| *byte == b'\n') else {
+        return ExitCode::from(1);
+    };
+    let repo = match std::str::from_utf8(&rest[..split]) {
+        Ok(repo) if !repo.is_empty() => repo,
+        _ => return ExitCode::from(1),
+    };
+    let token = match std::str::from_utf8(&rest[split + 1..]) {
+        Ok(token) if !token.is_empty() && !token.chars().any(|ch| matches!(ch, '\r' | '\n')) => {
+            token
+        }
+        _ => return ExitCode::from(1),
+    };
+
+    let mut request_bytes = Vec::new();
+    if std::io::stdin()
+        .lock()
+        .take(8 * 1024 + 1)
+        .read_to_end(&mut request_bytes)
+        .is_err()
+        || request_bytes.len() > 8 * 1024
+    {
+        return ExitCode::from(1);
+    }
+    let request = crustcore_daemon::github::parse_credential_request(&String::from_utf8_lossy(
+        &request_bytes,
+    ));
+    if request.protocol != "https"
+        || request.host != crustcore_daemon::github::GITHUB_HOST
+        || crustcore_daemon::github::repo_from_credential_path(&request.path) != repo
+    {
+        return ExitCode::from(1);
+    }
+    let response =
+        zeroize::Zeroizing::new(crustcore_daemon::github::credential_helper_response(token));
+    if std::io::stdout()
+        .lock()
+        .write_all(response.as_bytes())
+        .is_err()
+    {
+        return ExitCode::from(1);
+    }
+    ExitCode::SUCCESS
 }
 
 // ---------------------------------------------------------------------------
@@ -75,6 +154,9 @@ pub struct ServeOpts {
     /// `--branch-prefix <prefix>`: the prefix the PR head branch is confined under
     /// (default `crustcore`).
     pub branch_prefix: Option<String>,
+    /// `--github-token-file <path>`: owner-only GitHub credential file used by the
+    /// trusted push/REST integration path.
+    pub github_token_file: Option<String>,
 }
 
 /// A parsed daemon subcommand.
@@ -90,6 +172,9 @@ pub enum DaemonCommand {
     Help,
     /// An unrecognized subcommand (carries the verb for the error reply).
     Unknown(String),
+    /// Internal git credential-helper mode. It is invoked only by the trusted
+    /// integration path; token bytes travel on the helper pipe, never argv/env.
+    CredentialHelper { config: String, operation: String },
 }
 
 /// Parses the argv tail into a [`DaemonCommand`]. Reads `CRUSTCORE_TELEGRAM_ALLOW` for
@@ -107,6 +192,10 @@ pub fn parse_args(args: &[String]) -> DaemonCommand {
         "doctor" => DaemonCommand::Doctor,
         "version" | "--version" | "-V" => DaemonCommand::Version,
         "help" | "--help" | "-h" => DaemonCommand::Help,
+        "credential-helper" if args.len() == 3 => DaemonCommand::CredentialHelper {
+            config: args[1].clone(),
+            operation: args[2].clone(),
+        },
         other => DaemonCommand::Unknown(other.to_string()),
     }
 }
@@ -133,6 +222,9 @@ pub fn parse_serve_opts(env_allow: &str, serve_args: &[String]) -> ServeOpts {
             a if a.starts_with("--base") => opts.base = flag_value(a, "--base", &mut it),
             a if a.starts_with("--branch-prefix") => {
                 opts.branch_prefix = flag_value(a, "--branch-prefix", &mut it)
+            }
+            a if a.starts_with("--github-token-file") => {
+                opts.github_token_file = flag_value(a, "--github-token-file", &mut it)
             }
             _ => {}
         }
@@ -263,6 +355,12 @@ fn serve_live(opts: &ServeOpts, allowlist: ChatAllowlist, token: String) -> Exit
         .unwrap_or_default();
 
     let task = build_task_spec(opts);
+    if opts.open_pr && task.as_ref().is_some_and(|task| task.pr.is_none()) {
+        eprintln!(
+            "crustcore-daemon serve: --open-pr requires both --repo owner/name and \
+             --github-token-file <owner-only-file>; PR mode is disabled"
+        );
+    }
     if task.is_none() {
         eprintln!(
             "crustcore-daemon serve: no --dir given — I'll chat, but task execution is off \
@@ -312,14 +410,18 @@ fn build_task_spec(opts: &ServeOpts) -> Option<crustcore_daemon::task::TaskSpec>
     // PR mode is opt-in (`--open-pr --repo owner/name`): a verified task opens a *draft*
     // PR, gated on a per-launch human approval. Without `--repo` it stays off (no PR).
     let pr = if opts.open_pr {
-        opts.repo.as_deref().map(|repo| PrTarget {
-            repo: repo.to_string(),
-            base_branch: opts.base.clone().unwrap_or_else(|| "main".to_string()),
-            branch_prefix: opts
-                .branch_prefix
-                .clone()
-                .unwrap_or_else(|| "crustcore".to_string()),
-        })
+        opts.repo
+            .as_deref()
+            .zip(opts.github_token_file.as_deref())
+            .map(|(repo, credential_file)| PrTarget {
+                repo: repo.to_string(),
+                base_branch: opts.base.clone().unwrap_or_else(|| "main".to_string()),
+                branch_prefix: opts
+                    .branch_prefix
+                    .clone()
+                    .unwrap_or_else(|| "crustcore".to_string()),
+                credential_file: credential_file.into(),
+            })
     } else {
         None
     };
@@ -388,6 +490,9 @@ COMMANDS:
                --repo <o/n>       Repository draft PRs target (owner/name).
                --base <branch>    Base branch a draft PR targets (default main).
                --branch-prefix <p>  Head-branch prefix (default crustcore).
+               --github-token-file <path>
+                                  Owner-only fine-grained PAT/App-token file used by
+                                  the trusted credential helper and REST client.
                Requires CRUSTCORE_TELEGRAM_TOKEN=<BotFather token> and a `live` build.
     doctor     Report runtime environment readiness.
     version    Print the daemon version.
@@ -480,15 +585,35 @@ mod tests {
                 "--base=develop",
                 "--branch-prefix",
                 "bots",
+                "--github-token-file=/secure/github.token",
             ]),
         );
         assert!(opts.open_pr);
         assert_eq!(opts.repo.as_deref(), Some("owner/name"));
         assert_eq!(opts.base.as_deref(), Some("develop"));
         assert_eq!(opts.branch_prefix.as_deref(), Some("bots"));
+        assert_eq!(
+            opts.github_token_file.as_deref(),
+            Some("/secure/github.token")
+        );
         // Off by default (no --open-pr → no PR mode even if --repo is given).
         let off = parse_serve_opts("", &args(&["--repo", "owner/name"]));
         assert!(!off.open_pr);
+    }
+
+    #[test]
+    fn credential_helper_mode_requires_config_and_operation() {
+        assert_eq!(
+            parse_args(&args(&["credential-helper", "/tmp/config", "get"])),
+            DaemonCommand::CredentialHelper {
+                config: "/tmp/config".to_string(),
+                operation: "get".to_string(),
+            }
+        );
+        assert_eq!(
+            parse_args(&args(&["credential-helper", "/tmp/config"])),
+            DaemonCommand::Unknown("credential-helper".to_string())
+        );
     }
 
     #[test]

@@ -5,6 +5,13 @@
 //! sockets stay behind ignored smoke tests elsewhere; this suite exercises the
 //! verifier-owned completion and draft-PR decision loops with deterministic fixtures.
 
+fn sandbox_cap(scope: crustcore_types::ScopeId) -> crustcore_policy::SandboxExecCap {
+    crustcore_policy::PolicySnapshot::new(crustcore_policy::RiskProfile::Supervised)
+        .authorize_reversible(scope)
+        .expect("supervised test policy should authorize sandbox execution")
+        .sandbox_exec(scope)
+}
+
 /// Golden (P5.6 / P16.7), the flagship task: a repo has a **failing test**; a worker
 /// fixes it in a disposable worktree, and **only the verifier completes** the task
 /// (DoD #3/#4/#5). It exercises the load-bearing properties through public APIs:
@@ -21,7 +28,6 @@ fn golden_fix_failing_test() {
     use crustcore_backend::verify::{run_verify, VerifyIds, VerifyOutcome, VerifySpec};
     use crustcore_backend::worker::{run_external_worker, ExternalCommandBackend, WorkerInput};
     use crustcore_backend::{complete_task, PatchRef};
-    use crustcore_policy::SandboxExecCap;
     use crustcore_receipts::{MacKey, ReceiptChain};
     use crustcore_sandbox::SandboxProfile;
     use crustcore_types::{EventSeq, JobId, ScopeId, TaskId, Timestamp, ToolCallId};
@@ -66,10 +72,7 @@ fn golden_fix_failing_test() {
     let manager = WorktreeManager::with_base(&repo, &wt_base);
     let worktree = manager.create_for(TaskId(1)).expect("create worktree");
     let profile = SandboxProfile::default_sandboxed();
-    let cap = SandboxExecCap {
-        profile: ScopeId(1),
-        scope: ScopeId(1),
-    };
+    let cap = sandbox_cap(ScopeId(1));
     let ids = VerifyIds {
         task_id: TaskId(1),
         job_id: JobId(1),
@@ -203,7 +206,6 @@ fn golden_add_small_feature() {
     use crustcore_backend::verify::{run_verify, VerifyIds, VerifyOutcome, VerifySpec};
     use crustcore_backend::worker::{run_external_worker, ExternalCommandBackend, WorkerInput};
     use crustcore_backend::{complete_task, PatchRef};
-    use crustcore_policy::SandboxExecCap;
     use crustcore_receipts::{MacKey, ReceiptChain};
     use crustcore_sandbox::SandboxProfile;
     use crustcore_types::{EventSeq, JobId, ScopeId, TaskId, Timestamp, ToolCallId};
@@ -247,10 +249,7 @@ fn golden_add_small_feature() {
     let manager = WorktreeManager::with_base(&repo, &wt_base);
     let worktree = manager.create_for(TaskId(1)).expect("create worktree");
     let profile = SandboxProfile::default_sandboxed();
-    let cap = SandboxExecCap {
-        profile: ScopeId(1),
-        scope: ScopeId(1),
-    };
+    let cap = sandbox_cap(ScopeId(1));
     let ids = VerifyIds {
         task_id: TaskId(1),
         job_id: JobId(1),
@@ -363,7 +362,7 @@ fn golden_issue_to_pr_flow() {
         create_pull_body, CheckState, CreatePrRequest, GitHubApi, RestGitHub, GITHUB_API,
     };
     use crustcore_net::transport::{Canned, ReplayClient};
-    use crustcore_policy::{AuthorizedUser, GitHubWriteCap, SandboxExecCap};
+    use crustcore_policy::AuthorizedUser;
     use crustcore_receipts::{MacKey, ReceiptChain};
     use crustcore_sandbox::SandboxProfile;
     use crustcore_secrets::Redactor;
@@ -424,10 +423,7 @@ fn golden_issue_to_pr_flow() {
     let manager = WorktreeManager::with_base(&repo, &wt_base);
     let worktree = manager.create_for(TaskId(7)).expect("create worktree");
     let profile = SandboxProfile::default_sandboxed();
-    let cap = SandboxExecCap {
-        profile: ScopeId(7),
-        scope: ScopeId(7),
-    };
+    let cap = sandbox_cap(ScopeId(7));
     let ids = VerifyIds {
         task_id: TaskId(7),
         job_id: JobId(7),
@@ -496,13 +492,10 @@ fn golden_issue_to_pr_flow() {
             other => panic!("issue fix must mint a VerifiedPatch, got {other:?}"),
         };
 
-        let write_cap = GitHubWriteCap {
-            repo: RepoRef(BoundedText::truncated("owner/name", 64)),
-            branch_prefix: BranchPrefix(BoundedText::truncated("crustcore/", 64)),
-            scope: ScopeId(7),
-        };
-        let approval = AuthorizedUser::bind(42).approve(
-            write_cap,
+        let (_, approval) = AuthorizedUser::bind(42).approve_github_write(
+            RepoRef(BoundedText::truncated("owner/name", 64)),
+            BranchPrefix(BoundedText::truncated("crustcore/", 64)),
+            ScopeId(7),
             ApprovalId(700),
             Timestamp::from_millis(10_000),
         );

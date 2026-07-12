@@ -49,7 +49,7 @@ pub mod credsource;
 pub mod embed;
 pub mod github;
 /// GitHub App RS256 JWT minting + installation-token exchange (P10/B2-gh-app). Behind
-/// the `github-app` feature so the RSA/SHA-256/base64 crates it needs never enter the
+/// the `github-app` feature so the AWS-LC-backed JWT stack never enters the
 /// default (or nano) graph; the build/sign/verify + parse logic is CI-tested.
 #[cfg(feature = "github-app")]
 pub mod githubapp;

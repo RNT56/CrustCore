@@ -10,3 +10,4 @@ description = "Tool receipts and MAC/hash chaining for CrustCore (anti-hallucina
 
 [dependencies]
 crustcore-types = { workspace = true }
+crustcore-zeroize = { workspace = true }

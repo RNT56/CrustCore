@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crustcore_path::WorktreeRoot;
-use crustcore_policy::{FsReadCap, SandboxExecCap};
+use crustcore_policy::{FsReadCap, PolicySnapshot, RiskProfile, SandboxExecCap};
 use crustcore_runner::{CommandResult, CommandSpec};
 use crustcore_sandbox::{run_command, SandboxError, SandboxProfile};
 use crustcore_types::hash::sha256;
@@ -392,6 +392,9 @@ pub struct ChangedFile {
 /// result** — no patch is produced, so nothing can be verified or completed.
 #[derive(Debug)]
 pub enum WorkerError {
+    /// The worker returned without changing the disposable worktree. A coding
+    /// task cannot complete from a clean baseline plus a generic passing test.
+    NoChanges,
     /// A path outside the worktree changed during the worker run (invariant 6/7;
     /// `docs/backend-contract.md` §4.3). The result is rejected.
     OutOfRootWrite(String),
@@ -408,6 +411,7 @@ pub enum WorkerError {
 impl core::fmt::Display for WorkerError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            WorkerError::NoChanges => write!(f, "worker produced no worktree changes"),
             WorkerError::OutOfRootWrite(p) => {
                 write!(f, "worker wrote outside the worktree: {p}")
             }
@@ -516,6 +520,9 @@ where
     // Re-derive the truth from the worktree: confined changed files + real diff.
     let changed_files = confine_worktree_changes(worktree)?;
     let (status_bytes, diff) = extract_change(worktree)?;
+    if changed_files.is_empty() {
+        return Err(WorkerError::NoChanges);
+    }
 
     // Content-address the patch over the worktree's OWN observed change state —
     // never the worker's self-reported diff.
@@ -653,10 +660,10 @@ fn extract_change(worktree: &WorktreeRoot) -> Result<(Vec<u8>, Vec<u8>), WorkerE
 /// Builds a read capability for the worktree (a fresh confined root; scope is a
 /// placeholder until the kernel wires real scopes through the worker path).
 fn read_cap(worktree: &WorktreeRoot) -> FsReadCap {
-    FsReadCap {
-        root: worktree.clone(),
-        scope: ScopeId(0),
-    }
+    PolicySnapshot::new(RiskProfile::Supervised)
+        .authorize_reversible(ScopeId(0))
+        .expect("supervised policy permits confined reads")
+        .fs_read(worktree.clone())
 }
 
 /// Splits `git status --porcelain -z` output into records. With `-z`, records are
@@ -1215,6 +1222,21 @@ mod tests {
         // self_claimed_done is carried but advisory.
         assert!(product.result.self_claimed_done);
         assert!(matches!(product.patch, UnverifiedPatch(_)));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn seam_rejects_a_noop_worker_even_when_it_claims_done() {
+        let Some((base, _dir, wt)) = git_worktree("noop") else {
+            return;
+        };
+        let backend = ExternalCommandBackend::new("/bin/true", vec![]);
+        let input = WorkerInput::for_task(TaskId(1), "fix the code", &wt);
+        let err = run_external_worker_with(&backend, &input, &wt, |_spec| {
+            Ok(fake_result(b"[[CRUSTCORE_DONE]]\n"))
+        })
+        .unwrap_err();
+        assert!(matches!(err, WorkerError::NoChanges), "{err}");
         let _ = std::fs::remove_dir_all(&base);
     }
 
