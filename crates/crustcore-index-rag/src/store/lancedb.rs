@@ -273,7 +273,7 @@ impl LanceDbVectorStore {
         let payload = serde_json::to_vec(&body).map_err(|_| StoreSendError::Serialize)?;
         let req = http::agent()
             .post(&self.insert_url())
-            .set("Content-Type", "application/json");
+            .header("Content-Type", "application/json");
         let req = http::apply_auth(req, &self.config.auth, ctx)?;
         send_expecting_ok(req, &payload).map(|(status, _body)| status)
     }
@@ -297,7 +297,7 @@ impl LanceDbVectorStore {
         let payload = serde_json::to_vec(&body).map_err(|_| StoreSendError::Serialize)?;
         let req = http::agent()
             .post(&self.query_url())
-            .set("Content-Type", "application/json");
+            .header("Content-Type", "application/json");
         let req = http::apply_auth(req, &self.config.auth, ctx)?;
         let (_status, resp_body) = send_expecting_ok(req, &payload)?;
         let json: serde_json::Value =
@@ -319,7 +319,7 @@ impl LanceDbVectorStore {
         let payload = serde_json::to_vec(&body).map_err(|_| StoreSendError::Serialize)?;
         let req = http::agent()
             .post(&self.delete_url())
-            .set("Content-Type", "application/json");
+            .header("Content-Type", "application/json");
         let req = http::apply_auth(req, &self.config.auth, ctx)?;
         send_expecting_ok(req, &payload).map(|(status, _body)| status)
     }
@@ -328,15 +328,20 @@ impl LanceDbVectorStore {
 /// Sends `payload` on `req`, returning `(status, body)` on a 2xx and mapping a non-2xx to
 /// [`StoreSendError::Status`] and a transport failure to [`StoreSendError::Transport`]. The
 /// error never carries the request body or the auth header.
-fn send_expecting_ok(req: ureq::Request, payload: &[u8]) -> Result<(u16, String), StoreSendError> {
-    match req.send_bytes(payload) {
-        Ok(resp) => {
-            let status = resp.status();
-            let body = resp.into_string().unwrap_or_default();
+fn send_expecting_ok(
+    req: http::StoreRequest,
+    payload: &[u8],
+) -> Result<(u16, String), StoreSendError> {
+    match req.send(payload) {
+        Ok(mut resp) => {
+            let status = resp.status().as_u16();
+            if !(200..300).contains(&status) {
+                return Err(StoreSendError::Status(status));
+            }
+            let body = resp.body_mut().read_to_string().unwrap_or_default();
             Ok((status, body))
         }
-        Err(ureq::Error::Status(status, _resp)) => Err(StoreSendError::Status(status)),
-        Err(ureq::Error::Transport(t)) => Err(StoreSendError::Transport(t.to_string())),
+        Err(error) => Err(StoreSendError::Transport(error.to_string())),
     }
 }
 

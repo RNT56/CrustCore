@@ -61,10 +61,15 @@ pub fn bound_hits(mut hits: Vec<StoreHit>) -> Vec<StoreHit> {
 /// Builds the shared blocking [`ureq`] agent with the bounded timeout.
 #[must_use]
 pub fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+    ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS)))
+        .http_status_as_error(false)
         .build()
+        .new_agent()
 }
+
+/// A POST request builder accepted by the external vector-store adapters.
+pub type StoreRequest = ureq::RequestBuilder<ureq::typestate::WithBody>;
 
 /// How an external store authenticates. **Non-secret config**: it names *which*
 /// broker-held secret to use (by [`crustcore_secrets::SecretHandle`]) and *how* to frame
@@ -176,10 +181,10 @@ impl EndpointAuth {
 /// [`StoreSendError::Auth`] if the broker refuses, the minted view is consumed/expired, or
 /// the token is not header-safe UTF-8.
 pub fn apply_auth<S: crustcore_secrets::SecretStore>(
-    req: ureq::Request,
+    req: StoreRequest,
     auth: &EndpointAuth,
     ctx: &BrokerAuth<'_, S>,
-) -> Result<ureq::Request, StoreSendError> {
+) -> Result<StoreRequest, StoreSendError> {
     match auth {
         EndpointAuth::None => Ok(req),
         EndpointAuth::BrokerBearer(handle) => {
@@ -193,7 +198,7 @@ pub fn apply_auth<S: crustcore_secrets::SecretStore>(
                 crustcore_secrets::CredentialProxy::bearer(&view, ctx.now, handle.label.as_str())
                     .map_err(|_| StoreSendError::Auth)?;
             let value = std::str::from_utf8(inj.reveal()).map_err(|_| StoreSendError::Auth)?;
-            Ok(req.set(inj.header_name(), value))
+            Ok(req.header(inj.header_name(), value))
         }
         EndpointAuth::BrokerHeader {
             header_name,
@@ -205,11 +210,11 @@ pub fn apply_auth<S: crustcore_secrets::SecretStore>(
                 .map_err(|_| StoreSendError::Auth)?;
             // Custom-header path (e.g. Qdrant `api-key`): expose the one-shot view's bytes
             // ONCE and set them directly as the header value. The bytes never enter a
-            // String we keep, a log, or model context; `set` copies into ureq's internal
+            // String we keep, a log, or model context; `header` copies into ureq's internal
             // header map for this single request only.
             let token = view.expose(ctx.now).map_err(|_| StoreSendError::Auth)?;
             let value = std::str::from_utf8(token).map_err(|_| StoreSendError::Auth)?;
-            Ok(req.set(header_name, value))
+            Ok(req.header(header_name, value))
         }
     }
 }

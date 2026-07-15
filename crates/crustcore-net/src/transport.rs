@@ -256,10 +256,36 @@ impl UreqClient {
     /// A client with a bounded request timeout.
     #[must_use]
     pub fn new() -> Self {
-        let agent = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs(120))
-            .build();
+        let agent = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(120)))
+            // Preserve the v2 contract: HTTP error statuses are successful
+            // round-trips whose bounded body is returned to the caller.
+            .http_status_as_error(false)
+            .build()
+            .new_agent();
         UreqClient { agent }
+    }
+
+    fn map_error(error: ureq::Error) -> TransportError {
+        match error {
+            ureq::Error::Timeout(_) => TransportError::Timeout,
+            ureq::Error::Io(error) => TransportError::Io(error.to_string()),
+            other => TransportError::Connect(other.to_string()),
+        }
+    }
+
+    fn read_body_bounded(
+        mut response: ureq::http::Response<ureq::Body>,
+    ) -> Result<String, TransportError> {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        response
+            .body_mut()
+            .as_reader()
+            .take(MAX_BODY_BYTES as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|error| TransportError::Io(error.to_string()))?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     fn read_bounded(reader: impl std::io::Read, on_line: &mut dyn FnMut(&str)) {
@@ -295,67 +321,38 @@ impl HttpClient for UreqClient {
     ) -> Result<HttpResponse, TransportError> {
         let mut req = self.agent.post(url);
         for (k, v) in headers {
-            req = req.set(k, v);
+            req = req.header(k.as_str(), v.as_str());
         }
-        match req.send_bytes(body) {
+        match req.send(body) {
             Ok(resp) => {
-                let status = resp.status();
+                let status = resp.status().as_u16();
                 if (200..300).contains(&status) {
-                    Self::read_bounded(resp.into_reader(), on_line);
+                    Self::read_bounded(resp.into_body().into_reader(), on_line);
                     Ok(HttpResponse {
                         status,
                         body: String::new(),
                     })
                 } else {
-                    let body = resp.into_string().unwrap_or_default();
-                    Ok(HttpResponse {
-                        status,
-                        body: bound(&body),
-                    })
+                    let body = Self::read_body_bounded(resp)?;
+                    Ok(HttpResponse { status, body })
                 }
             }
-            // ureq surfaces a non-2xx as Err(Status); that is still a round-trip.
-            Err(ureq::Error::Status(status, resp)) => {
-                let body = resp.into_string().unwrap_or_default();
-                Ok(HttpResponse {
-                    status,
-                    body: bound(&body),
-                })
-            }
-            Err(ureq::Error::Transport(t)) => {
-                let kind = t.kind();
-                let msg = t.to_string();
-                if matches!(kind, ureq::ErrorKind::Io) && msg.contains("timed out") {
-                    Err(TransportError::Timeout)
-                } else {
-                    Err(TransportError::Connect(msg))
-                }
-            }
+            Err(error) => Err(Self::map_error(error)),
         }
     }
 
     fn get(&self, url: &str, headers: &[(String, String)]) -> Result<HttpResponse, TransportError> {
         let mut req = self.agent.get(url);
         for (k, v) in headers {
-            req = req.set(k, v);
+            req = req.header(k.as_str(), v.as_str());
         }
         match req.call() {
             Ok(resp) => {
-                let status = resp.status();
-                let body = resp.into_string().unwrap_or_default();
-                Ok(HttpResponse {
-                    status,
-                    body: bound(&body),
-                })
+                let status = resp.status().as_u16();
+                let body = Self::read_body_bounded(resp)?;
+                Ok(HttpResponse { status, body })
             }
-            Err(ureq::Error::Status(status, resp)) => {
-                let body = resp.into_string().unwrap_or_default();
-                Ok(HttpResponse {
-                    status,
-                    body: bound(&body),
-                })
-            }
-            Err(ureq::Error::Transport(t)) => Err(TransportError::Connect(t.to_string())),
+            Err(error) => Err(Self::map_error(error)),
         }
     }
 
@@ -367,25 +364,15 @@ impl HttpClient for UreqClient {
     ) -> Result<HttpResponse, TransportError> {
         let mut req = self.agent.post(url);
         for (k, v) in headers {
-            req = req.set(k, v);
+            req = req.header(k.as_str(), v.as_str());
         }
-        match req.send_bytes(body) {
+        match req.send(body) {
             Ok(resp) => {
-                let status = resp.status();
-                let body = resp.into_string().unwrap_or_default();
-                Ok(HttpResponse {
-                    status,
-                    body: bound(&body),
-                })
+                let status = resp.status().as_u16();
+                let body = Self::read_body_bounded(resp)?;
+                Ok(HttpResponse { status, body })
             }
-            Err(ureq::Error::Status(status, resp)) => {
-                let body = resp.into_string().unwrap_or_default();
-                Ok(HttpResponse {
-                    status,
-                    body: bound(&body),
-                })
-            }
-            Err(ureq::Error::Transport(t)) => Err(TransportError::Connect(t.to_string())),
+            Err(error) => Err(Self::map_error(error)),
         }
     }
 }
@@ -426,6 +413,21 @@ mod tests {
         assert_eq!(
             client.get("u", &[]).unwrap_err(),
             TransportError::Io("replay exhausted".into())
+        );
+    }
+
+    #[cfg(feature = "live")]
+    #[test]
+    fn ureq_v3_preserves_status_responses_and_typed_failures() {
+        let client = UreqClient::new();
+        assert!(!client.agent.config().http_status_as_error());
+        assert_eq!(
+            UreqClient::map_error(ureq::Error::Timeout(ureq::Timeout::Global)),
+            TransportError::Timeout
+        );
+        assert_eq!(
+            UreqClient::map_error(ureq::Error::Io(std::io::Error::other("read failed"))),
+            TransportError::Io("read failed".into())
         );
     }
 }

@@ -438,9 +438,11 @@ impl HttpMcp {
     /// A remote MCP transport posting to `url`, with a bounded request timeout.
     #[must_use]
     pub fn new(url: impl Into<String>) -> Self {
-        let agent = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs(120))
-            .build();
+        let agent = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(120)))
+            .http_status_as_error(false)
+            .build()
+            .new_agent();
         HttpMcp {
             agent,
             url: url.into(),
@@ -489,23 +491,22 @@ impl McpTransport for HttpMcp {
         let mut req = self
             .agent
             .post(&self.url)
-            .set("Content-Type", "application/json");
+            .header("Content-Type", "application/json");
         if let Some(h) = auth {
             // The ONLY place the secret bytes touch the wire. `reveal()` yields the full
             // header value (e.g. `Bearer <token>`); it is set on the request and never
             // captured into a variable that could reach an error/log (invariants 1–3).
             let value = std::str::from_utf8(h.reveal())
                 .map_err(|_| McpError::Transport("auth header is not valid UTF-8".into()))?;
-            req = req.set(h.header_name(), value);
+            req = req.header(h.header_name(), value);
         }
 
-        match req.send_bytes(&body) {
-            // 2xx (and ureq's non-2xx `Err(Status)` below) are both round-trips: the
+        match req.send(&body) {
+            // 2xx and non-2xx responses are both round-trips: the
             // JSON-RPC layer carries success *and* application errors in a 200 body, so
             // we parse the body either way. Error mapping never references `auth`.
-            Ok(resp) => Self::parse_response(resp.into_reader()),
-            Err(ureq::Error::Status(_status, resp)) => Self::parse_response(resp.into_reader()),
-            Err(ureq::Error::Transport(t)) => Err(McpError::Transport(t.to_string())),
+            Ok(resp) => Self::parse_response(resp.into_body().into_reader()),
+            Err(error) => Err(McpError::Transport(error.to_string())),
         }
     }
 }
