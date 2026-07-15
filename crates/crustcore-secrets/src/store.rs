@@ -17,7 +17,7 @@
 use std::path::Path;
 
 use aes_gcm::aead::{Aead, KeyInit};
-use aes_gcm::{Aes256Gcm, Key, Nonce};
+use aes_gcm::{Aes256Gcm, Nonce};
 
 use crate::{InMemoryStore, SecretId};
 
@@ -32,6 +32,8 @@ const HEADER_LEN: usize = 4 + 1 + SALT_LEN + NONCE_LEN; // magic|version|salt|no
 const MAX_ENTRIES: u32 = 4096;
 const MAX_LABEL: usize = 1024;
 const MAX_VALUE: usize = 64 * 1024;
+
+type AesNonce = Nonce<aes_gcm::aead::consts::U12>;
 
 /// scrypt cost parameters (interactive-strong: N=2^15, r=8, p=1, 32-byte key).
 const SCRYPT_LOG_N: u8 = 15;
@@ -89,8 +91,8 @@ struct ScrubbedKey(zeroize::Zeroizing<[u8; 32]>);
 
 /// Derives the 32-byte AEAD key from `passphrase` + `salt` via scrypt.
 fn derive_key(passphrase: &[u8], salt: &[u8]) -> Result<[u8; 32], VaultError> {
-    let params = scrypt::Params::new(SCRYPT_LOG_N, SCRYPT_R, SCRYPT_P, 32)
-        .map_err(|_| VaultError::Crypto)?;
+    let params =
+        scrypt::Params::new(SCRYPT_LOG_N, SCRYPT_R, SCRYPT_P).map_err(|_| VaultError::Crypto)?;
     let mut key = [0u8; 32];
     scrypt::scrypt(passphrase, salt, &params, &mut key).map_err(|_| VaultError::Crypto)?;
     Ok(key)
@@ -129,13 +131,14 @@ pub fn seal_vault(
 
     let mut salt = [0u8; SALT_LEN];
     let mut nonce = [0u8; NONCE_LEN];
-    getrandom::getrandom(&mut salt).map_err(|_| VaultError::Crypto)?;
-    getrandom::getrandom(&mut nonce).map_err(|_| VaultError::Crypto)?;
+    getrandom::fill(&mut salt).map_err(|_| VaultError::Crypto)?;
+    getrandom::fill(&mut nonce).map_err(|_| VaultError::Crypto)?;
 
     let key = ScrubbedKey(zeroize::Zeroizing::new(derive_key(passphrase, &salt)?));
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.0.as_ref()));
+    let cipher = Aes256Gcm::new_from_slice(key.0.as_ref()).map_err(|_| VaultError::Crypto)?;
+    let nonce_array = <&AesNonce>::try_from(nonce.as_slice()).map_err(|_| VaultError::Crypto)?;
     let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce), plaintext.0.as_ref())
+        .encrypt(nonce_array, plaintext.0.as_ref())
         .map_err(|_| VaultError::Crypto)?;
 
     let mut out = Vec::with_capacity(HEADER_LEN + ciphertext.len());
@@ -169,12 +172,13 @@ pub fn open_vault(path: &Path, passphrase: &[u8]) -> Result<InMemoryStore, Vault
     let ciphertext = &bytes[HEADER_LEN..];
 
     let key = ScrubbedKey(zeroize::Zeroizing::new(derive_key(passphrase, salt)?));
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.0.as_ref()));
+    let cipher = Aes256Gcm::new_from_slice(key.0.as_ref()).map_err(|_| VaultError::Crypto)?;
+    let nonce_array = <&AesNonce>::try_from(nonce).map_err(|_| VaultError::BadFormat)?;
     // AEAD: a wrong key (passphrase) or any tamper makes this Err — fail closed.
     // `key` + `plaintext` are scrubbed on drop on every path (success or decode error).
     let plaintext = Scrubbed(zeroize::Zeroizing::new(
         cipher
-            .decrypt(Nonce::from_slice(nonce), ciphertext)
+            .decrypt(nonce_array, ciphertext)
             .map_err(|_| VaultError::Decrypt)?,
     ));
     decode_entries(&plaintext.0)

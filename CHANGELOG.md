@@ -378,6 +378,13 @@ agent/PR/role/size/invariant audit trail.
 
 ### Fixed
 
+- **Dependency compatibility repair (PR #93).** Migrated every live `ureq` adapter to
+  the 3.x request, response-body, timeout, and typed-error APIs while preserving bounded
+  response reads, non-2xx body handling, and secret-header confinement. Updated the
+  encrypted vault for the current `aes-gcm`, `scrypt`, and `getrandom` APIs without
+  changing its file format or KDF parameters; the vault round-trip, wrong-passphrase,
+  tamper, and plaintext-at-rest tests remain green.
+
 - **End-to-end trust-boundary hardening.** macOS Seatbelt now denies host reads and
   writes by default, uses a private per-run temp directory, and binds every sandbox
   capability to the exact profile it authorizes. Capability fields are sealed behind
@@ -408,6 +415,12 @@ agent/PR/role/size/invariant audit trail.
   token-stream). Non-nano + docs; one new bound test; `cargo xtask verify` green.
 
 ### Changed
+
+- **Rust security and maintenance dependencies.** Updated `aes-gcm`, `scrypt`,
+  `getrandom`, `ureq`, `tree-sitter`, `axum`, `syn`, `quote`, and `trybuild` through
+  Dependabot PR #93. All updated network, crypto, parser, macro, and test-only packages
+  remain feature-gated outside nano; the forbidden-dependency and nano-size gates prove
+  no heavy dependency entered the trusted kernel graph.
 
 - **Supply-chain baseline hardened.** GitHub App RS256 signing moved from the
   RustCrypto `rsa` crate with its unpatched timing advisory to `jsonwebtoken` backed
@@ -440,6 +453,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-07-15 | dependency-maintenance | Repair grouped security/maintenance updates: migrate all `ureq` 3 live adapters plus vault crypto/RNG APIs; preserve bounded bodies, secret confinement, authenticated vault format, and feature isolation | `#93` / `dependabot/cargo/rust-security-and-maintenance-d4da4f9c56` | Codex (Supervisor/Implementer) | 0 kB (444.6 KiB measured; non-nano deps) | Verifies 1-3, 11, 13, 19, 20; no secret exposure, full verifier required |
 | 2026-07-12 | end-to-end-hardening | Sandbox/capability/budget seals; non-cloneable verifier evidence; durable event-log + receipt join; real confined verified-patch-to-draft-PR path; unique daemon task ids; AWS-LC JWT migration; supply-chain policy | `codex/end-to-end-hardening` | Codex (Supervisor/Implementer) | +16.5 KiB local macOS nano (444.6 KiB total, 55.6%) | Enforces 1-3, 6-14, 18-20; completion now requires persisted joined evidence |
 | 2026-06-28 | v0.6/E.1 | Cockpit view core: `build_cockpit` composes TaskDetail/EvidenceSummary(refs-only)/ApprovalForm(op-hash-bound) from the read-model, bounded; renders evidence, mints nothing. Completes Phase E + all of v0.6 | `claude/v06-e1-cockpit` | Claude (Implementer) | 0 kB (crustcore-dev) | Enforces 2, 5, 11, 13, 14; read-model only, op-bound approvals, no minting |
 | 2026-06-28 | v0.6/E.3 | `slack::SlackAllowlist` + `normalize_message` mirroring Telegram (same RuntimeEvent stream + gates, deny-all empty) + redacted `render_to_slack`; live API `#[ignore]`d | `claude/v06-e3-slack` | Claude (Implementer) | 0 kB (daemon-only) | Enforces 1-5, 7, 8, 11, 15, 16; opt-in, redacted, same dispatch as Telegram |

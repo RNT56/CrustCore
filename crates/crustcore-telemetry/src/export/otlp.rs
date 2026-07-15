@@ -230,17 +230,18 @@ impl OtlpExporter {
             return Err(OtlpSendError::Auth);
         }
         let payload = serde_json::to_vec(body).map_err(|_| OtlpSendError::Serialize)?;
-        let agent = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
-            .build();
+        let agent = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS)))
+            .http_status_as_error(false)
+            .build()
+            .new_agent();
         match agent
             .post(url)
-            .set("Content-Type", "application/json")
-            .send_bytes(&payload)
+            .header("Content-Type", "application/json")
+            .send(&payload)
         {
-            Ok(resp) => Ok(resp.status()),
-            Err(ureq::Error::Status(status, _resp)) => Ok(status),
-            Err(ureq::Error::Transport(t)) => Err(OtlpSendError::Transport(t.to_string())),
+            Ok(resp) => Ok(resp.status().as_u16()),
+            Err(error) => Err(OtlpSendError::Transport(error.to_string())),
         }
     }
 
@@ -270,10 +271,12 @@ impl OtlpExporter {
     ) -> Result<u16, OtlpSendError> {
         let payload = serde_json::to_vec(body).map_err(|_| OtlpSendError::Serialize)?;
 
-        let agent = ureq::AgentBuilder::new()
-            .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
-            .build();
-        let mut req = agent.post(url).set("Content-Type", "application/json");
+        let agent = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS)))
+            .http_status_as_error(false)
+            .build()
+            .new_agent();
+        let mut req = agent.post(url).header("Content-Type", "application/json");
 
         // Resolve the auth header at send time, through the broker only. The injection
         // holds the secret bytes; we read them ONCE into the request header and never
@@ -291,16 +294,14 @@ impl OtlpExporter {
             // header-safe UTF-8) straight to ureq's header setter.
             let header_value =
                 std::str::from_utf8(inj.reveal()).map_err(|_| OtlpSendError::Auth)?;
-            req = req.set(inj.header_name(), header_value);
+            req = req.header(inj.header_name(), header_value);
         }
 
-        match req.send_bytes(&payload) {
-            Ok(resp) => Ok(resp.status()),
-            // A non-2xx is still a round-trip (ureq surfaces it as Err(Status)).
-            Err(ureq::Error::Status(status, _resp)) => Ok(status),
+        match req.send(&payload) {
+            Ok(resp) => Ok(resp.status().as_u16()),
             // A transport error reports only ureq's connection diagnostic, never the
             // request body or the auth header.
-            Err(ureq::Error::Transport(t)) => Err(OtlpSendError::Transport(t.to_string())),
+            Err(error) => Err(OtlpSendError::Transport(error.to_string())),
         }
     }
 }

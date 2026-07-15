@@ -17,9 +17,9 @@ crustcore-zeroize = { workspace = true }
 # pulls NO crypto crate. AES-256-GCM AEAD + scrypt KDF + OS RNG; all RustCrypto /
 # std-adjacent and well-maintained. `xtask forbidden-deps` asserts none of these
 # enter the nano dependency graph. (docs/secrets.md §6; CLAUDE.md §5.1.)
-aes-gcm = { version = "0.10", optional = true }
-scrypt = { version = "0.11", default-features = false, optional = true }
-getrandom = { version = "0.2", optional = true }
+aes-gcm = { version = "0.11", optional = true }
+scrypt = { version = "0.12", default-features = false, optional = true }
+getrandom = { version = "0.4", optional = true }
 zeroize = { version = "1.9", features = ["alloc"], optional = true }
 
 [features]
