@@ -34,7 +34,7 @@ ureq = { version = "3", optional = true }
 # helper + nano, which never links this crate at all) pulls none of them.
 # `jsonwebtoken` is pinned to its AWS-LC backend: constant-time, audited crypto
 # without the RustCrypto `rsa` crate's unpatched Marvin timing advisory.
-jsonwebtoken = { version = "10.4", default-features = false, features = ["aws_lc_rs", "use_pem"], optional = true }
+jsonwebtoken = { version = "11.0", default-features = false, features = ["aws_lc_rs", "use_pem"], optional = true }
 
 [features]
 # Enables the real network transport (`UreqClient`) + the `live_engine` builder, and
