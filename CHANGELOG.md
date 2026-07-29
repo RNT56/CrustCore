@@ -416,6 +416,12 @@ agent/PR/role/size/invariant audit trail.
 
 ### Changed
 
+- **GitHub Actions checkout maintenance (PR #95).** Updated every CI and release
+  workflow use of `actions/checkout` from immutable SHA-pinned v7.0.0 to v7.0.1.
+  The patch release fixes unsafe-PR-check handling, branch whitespace parsing,
+  and escaping for values passed to `git config --unset`; workflow permissions
+  and release behavior are otherwise unchanged.
+
 - **Rust security and maintenance dependencies.** Updated `aes-gcm`, `scrypt`,
   `getrandom`, `ureq`, `tree-sitter`, `axum`, `syn`, `quote`, and `trybuild` through
   Dependabot PR #93. All updated network, crypto, parser, macro, and test-only packages
@@ -453,6 +459,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-07-29 | dependency-maintenance | Pin all CI/release checkout steps to `actions/checkout` v7.0.1 and retain immutable-SHA supply-chain policy | `#95` / `dependabot/github_actions/actions/checkout-7.0.1` | Codex (Supervisor/Reviewer) | 0 kB (workflow only) | Verifies 13, 19, 20; full verifier and nano-size gate required |
 | 2026-07-15 | dependency-maintenance | Repair grouped security/maintenance updates: migrate all `ureq` 3 live adapters plus vault crypto/RNG APIs; preserve bounded bodies, secret confinement, authenticated vault format, and feature isolation | `#93` / `dependabot/cargo/rust-security-and-maintenance-d4da4f9c56` | Codex (Supervisor/Implementer) | 0 kB (444.6 KiB measured; non-nano deps) | Verifies 1-3, 11, 13, 19, 20; no secret exposure, full verifier required |
 | 2026-07-12 | end-to-end-hardening | Sandbox/capability/budget seals; non-cloneable verifier evidence; durable event-log + receipt join; real confined verified-patch-to-draft-PR path; unique daemon task ids; AWS-LC JWT migration; supply-chain policy | `codex/end-to-end-hardening` | Codex (Supervisor/Implementer) | +16.5 KiB local macOS nano (444.6 KiB total, 55.6%) | Enforces 1-3, 6-14, 18-20; completion now requires persisted joined evidence |
 | 2026-06-28 | v0.6/E.1 | Cockpit view core: `build_cockpit` composes TaskDetail/EvidenceSummary(refs-only)/ApprovalForm(op-hash-bound) from the read-model, bounded; renders evidence, mints nothing. Completes Phase E + all of v0.6 | `claude/v06-e1-cockpit` | Claude (Implementer) | 0 kB (crustcore-dev) | Enforces 2, 5, 11, 13, 14; read-model only, op-bound approvals, no minting |
