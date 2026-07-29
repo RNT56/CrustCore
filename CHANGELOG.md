@@ -416,6 +416,14 @@ agent/PR/role/size/invariant audit trail.
 
 ### Changed
 
+- **Rust security and maintenance dependencies (PR #96).** Updated `serde_json`,
+  `jsonwebtoken`, `tree-sitter`, `serde`, `tokio`, `tokio-stream`, `syn`,
+  `quote`, and `proc-macro2` to their current releases. The `jsonwebtoken` 11
+  migration retains the explicit AWS-LC backend and PEM support, while the
+  `syn` 3 migration remains confined to the non-nano tool-macro crate. Full
+  feature builds, GitHub App signing tests, proc-macro tests, dependency audit,
+  and the nano isolation/size gates remain green.
+
 - **GitHub Actions checkout maintenance (PR #95).** Updated every CI and release
   workflow use of `actions/checkout` from immutable SHA-pinned v7.0.0 to v7.0.1.
   The patch release fixes unsafe-PR-check handling, branch whitespace parsing,
@@ -459,6 +467,7 @@ agent/PR/role/size/invariant audit trail.
 
 | Date | Phase/Task | Change | PR / Branch | Agent / Role | Nano Δ | Invariants |
 | --- | --- | --- | --- | --- | --- | --- |
+| 2026-07-29 | dependency-maintenance | Update nine Rust security/maintenance dependencies, including `jsonwebtoken` 11 and `syn` 3, while retaining AWS-LC and non-nano feature isolation | `#96` / `dependabot/cargo/rust-security-and-maintenance-f84a6d97b2` | Codex (Supervisor/Reviewer) | 0 kB (444.6 KiB measured; non-nano deps) | Verifies 1-3, 13, 19, 20; signing, macro, audit, full-feature, and nano gates required |
 | 2026-07-29 | dependency-maintenance | Pin all CI/release checkout steps to `actions/checkout` v7.0.1 and retain immutable-SHA supply-chain policy | `#95` / `dependabot/github_actions/actions/checkout-7.0.1` | Codex (Supervisor/Reviewer) | 0 kB (workflow only) | Verifies 13, 19, 20; full verifier and nano-size gate required |
 | 2026-07-15 | dependency-maintenance | Repair grouped security/maintenance updates: migrate all `ureq` 3 live adapters plus vault crypto/RNG APIs; preserve bounded bodies, secret confinement, authenticated vault format, and feature isolation | `#93` / `dependabot/cargo/rust-security-and-maintenance-d4da4f9c56` | Codex (Supervisor/Implementer) | 0 kB (444.6 KiB measured; non-nano deps) | Verifies 1-3, 11, 13, 19, 20; no secret exposure, full verifier required |
 | 2026-07-12 | end-to-end-hardening | Sandbox/capability/budget seals; non-cloneable verifier evidence; durable event-log + receipt join; real confined verified-patch-to-draft-PR path; unique daemon task ids; AWS-LC JWT migration; supply-chain policy | `codex/end-to-end-hardening` | Codex (Supervisor/Implementer) | +16.5 KiB local macOS nano (444.6 KiB total, 55.6%) | Enforces 1-3, 6-14, 18-20; completion now requires persisted joined evidence |
