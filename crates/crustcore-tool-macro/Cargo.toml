@@ -20,7 +20,7 @@ description = "The #[crust_tool] proc-macro: derives schema + bounded I/O + reda
 proc-macro = true
 
 [dependencies]
-syn = { version = "2", features = ["full"] }
+syn = { version = "3", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
 # Off-by-default UI-test harness for the compile-fail cases. Declared as a normal
