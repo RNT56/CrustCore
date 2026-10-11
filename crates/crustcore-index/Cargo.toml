@@ -37,7 +37,7 @@ crustcore-netproto = { workspace = true }
 # tree-sitter brings its own (audited, upstream) `unsafe` C bindings; our code stays
 # `#![forbid(unsafe_code)]`-safe and only walks the parsed tree with an explicit cursor.
 # Pinned to the same versions crustcore-index-rag's C5-ast backend uses.
-tree-sitter = { version = "0.26", optional = true }
+tree-sitter = { version = "0.27", optional = true }
 tree-sitter-rust = { version = "0.24", optional = true }
 
 [features]
